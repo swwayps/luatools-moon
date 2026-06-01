@@ -1,0 +1,15 @@
+# Build output.
+dist/
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+*~
+
+# Runtime artefacts that may end up in upstream/ if the rebase
+# script is bypassed.
+upstream/luatools/backend/temp_dl/
+upstream/luatools/backend/lua_runtime.log
+upstream/luatools/backend/loadedappids.txt
+upstream/luatools/backend/appidlogs.txt
+upstream/luatools/backend/main_teste_antigo.lua
