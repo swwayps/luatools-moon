@@ -325,4 +325,156 @@ function M.run_silent(exe, args)
   return true
 end
 
+----------------------------------------------------------------------
+-- SLSsteam config integration
+----------------------------------------------------------------------
+--
+-- Append a new appid to the AdditionalApps: list in the SLSsteam
+-- config (~/.config/SLSsteam/config.yaml) so the user no longer has
+-- to edit the YAML by hand after "Add via LuaTools" succeeds.
+--
+-- Behaviour:
+--   * Locates ~/.config/SLSsteam/config.yaml (only path SLSsteam
+--     uses on Linux).
+--   * Idempotent: scans the existing AdditionalApps: block. If the
+--     appid is already there (with or without inline comment) the
+--     function reports already-present and writes nothing.
+--   * Preserves the rest of the file byte-for-byte. The YAML parser
+--     in SLSsteam (yaml-cpp) is whitespace tolerant, but humans are
+--     not — keeping comments and ordering matters.
+--   * Writes through a temp file + rename so SLSsteam's inotify
+--     watch fires once on a complete file rather than on partial
+--     writes.
+--
+-- Returns: true, "added" | true, "already_present" | false, error.
+local function find_slsteam_config()
+  local home = os.getenv("HOME") or ""
+  if home == "" then return nil end
+  local p = home .. "/.config/SLSsteam/config.yaml"
+  local f = io.open(p, "rb")
+  if not f then return nil end
+  f:close()
+  return p
+end
+
+local function read_lines(path)
+  local f = io.open(path, "rb")
+  if not f then return nil end
+  local data = f:read("*a") or ""
+  f:close()
+  local lines, has_trailing_nl = {}, false
+  if #data > 0 and data:sub(-1) == "\n" then has_trailing_nl = true end
+  for line in (data .. "\n"):gmatch("([^\n]*)\n") do
+    lines[#lines + 1] = line
+  end
+  if has_trailing_nl then lines[#lines] = nil end
+  return lines, has_trailing_nl
+end
+
+local function write_lines_atomic(path, lines, has_trailing_nl)
+  local tmp = path .. ".tmp.luatools"
+  local f, err = io.open(tmp, "wb")
+  if not f then return false, err or "open failed" end
+  for i, line in ipairs(lines) do
+    f:write(line)
+    if i < #lines or has_trailing_nl then f:write("\n") end
+  end
+  f:close()
+  -- os.rename is POSIX rename(2): atomic on the same filesystem,
+  -- which is the case when both paths sit under $HOME.
+  local ok, rerr = os.rename(tmp, path)
+  if not ok then
+    os.remove(tmp)
+    return false, rerr or "rename failed"
+  end
+  return true
+end
+
+function M.append_additional_app(appid, comment)
+  appid = tonumber(appid)
+  if not appid then return false, "invalid appid" end
+
+  local path = find_slsteam_config()
+  if not path then return false, "SLSsteam config.yaml not found" end
+
+  local lines, has_trailing_nl = read_lines(path)
+  if not lines then return false, "config read failed" end
+
+  -- Locate the AdditionalApps: header. yaml-cpp accepts either
+  -- inline-list ("AdditionalApps: [1, 2]") or block-list with
+  -- subsequent "  - <appid>" entries. We only handle the block form
+  -- because that's the layout SLSsteam ships and what users edit by
+  -- hand. Inline syntax is converted to block before we touch it.
+  local header_idx = nil
+  for i, line in ipairs(lines) do
+    if line:match("^AdditionalApps%s*:") then
+      header_idx = i
+      break
+    end
+  end
+  if not header_idx then
+    return false, "AdditionalApps: key not found in config.yaml"
+  end
+
+  -- If the header has an inline value (something other than empty or
+  -- a comment after the colon), refuse — rewriting inline lists is
+  -- a different problem and rare enough that we'd rather flag it.
+  local after_colon = lines[header_idx]:match("^AdditionalApps%s*:%s*(.-)%s*$") or ""
+  -- Strip comment portion.
+  local code_only = after_colon:gsub("#.*$", ""):gsub("%s+$", "")
+  if code_only ~= "" then
+    return false, "AdditionalApps: has an inline value, refusing to rewrite"
+  end
+
+  -- Walk forward over block-list entries and collect existing ids.
+  -- A block-list entry under the header is a line that starts with
+  -- whitespace and a "- " marker. Any other non-empty / non-comment
+  -- line ends the block.
+  local last_entry_idx = header_idx
+  local existing = {}
+  local indent = "  "
+  for i = header_idx + 1, #lines do
+    local line = lines[i]
+    local stripped = line:gsub("^%s+", "")
+    if stripped == "" or stripped:match("^#") then
+      -- comments and blanks belong to whoever owns the section that
+      -- follows; only update last_entry_idx for entries proper.
+    else
+      local entry_indent, rest = line:match("^(%s+)%-%s+(.*)$")
+      if not entry_indent then
+        break  -- next top-level key reached
+      end
+      indent = entry_indent
+      last_entry_idx = i
+      local id_str = rest:gsub("#.*$", ""):gsub("%s+$", "")
+      local id_num = tonumber(id_str)
+      if id_num then
+        existing[id_num] = true
+      end
+    end
+  end
+
+  if existing[appid] then
+    return true, "already_present"
+  end
+
+  local entry = indent .. "- " .. tostring(appid)
+  if comment and comment ~= "" then
+    -- Sanitise: collapse whitespace, strip control characters, cap
+    -- length so a long game title doesn't push the file out of
+    -- shape. Comments are advisory only — SLSsteam ignores them.
+    local clean = tostring(comment):gsub("[%c]", " "):gsub("%s+", " ")
+    clean = clean:sub(1, 80):gsub("^%s+", ""):gsub("%s+$", "")
+    if #clean > 0 then entry = entry .. "   # " .. clean end
+  end
+
+  -- Insert immediately after the last entry (or the header itself if
+  -- the block is empty). table.insert at position N+1 appends after N.
+  table.insert(lines, last_entry_idx + 1, entry)
+
+  local ok, err = write_lines_atomic(path, lines, has_trailing_nl)
+  if not ok then return false, err end
+  return true, "added"
+end
+
 return M

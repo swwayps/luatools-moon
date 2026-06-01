@@ -42,6 +42,7 @@ do
       detect_steam_locale = function() return nil end,
       poke_watchers = function() end,
       run_silent = function() return false end,
+      append_additional_app = function() return false, "platform overlay missing" end,
     }
   end
 end
@@ -430,6 +431,12 @@ end
 local add_state = {}
 local morrenus_stats_cache = {}
 local fixes_index_cache = nil
+-- ADAPT-LINUX: tracks AdditionalApps: appends so the inotify-driven
+-- SLSsteam config rewrite runs at most once per appid per session.
+-- Persistence isn't needed: append_additional_app is idempotent
+-- against the on-disk YAML, but skipping repeated attempts cuts log
+-- noise during the frontend's poll loop.
+local additional_apps_registered = {}
 local fixes_index_cache_time = 0
 
 local function json_value(value)
@@ -747,6 +754,24 @@ local function download_and_install(appid, url, api_name)
   end
   poke_steam_config_watchers(appid)
   append_loaded_app(appid, "UNKNOWN (" .. tostring(appid) .. ")")
+  -- ADAPT-LINUX: auto-register the appid in SLSsteam's
+  -- AdditionalApps: list. On Windows the .so reads the same list
+  -- from an INI-ish config; the LuaTools UX has historically been
+  -- "drop the .lua and let the user edit the config". On Linux the
+  -- config lives at ~/.config/SLSsteam/config.yaml and SLSsteam
+  -- watches it via inotify, so a successful append makes the new
+  -- appid live without further user action (Steam restart still
+  -- required for PICS injection to refresh — same as before).
+  -- Idempotent + non-fatal: if the YAML can't be parsed (or already
+  -- has the appid) we just log and continue.
+  local cfg_ok, cfg_msg = platform.append_additional_app(appid,
+    "added via LuaTools")
+  if cfg_ok then
+    log_line("SLSsteam config: " .. tostring(cfg_msg) .. " " .. tostring(appid))
+  else
+    log_line("SLSsteam config update skipped for " .. tostring(appid) ..
+      ": " .. tostring(cfg_msg))
+  end
   add_state[appid] = { status = "done", success = true, api = api_name, bytesRead = #body, totalBytes = #body, manifests = manifests or 0, dlcs = dlcs or 0 }
   return true
 end
@@ -933,7 +958,27 @@ end
 function GetAddViaLuaToolsStatus(args)
   local appid = appid_from_args(args)
   local file_state = appid and normalized_state_json(appid) or nil
-  if file_state then return json_ok('"state":' .. file_state) end
+  if file_state then
+    -- ADAPT-LINUX: when the worker reports done, side-effect once per
+    -- appid: register the appid in SLSsteam's AdditionalApps:.
+    -- Mirror of the same call in the in-process download_and_install
+    -- path (which the legacy frontend takes); the worker-driven path
+    -- needs the hook here because download_worker.sh writes its own
+    -- status file out-of-band.
+    if appid and file_state:match('"status":"done"') and
+       not additional_apps_registered[appid] then
+      additional_apps_registered[appid] = true
+      local cfg_ok, cfg_msg = platform.append_additional_app(appid,
+        "added via LuaTools")
+      if cfg_ok then
+        log_line("SLSsteam config: " .. tostring(cfg_msg) .. " " .. tostring(appid))
+      else
+        log_line("SLSsteam config update skipped for " .. tostring(appid) ..
+          ": " .. tostring(cfg_msg))
+      end
+    end
+    return json_ok('"state":' .. file_state)
+  end
   local state = add_state[appid or 0] or {}
   local parts = {}
   for k, v in pairs(state) do
