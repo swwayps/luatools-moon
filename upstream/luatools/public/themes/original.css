@@ -1,0 +1,50 @@
+:root {
+    --lt-bg-primary: #0b0d10;
+    --lt-bg-secondary: #14181f;
+    --lt-bg-tertiary: rgba(20, 24, 31, 0.96);
+    --lt-bg-hover: rgba(35, 41, 50, 0.96);
+    --lt-bg-container: rgba(16, 19, 24, 0.72);
+    --lt-bg-container-gradient: rgba(12, 14, 18, 0.94), #0b0d10;
+    --lt-accent: #8b949e;
+    --lt-accent-light: #d0d7de;
+    --lt-accent-dark: #6e7681;
+    --lt-border: rgba(139, 148, 158, 0.22);
+    --lt-border-hover: rgba(208, 215, 222, 0.52);
+    --lt-text: #f0f3f6;
+    --lt-text-secondary: #9aa4b2;
+    --lt-gradient: linear-gradient(135deg, #30363d 0%, #6e7681 100%);
+    --lt-gradient-light: linear-gradient(135deg, #484f58 0%, #8b949e 100%);
+    --lt-shadow: rgba(0, 0, 0, 0.38);
+    --lt-shadow-hover: rgba(0, 0, 0, 0.55);
+    --lt-shadow-rgba: rgba(0, 0, 0, 0.32);
+    --lt-rgb: 139, 148, 158;
+}
+
+/* Select dropdown styling for the default midnight theme */
+select {
+    background-color: rgba(20, 24, 31, 0.96) !important;
+    color: #f0f3f6 !important;
+    border: 1px solid rgba(139, 148, 158, 0.22) !important;
+    border-radius: 8px;
+}
+
+select option {
+    background-color: #0b0d10;
+    color: #f0f3f6;
+}
+
+select option:checked {
+    background: linear-gradient(#8b949e, #8b949e);
+    background-color: #8b949e !important;
+    color: #0b0d10 !important;
+}
+
+select:hover {
+    border-color: rgba(208, 215, 222, 0.52) !important;
+}
+
+select:focus {
+    outline: none;
+    border-color: #8b949e !important;
+    box-shadow: 0 0 0 3px rgba(139, 148, 158, 0.18);
+}
