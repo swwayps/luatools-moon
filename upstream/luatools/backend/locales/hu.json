@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Gyors letöltés",
     "settings.general": "Általános",
     "settings.generalDescription": "Globális LuaTools beállítások.",
+    "settings.apis": "API-k",
+    "settings.apisDescription": "Válaszd ki, mely manifest API-kat használhatja a LuaTools.",
     "settings.installedFixes.date": "Telepítve:",
     "settings.installedFixes.delete": "Törlés",
     "settings.installedFixes.deleteConfirm": "Biztosan eltávolítod ezt a javítást? Ez törli a javítófájlokat és futtatja a Steam ellenőrzést.",

@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Rychlé stahování",
     "settings.general": "Obecné",
     "settings.generalDescription": "Globální předvolby LuaTools.",
+    "settings.apis": "API",
+    "settings.apisDescription": "Vyberte, která API manifestů může LuaTools používat.",
     "settings.installedFixes.date": "Nainstalováno:",
     "settings.installedFixes.delete": "Smazat",
     "settings.installedFixes.deleteConfirm": "Opravdu chcete odstranit tuto opravu? Tím se smažou soubory opravy a spustí se ověření Steam.",

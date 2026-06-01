@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Snabb nedladdning",
     "settings.general": "Allmänt",
     "settings.generalDescription": "Globala LuaTools-inställningar.",
+    "settings.apis": "API:er",
+    "settings.apisDescription": "Välj vilka manifest-API:er LuaTools får använda.",
     "settings.installedFixes.date": "Installerad:",
     "settings.installedFixes.delete": "Ta bort",
     "settings.installedFixes.deleteConfirm": "Är du säker på att du vill ta bort denna fix? Detta tar bort fixfilerna och kör Steam-verifiering.",

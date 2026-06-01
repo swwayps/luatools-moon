@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "高速ダウンロード",
     "settings.general": "一般",
     "settings.generalDescription": "LuaToolsのグローバル設定。",
+    "settings.apis": "API",
+    "settings.apisDescription": "LuaToolsが使用できるマニフェストAPIを選択します。",
     "settings.installedFixes.date": "インストール日：",
     "settings.installedFixes.delete": "削除",
     "settings.installedFixes.deleteConfirm": "この修正を削除してもよろしいですか？修正ファイルが削除され、Steamの検証が実行されます。",

@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "تنزيل سريع",
     "settings.general": "عام",
     "settings.generalDescription": "وصف الإعدادات العامة",
+    "settings.apis": "واجهات API",
+    "settings.apisDescription": "اختر واجهات API الخاصة بالمانيفست التي يمكن لـ LuaTools استخدامها.",
     "settings.installedFixes.date": "تاريخ التثبيت:",
     "settings.installedFixes.delete": "حذف",
     "settings.installedFixes.deleteConfirm": "هل أنت متأكد من أنك تريد إزالة هذا الإصلاح؟ سيتم حذف ملفات الإصلاح وتشغيل التحقق من Steam.",

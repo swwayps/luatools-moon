@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Швидке завантаження",
     "settings.general": "Загальні",
     "settings.generalDescription": "Глобальні налаштування LuaTools.",
+    "settings.apis": "API",
+    "settings.apisDescription": "Виберіть, які API маніфестів може використовувати LuaTools.",
     "settings.installedFixes.date": "Встановлено:",
     "settings.installedFixes.delete": "Видалити",
     "settings.installedFixes.deleteConfirm": "Ви впевнені, що хочете видалити це виправлення? Це видалить файли виправлення та запустить перевірку Steam.",

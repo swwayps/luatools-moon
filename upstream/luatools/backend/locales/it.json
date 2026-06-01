@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Download rapido",
     "settings.general": "Generale",
     "settings.generalDescription": "Preferenze globali di LuaTools.",
+    "settings.apis": "API",
+    "settings.apisDescription": "Scegli quali API dei manifest LuaTools può usare.",
     "settings.installedFixes.date": "Installato:",
     "settings.installedFixes.delete": "Elimina",
     "settings.installedFixes.deleteConfirm": "Sei sicuro di voler rimuovere questo fix? Questo eliminerà i file del fix ed eseguirà la verifica di Steam.",

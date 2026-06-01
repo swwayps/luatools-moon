@@ -202,31 +202,80 @@ local function get_morrenus_key()
   return settings:match('"morrenusApiKey"%s*:%s*"([^"]*)"') or ""
 end
 
-local function load_apis()
+local function api_setting_key(name)
+  local key = tostring(name or "api"):lower()
+  key = key:gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
+  if key == "" then key = "api" end
+  return "api_" .. key
+end
+
+local function read_settings_api_overrides()
+  local text = read_file(plugin_root() .. "/backend/data/settings.json")
+  local data = decode_json(text)
+  local values = data and type(data.values) == "table" and data.values or nil
+  local apis = values and type(values.apis) == "table" and values.apis or nil
+  local out = {}
+  if apis then
+    for key, enabled in pairs(apis) do
+      if type(enabled) == "boolean" then out[tostring(key)] = enabled end
+    end
+    return out
+  end
+
+  local api_block = text:match('"apis"%s*:%s*{(.-)}')
+  if api_block then
+    for key, value in api_block:gmatch('"([^"]+)"%s*:%s*([%a]+)') do
+      if value == "true" then out[key] = true end
+      if value == "false" then out[key] = false end
+    end
+  end
+  return out
+end
+
+local function load_api_manifest_entries()
   local path = plugin_root() .. "/backend/api.json"
   local text = read_file(path)
   local data = decode_json(text)
-  local apis = {}
+  local entries = {}
   if data and type(data.api_list) == "table" then
     for _, api in ipairs(data.api_list) do
-      if type(api) == "table" and api.enabled ~= false then
-        apis[#apis + 1] = {
+      if type(api) == "table" then
+        entries[#entries + 1] = {
           name = tostring(api.name or "Unknown"),
           url = tostring(api.url or ""),
           success_code = tonumber(api.success_code or 200) or 200,
+          enabled = api.enabled ~= false,
         }
       end
     end
   end
-  if #apis == 0 then
+  if #entries == 0 then
     for object in text:gmatch("{(.-)}") do
       local name = object:match('"name"%s*:%s*"([^"]+)"')
       local url = object:match('"url"%s*:%s*"([^"]+)"')
       local code = tonumber(object:match('"success_code"%s*:%s*(%d+)') or "200") or 200
-      local enabled = object:match('"enabled"%s*:%s*false')
-      if name and url and not enabled then
-        apis[#apis + 1] = { name = name, url = url, success_code = code }
+      local disabled = object:match('"enabled"%s*:%s*false')
+      if name and url then
+        entries[#entries + 1] = { name = name, url = url, success_code = code, enabled = not disabled }
       end
+    end
+  end
+  return entries
+end
+
+local function load_apis()
+  local overrides = read_settings_api_overrides()
+  local apis = {}
+  for _, api in ipairs(load_api_manifest_entries()) do
+    local setting_key = api_setting_key(api.name)
+    local enabled = overrides[setting_key]
+    if enabled == nil then enabled = api.enabled ~= false end
+    if enabled then
+      apis[#apis + 1] = {
+        name = api.name,
+        url = api.url,
+        success_code = api.success_code,
+      }
     end
   end
   return apis
@@ -1179,7 +1228,22 @@ local function read_settings_values()
     theme = setting_string(text, "theme", "original"),
     fastDownload = setting_bool(text, "fastDownload", true),
     morrenusApiKey = setting_string(text, "morrenusApiKey", ""),
+    apis = read_settings_api_overrides(),
   }
+end
+
+local function api_settings_json(values)
+  local apis = values and type(values.apis) == "table" and values.apis or {}
+  local keys = {}
+  for key, enabled in pairs(apis) do
+    if type(enabled) == "boolean" then keys[#keys + 1] = tostring(key) end
+  end
+  table.sort(keys)
+  local items = {}
+  for _, key in ipairs(keys) do
+    items[#items + 1] = json_string(key) .. ":" .. (apis[key] == true and "true" or "false")
+  end
+  return "{" .. table.concat(items, ",") .. "}"
 end
 
 local function settings_values_json(values)
@@ -1189,7 +1253,8 @@ local function settings_values_json(values)
     ',"donateKeys":' .. (values.donateKeys ~= false and "true" or "false") ..
     ',"theme":' .. json_string(values.theme or "original") ..
     ',"fastDownload":' .. (values.fastDownload ~= false and "true" or "false") ..
-    ',"morrenusApiKey":' .. json_string(values.morrenusApiKey or "") .. "}}"
+    ',"morrenusApiKey":' .. json_string(values.morrenusApiKey or "") ..
+    '},"apis":' .. api_settings_json(values) .. "}"
 end
 
 local function write_settings_values(values)
@@ -1226,14 +1291,34 @@ local function settings_schema_json()
       locale_choices[#locale_choices + 1] = '{"value":' .. json_string(code) .. ',"label":' .. json_string(code) .. "}"
     end
   end
-  return '[{"key":"general","label":"General","description":"Global LuaTools preferences.","options":[' ..
+  local groups = {}
+  groups[#groups + 1] = '{"key":"general","label":"General","description":"Global LuaTools preferences.","options":[' ..
     '{"key":"useSteamLanguage","label":"Use Steam Language","type":"toggle","description":"Use the Steam client language for LuaTools.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
     '{"key":"language","label":"Language","type":"select","description":"Choose the language used by LuaTools.","default":"en","choices":[' .. table.concat(locale_choices, ",") .. '],"requiresRestart":false,"metadata":{"dynamicChoices":"locales"}},' ..
     '{"key":"donateKeys","label":"Donate Keys","type":"toggle","description":"Allow LuaTools to donate spare Steam keys.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
     '{"key":"theme","label":"Theme","type":"select","description":"Choose the color theme for LuaTools interface.","default":"original","choices":' .. themes_json() .. ',"requiresRestart":false,"metadata":{"dynamicChoices":"themes"}},' ..
     '{"key":"fastDownload","label":"Fast Download","type":"toggle","description":"Automatically choose the first available source when adding a game.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
     '{"key":"morrenusApiKey","label":"Morrenus API Key","type":"text","description":"API Key required to use Sadie Source. Get from hubcapmanifest.com","default":"","choices":[],"requiresRestart":false,"metadata":{"placeholder":"Enter your API key..."}}' ..
-    "]}]"
+    "]}"
+
+  local api_options = {}
+  for _, api in ipairs(load_api_manifest_entries()) do
+    local name = tostring(api.name or "Unknown")
+    api_options[#api_options + 1] =
+      '{"key":' .. json_string(api_setting_key(name)) ..
+      ',"label":' .. json_string(name) ..
+      ',"type":"toggle","description":' ..
+      json_string("Use " .. name .. " when checking and downloading Lua manifests.") ..
+      ',"default":' .. (api.enabled ~= false and "true" or "false") ..
+      ',"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"On","noLabel":"Off"}}'
+  end
+  if #api_options > 0 then
+    groups[#groups + 1] =
+      '{"key":"apis","label":"APIs","description":"Choose which manifest APIs LuaTools can use.","options":[' ..
+      table.concat(api_options, ",") .. "]}"
+  end
+
+  return "[" .. table.concat(groups, ",") .. "]"
 end
 
 local reg_get_value_ready = false
@@ -1290,6 +1375,12 @@ local function apply_setting_payload(values, payload)
   local text = type(payload) == "string" and payload or ""
   if type(payload) == "table" then
     local general = type(payload.general) == "table" and payload.general or payload
+    if type(payload.apis) == "table" then
+      values.apis = values.apis or {}
+      for key, enabled in pairs(payload.apis) do
+        values.apis[tostring(key)] = enabled == true
+      end
+    end
     if general.useSteamLanguage ~= nil then values.useSteamLanguage = general.useSteamLanguage == true end
     if general.language ~= nil then
       values.language = normalize_locale_code(general.language)
@@ -1301,6 +1392,18 @@ local function apply_setting_payload(values, payload)
     if general.morrenusApiKey ~= nil then values.morrenusApiKey = tostring(general.morrenusApiKey) end
     return values
   end
+  local decoded = decode_json(text)
+  if type(decoded) == "table" then return apply_setting_payload(values, decoded) end
+
+  values.apis = values.apis or {}
+  local api_block = text:match('"apis"%s*:%s*{(.-)}')
+  if api_block then
+    for key, value in api_block:gmatch('"([^"]+)"%s*:%s*([%a]+)') do
+      if value == "true" then values.apis[key] = true end
+      if value == "false" then values.apis[key] = false end
+    end
+  end
+
   local function maybe_bool(key)
     local v = setting_bool(text, key, nil)
     if v ~= nil then values[key] = v end
@@ -1325,7 +1428,7 @@ end
 function ApplySettingsChanges(args)
   local values = read_settings_values()
   local payload = args
-  if type(args) == "table" then payload = args.changes or args.changesJson or args.general or args end
+  if type(args) == "table" then payload = args.changes or args.changesJson or args end
   values = apply_setting_payload(values, payload)
   write_settings_values(values)
   local lang, strings = translations_json(current_settings_language(values))

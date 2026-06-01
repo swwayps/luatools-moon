@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "ดาวน์โหลดด่วน",
     "settings.general": "ทั่วไป",
     "settings.generalDescription": "การตั้งค่าทั่วไปของ LuaTools",
+    "settings.apis": "API",
+    "settings.apisDescription": "เลือก API ของแมนิเฟสต์ที่ LuaTools สามารถใช้ได้",
     "settings.installedFixes.date": "ติดตั้งเมื่อ:",
     "settings.installedFixes.delete": "ลบ",
     "settings.installedFixes.deleteConfirm": "คุณแน่ใจหรือไม่ว่าต้องการลบตัวแก้ไขนี้? การดำเนินการนี้จะลบไฟล์แก้ไขและตรวจสอบผ่าน Steam",

@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Быстрая загрузка",
     "settings.general": "Общие",
     "settings.generalDescription": "Основные настройки LuaTools",
+    "settings.apis": "API",
+    "settings.apisDescription": "Выберите, какие API манифестов может использовать LuaTools.",
     "settings.installedFixes.date": "Установлено:",
     "settings.installedFixes.delete": "Удалить",
     "settings.installedFixes.deleteConfirm": "Вы уверены, что хотите удалить это исправление? Это удалит файлы исправления и запустит проверку Steam.",

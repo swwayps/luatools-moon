@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Download Rápido",
     "settings.general": "Geral",
     "settings.generalDescription": "Preferências globais do LuaTools.",
+    "settings.apis": "APIs",
+    "settings.apisDescription": "Escolha quais APIs de manifest o LuaTools pode usar.",
     "settings.installedFixes.date": "Instalado:",
     "settings.installedFixes.delete": "Eliminar",
     "settings.installedFixes.deleteConfirm": "Tens a certeza de que queres remover esta correção? Isto irá eliminar os ficheiros de correção e executar a verificação Steam.",

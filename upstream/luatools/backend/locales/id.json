@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Unduhan Cepat",
     "settings.general": "Umum",
     "settings.generalDescription": "Preferensi Global LuaTools.",
+    "settings.apis": "API",
+    "settings.apisDescription": "Pilih API manifest mana yang boleh digunakan LuaTools.",
     "settings.installedFixes.date": "Terpasang:",
     "settings.installedFixes.delete": "Hapus",
     "settings.installedFixes.deleteConfirm": "Apakah Anda yakin ingin menghapus perbaikan ini? Ini akan menghapus file perbaikan dan menjalankan verifikasi Steam.",

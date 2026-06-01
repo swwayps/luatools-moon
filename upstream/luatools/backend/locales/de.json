@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Schneller Download",
     "settings.general": "Allgemein",
     "settings.generalDescription": "Allgemeine LuaTools-Einstellungen",
+    "settings.apis": "APIs",
+    "settings.apisDescription": "Wähle aus, welche Manifest-APIs LuaTools verwenden darf.",
     "settings.installedFixes.date": "Datum",
     "settings.installedFixes.delete": "Löschen",
     "settings.installedFixes.deleteConfirm": "Bist du sicher, dass du diesen Fix löschen möchtest?",

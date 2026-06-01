@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Tải xuống nhanh",
     "settings.general": "Chung",
     "settings.generalDescription": "Tùy chọn chung của LuaTools.",
+    "settings.apis": "API",
+    "settings.apisDescription": "Chọn API manifest mà LuaTools có thể sử dụng.",
     "settings.installedFixes.date": "Đã cài đặt:",
     "settings.installedFixes.delete": "Xóa",
     "settings.installedFixes.deleteConfirm": "Bạn có chắc muốn xóa bản sửa lỗi này? Thao tác này sẽ xóa các tệp sửa lỗi và chạy xác minh Steam.",

@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "快速下载",
     "settings.general": "通用",
     "settings.generalDescription": "LuaTools全局偏好设置。",
+    "settings.apis": "API",
+    "settings.apisDescription": "选择 LuaTools 可以使用的清单 API。",
     "settings.installedFixes.date": "安装时间：",
     "settings.installedFixes.delete": "删除",
     "settings.installedFixes.deleteConfirm": "您确定要删除此修复吗？这将删除修复文件并运行Steam验证。",

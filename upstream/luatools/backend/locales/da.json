@@ -173,6 +173,8 @@
     "settings.fastDownload.label": "Hurtig download",
     "settings.general": "Generelt",
     "settings.generalDescription": "Generelle LuaTools-indstillinger",
+    "settings.apis": "API'er",
+    "settings.apisDescription": "Vælg hvilke manifest-API'er LuaTools må bruge.",
     "settings.installedFixes.date": "Dato",
     "settings.installedFixes.delete": "Slet",
     "settings.installedFixes.deleteConfirm": "Er du sikker på, at du vil slette denne rettelse?",

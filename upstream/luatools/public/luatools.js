@@ -2036,9 +2036,15 @@
                       )
                         .then(function () {
                           try {
+                            const topRemoveBtn = document.querySelector(
+                              ".luatools-remove-button",
+                            );
+                            if (topRemoveBtn) topRemoveBtn.remove();
                             window.__LuaToolsButtonInserted = false;
+                            window.__LuaToolsRemoveInserted = false;
                             window.__LuaToolsPresenceCheckInFlight = false;
                             window.__LuaToolsPresenceCheckAppId = undefined;
+                            lastButtonCheckTime = 0;
                             addLuaToolsButton();
                             const successText = t(
                               "menu.remove.success",
@@ -6157,7 +6163,8 @@
       style.id = "luatools-spacing-styles";
       style.textContent = `
                 .luatools-restart-button { margin-left: 6px !important; margin-right: 6px !important; }
-                .luatools-button { margin-right: 0 !important; position: relative !important; }
+                .luatools-button,
+                .luatools-remove-button { margin-right: 0 !important; position: relative !important; }
                 .luatools-pills-container {
                     position: absolute !important;
                     top: -25px !important;
@@ -6220,9 +6227,132 @@
           span.textContent = addViaText;
         }
       }
+
+      const removeBtn = document.querySelector(".luatools-remove-button");
+      if (removeBtn) {
+        const removeText = t("menu.removeLuaTools", "Remove via LuaTools");
+        removeBtn.title = removeText;
+        removeBtn.setAttribute("data-tooltip-text", removeText);
+        const span = removeBtn.querySelector("span");
+        if (span) {
+          span.textContent = removeText;
+        }
+      }
     } catch (err) {
       backendLog("LuaTools: updateButtonTranslations error: " + err);
     }
+  }
+
+  function currentStoreAppId() {
+    const match =
+      window.location.href.match(/https:\/\/store\.steampowered\.com\/app\/(\d+)/) ||
+      window.location.href.match(/https:\/\/steamcommunity\.com\/app\/(\d+)/);
+    return match ? parseInt(match[1], 10) : NaN;
+  }
+
+  function insertRemoveLuaToolsButton(container, referenceBtn, appid) {
+    if (
+      !container ||
+      isNaN(appid) ||
+      document.querySelector(".luatools-remove-button")
+    ) {
+      return;
+    }
+
+    ensureStyles();
+    const removeBtn = document.createElement("a");
+    if (referenceBtn && referenceBtn.className) {
+      const baseClasses = String(referenceBtn.className)
+        .split(/\s+/)
+        .filter(function (className) {
+          return (
+            className &&
+            className !== "luatools-button" &&
+            className !== "luatools-restart-button" &&
+            className !== "luatools-remove-button"
+          );
+        })
+        .join(" ");
+      removeBtn.className = baseClasses + " luatools-remove-button";
+    } else {
+      removeBtn.className = "btnv6_blue_hoverfade btn_medium luatools-remove-button";
+    }
+    removeBtn.href = "#";
+    const removeText = t("menu.removeLuaTools", "Remove via LuaTools");
+    removeBtn.title = removeText;
+    removeBtn.setAttribute("data-tooltip-text", removeText);
+    const span = document.createElement("span");
+    span.textContent = removeText;
+    removeBtn.appendChild(span);
+
+    try {
+      if (referenceBtn) {
+        const cs = window.getComputedStyle(referenceBtn);
+        removeBtn.style.marginLeft = cs.marginLeft;
+        removeBtn.style.marginRight = cs.marginRight;
+      }
+    } catch (_) { }
+
+    removeBtn.addEventListener("click", function (e) {
+      e.preventDefault();
+      if (removeBtn.dataset.busy === "1") return;
+
+      showLuaToolsConfirm(
+        "LuaTools",
+        t("menu.remove.confirm", "Remove via LuaTools for this game?"),
+        function () {
+          removeBtn.dataset.busy = "1";
+          removeBtn.style.opacity = "0.65";
+          Millennium.callServerMethod("luatools", "DeleteLuaToolsForApp", {
+            appid,
+            contentScriptQuery: "",
+          })
+            .then(function (res) {
+              const payload = typeof res === "string" ? JSON.parse(res) : res;
+              if (!payload || payload.success !== true) {
+                throw new Error(
+                  payload && payload.error
+                    ? payload.error
+                    : t("menu.remove.failure", "Failed to remove LuaTools."),
+                );
+              }
+              removeBtn.remove();
+              window.__LuaToolsRemoveInserted = false;
+              window.__LuaToolsButtonInserted = false;
+              window.__LuaToolsPresenceCheckInFlight = false;
+              window.__LuaToolsPresenceCheckAppId = undefined;
+              lastButtonCheckTime = 0;
+              addLuaToolsButton();
+              ShowLuaToolsAlert(
+                "LuaTools",
+                t("menu.remove.success", "LuaTools removed for this app."),
+              );
+            })
+            .catch(function (err) {
+              removeBtn.dataset.busy = "0";
+              removeBtn.style.opacity = "";
+              ShowLuaToolsAlert(
+                "LuaTools",
+                err && err.message
+                  ? err.message
+                  : t("menu.remove.failure", "Failed to remove LuaTools."),
+              );
+            });
+        },
+        function () { },
+      );
+    });
+
+    const restartExisting = container.querySelector(".luatools-restart-button");
+    if (restartExisting && restartExisting.after) {
+      restartExisting.after(removeBtn);
+    } else if (referenceBtn && referenceBtn.after) {
+      referenceBtn.after(removeBtn);
+    } else {
+      container.appendChild(removeBtn);
+    }
+    window.__LuaToolsRemoveInserted = true;
+    backendLog("LuaTools remove button inserted");
   }
 
   // Function to add the LuaTools button
@@ -6245,6 +6375,7 @@
       window.__LuaToolsLastUrl = currentUrl;
       window.__LuaToolsButtonInserted = false;
       window.__LuaToolsRestartInserted = false;
+      window.__LuaToolsRemoveInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
       window.__LuaToolsPresenceCheckInFlight = false;
@@ -6475,8 +6606,23 @@
                   backendLog(
                     "LuaTools already present for this app; not inserting button",
                   );
+                  const staleAdd = document.querySelector(".luatools-button");
+                  if (staleAdd) {
+                    staleAdd.remove();
+                    window.__LuaToolsButtonInserted = false;
+                  }
+                  insertRemoveLuaToolsButton(
+                    steamdbContainer,
+                    referenceBtn,
+                    appid,
+                  );
                   window.__LuaToolsPresenceCheckInFlight = false;
                   return; // do not insert
+                }
+                const staleRemove = document.querySelector(".luatools-remove-button");
+                if (staleRemove) {
+                  staleRemove.remove();
+                  window.__LuaToolsRemoveInserted = false;
                 }
                 // Re-check in case another caller inserted during async
                 if (
@@ -7698,6 +7844,12 @@
               if (btnEl && btnEl.parentElement) {
                 btnEl.parentElement.removeChild(btnEl);
               }
+              window.__LuaToolsButtonInserted = false;
+              window.__LuaToolsRemoveInserted = false;
+              window.__LuaToolsPresenceCheckInFlight = false;
+              window.__LuaToolsPresenceCheckAppId = undefined;
+              lastButtonCheckTime = 0;
+              setTimeout(addLuaToolsButton, 250);
             }
             if (st.status === "failed") {
               // Mark all APIs as not found when failed (unless they have error status)
@@ -7783,6 +7935,7 @@
       // URL changed - reset flags and update buttons
       window.__LuaToolsButtonInserted = false;
       window.__LuaToolsRestartInserted = false;
+      window.__LuaToolsRemoveInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
 
