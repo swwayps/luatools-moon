@@ -1,4 +1,4 @@
-# slsteammoon-luatools
+# slsteammoon-ltsteamplugin
 
 Linux port of [LuaTools](https://github.com/skyflarefox/plugin)
 (`luatools.zip` 2.7.5 by Skyflare / madoiscool), the Millennium-based
@@ -17,7 +17,7 @@ Compatible with **Millennium v3.1.0+** (Lua-only backend).
 ## Repository layout
 
 ```
-slsteammoon-luatools/
+slsteammoon-ltsteamplugin/
 ├── upstream/luatools/         pristine vendor of luatools.zip 2.7.5
 │   ├── plugin.json            (kept verbatim)
 │   ├── backend/               (main.lua, .ps1 workers, locales, ...)
@@ -96,7 +96,7 @@ overlay loads.
 
 | Surface | Status | Notes |
 |---|---|---|
-| Add via LuaTools (download + install Lua + manifests) | complete | curl + unzip, drops files in `config/stplug-in/` and `depotcache/` |
+| Add via LuaTools (download + install Lua + manifests) | complete | curl + unzip, drops files in `config/stplug-in/` and `depotcache/`. Lua packs that ship only the .lua trigger an automatic binary `.manifest` prefetch from `manifest.steam.run` + Steam CDN so first-install works without the slsteam-moon hook. |
 | Restart Steam | complete | shutdown + relaunch, detects slsteam-moon launcher |
 | Locale detection (Steam UI language → LuaTools translations) | complete | parses registry.vdf |
 | Open game folder | complete | xdg-open |

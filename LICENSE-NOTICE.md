@@ -1,6 +1,6 @@
 # License notice
 
-`slsteammoon-luatools` is a Linux port and integration layer for two
+`slsteammoon-ltsteamplugin` is a Linux port and integration layer for two
 upstream projects. Each carries its own license; this notice records
 the provenance so contributors can keep the boundaries clear.
 

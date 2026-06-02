@@ -76,14 +76,14 @@ if [[ -d "$UPSTREAM/backend/data" ]]; then
   cp -R "$UPSTREAM/backend/data/." "$OUT/backend/data/"
 fi
 
-# 5. update.json — rewrite to point at the slsteammoon-luatools repo
+# 5. update.json — rewrite to point at the slsteammoon-ltsteamplugin repo
 #    so the in-app update check pulls from this fork rather than the
 #    Windows skyflarefox release.
 cat > "$OUT/backend/update.json" <<'EOF'
 {
   "github": {
     "owner": "nwrafael",
-    "repo": "slsteammoon-luatools",
+    "repo": "slsteammoon-ltsteamplugin",
     "asset_name": "luatools-linux.zip"
   }
 }

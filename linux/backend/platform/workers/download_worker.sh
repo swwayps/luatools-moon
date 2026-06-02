@@ -137,6 +137,53 @@ done < <(find "$EXTRACT_DIR" -type f -iname '*.manifest')
 
 cp -f "$LUA_FILE" "$TARGET_DIR/${APP_ID}.lua" || fail "Failed to install lua file"
 
+# ADAPT-LINUX: pre-fetch any manifest whose depot+gid is declared in
+# the lua but whose `.manifest` file is missing from the pack. Steam
+# Linux 2026 has no working in-process inline-rewrite path for the
+# `ContentServerDirectory.GetManifestRequestCode#1` call (the
+# slsteam-moon hook lands but the rewrite isn't honoured by
+# downstream consumers — see SLSsteam-fork HANDOFF.md "Phase 4.5"),
+# so the supported way to handle lua packs that ship only the .lua
+# (Morrenus, SkyApi, etc) is to download the binary manifest from the
+# public manifest-request-code provider chain + Steam CDN and drop
+# it into depotcache/ before the user clicks Install. This makes
+# Steam fall straight through to the cached file lookup and never
+# emit `BYldRequestDepotManifest ... Failed`.
+PREFETCHED=0
+PREFETCH_FAILED=0
+PREFETCH_SCRIPT="${PLUGIN_ROOT}/backend/platform/workers/manifest_prefetch.sh"
+if [[ -x "$PREFETCH_SCRIPT" ]]; then
+  while IFS=$'\t' read -r depot_id gid; do
+    [[ -z "$depot_id" || -z "$gid" ]] && continue
+    if [[ -f "$DEPOT_DIR/${depot_id}_${gid}.manifest" ]]; then
+      continue
+    fi
+    if "$PREFETCH_SCRIPT" --depot-id "$depot_id" --gid "$gid" \
+         --target-dir "$DEPOT_DIR" --quiet >>"$CURL_LOG" 2>&1
+    then
+      PREFETCHED=$((PREFETCHED + 1))
+    else
+      rc=$?
+      if [[ "$rc" == "5" ]]; then
+        # Already present (race or doubled lua entry); not a failure.
+        :
+      else
+        PREFETCH_FAILED=$((PREFETCH_FAILED + 1))
+        echo "[prefetch] depot=$depot_id gid=$gid rc=$rc" >> "$CURL_LOG"
+      fi
+    fi
+  done < <(
+    # Match `setManifestid(<depot>, "<gid>"...)` and
+    # `setManifestid(<depot>, <gid>, ...)`. Some lua packs use
+    # one form, some use the other. Sed (BRE) keeps this portable
+    # across mawk-only systems where gawk's `match(s, re, arr)`
+    # third-arg form isn't available.
+    sed -nE 's/.*[Ss]et[Mm]anifest[Ii]d[[:space:]]*\([[:space:]]*([0-9]+)[[:space:]]*,[[:space:]]*"?([0-9]+)"?.*/\1\t\2/p' "$LUA_FILE" 2>/dev/null \
+      | sort -u
+  )
+fi
+MANIFESTS=$((MANIFESTS + PREFETCHED))
+
 # Best-effort DLC count by scanning the lua for addappid(<id>).
 DLCS=$(grep -oiE 'addappid[[:space:]]*\([[:space:]]*[0-9]+' "$LUA_FILE" 2>/dev/null \
   | grep -oE '[0-9]+' \
@@ -148,5 +195,5 @@ DLCS=$(grep -oiE 'addappid[[:space:]]*\([[:space:]]*[0-9]+' "$LUA_FILE" 2>/dev/n
 rm -f -- "$ZIP_PATH"
 rm -rf -- "$EXTRACT_DIR"
 
-write_status "{\"status\":\"done\",\"success\":true,\"api\":\"$(json_escape "$API_NAME")\",\"bytesRead\":${BYTES},\"totalBytes\":${BYTES},\"manifests\":${MANIFESTS},\"dlcs\":${DLCS}}"
+write_status "{\"status\":\"done\",\"success\":true,\"api\":\"$(json_escape "$API_NAME")\",\"bytesRead\":${BYTES},\"totalBytes\":${BYTES},\"manifests\":${MANIFESTS},\"dlcs\":${DLCS},\"prefetched\":${PREFETCHED:-0},\"prefetchFailed\":${PREFETCH_FAILED:-0}}"
 exit 0

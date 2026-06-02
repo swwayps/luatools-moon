@@ -17,7 +17,7 @@
 # This Linux port is intentionally stubbed: GameBypasses / OnlineFix
 # zips are Windows-targeted and most won't apply meaningfully under
 # Proton without per-fix logic (DLL drop-ins, registry pokes,
-# winetricks calls). Until that's modelled in slsteammoon-luatools,
+# winetricks calls). Until that's modelled in slsteammoon-ltsteamplugin,
 # the worker reports a structured error so the frontend's "Apply Fix"
 # button surfaces a clear message instead of hanging.
 #
