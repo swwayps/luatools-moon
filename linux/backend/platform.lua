@@ -477,4 +477,55 @@ function M.append_additional_app(appid, comment)
   return true, "added"
 end
 
+function M.remove_additional_app(appid)
+  appid = tonumber(appid)
+  if not appid then return false, "invalid appid" end
+
+  local path = find_slsteam_config()
+  if not path then return false, "SLSsteam config.yaml not found" end
+
+  local lines, has_trailing_nl = read_lines(path)
+  if not lines then return false, "config read failed" end
+
+  local header_idx = nil
+  for i, line in ipairs(lines) do
+    if line:match("^AdditionalApps%s*:") then
+      header_idx = i
+      break
+    end
+  end
+  if not header_idx then return false, "AdditionalApps: key not found" end
+
+  local after_colon = lines[header_idx]:match("^AdditionalApps%s*:%s*(.-)%s*$") or ""
+  local code_only = after_colon:gsub("#.*$", ""):gsub("%s+$", "")
+  if code_only ~= "" then return false, "AdditionalApps: has an inline value" end
+
+  local target_idx = nil
+  for i = header_idx + 1, #lines do
+    local line = lines[i]
+    local stripped = line:gsub("^%s+", "")
+    if stripped == "" or stripped:match("^#") then
+      -- skip comments/blanks
+    else
+      local entry_indent, rest = line:match("^(%s+)%-%s+(.*)$")
+      if not entry_indent then break end
+      local id_str = rest:gsub("#.*$", ""):gsub("%s+$", "")
+      local id_num = tonumber(id_str)
+      if id_num == appid then
+        target_idx = i
+        break
+      end
+    end
+  end
+
+  if not target_idx then
+    return true, "not_present"
+  end
+
+  table.remove(lines, target_idx)
+  local ok, err = write_lines_atomic(path, lines, has_trailing_nl)
+  if not ok then return false, err end
+  return true, "removed"
+end
+
 return M

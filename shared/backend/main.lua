@@ -43,6 +43,7 @@ do
       poke_watchers = function() end,
       run_silent = function() return false end,
       append_additional_app = function() return false, "platform overlay missing" end,
+      remove_additional_app = function() return false, "platform overlay missing" end,
     }
   end
 end
@@ -1024,6 +1025,17 @@ end
 function DeleteLuaToolsForApp(args)
   local appid = appid_from_args(args)
   if not appid then return json_fail("Invalid appid") end
+
+  if type(platform.spawn_worker_sync) == "function" then
+    platform.spawn_worker_sync(plugin_root(), "remove_worker", {
+      "--app-id", tostring(appid),
+      "--steam-path", steam_path()
+    }, nil, 10)
+  end
+  if type(platform.remove_additional_app) == "function" then
+    platform.remove_additional_app(appid)
+  end
+
   -- ADAPT-LINUX: stplug-in path uses pjoin.
   local base = pjoin(steam_path(), "config", "stplug-in")
   local deleted = {}
