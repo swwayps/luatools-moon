@@ -1,6 +1,6 @@
 # slsteammoon-ltsteamplugin
 
-A Linux port of `ltsteamplugin` for the Millennium framework. It serves as an exclusive integration layer that fetches manifest packs and installs them specifically for [slsteam-moon](https://github.com/nwrafael/slsteam-moon) to consume natively on Linux.
+Linux port of the `ltsteamplugin` Millennium plugin, built exclusively for the [slsteam-moon](https://github.com/nwrafael/slsteam-moon) project. It serves as an integration layer that fetches manifest packs and installs them for slsteam-moon to consume natively on Linux.
 
 ## Credits
 
