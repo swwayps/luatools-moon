@@ -459,7 +459,14 @@ stop_steam() {
 cleanup_previous_install() {
 	local steam_root="$HOME/.steam/steam"
 
-	# --- Old Millennium plugin directories (both historical names) --------
+	# --- Old Millennium plugin directories --------------------------------
+	# The previous port and this plugin both install under a dir named
+	# "luatools" (the old "LuaToolsLinux" name is also possible). We only
+	# remove the OLD port here — detected by its Python backend
+	# (backend/main.py / a .venv). Our own plugin (Lua backend, has
+	# backend/platform.lua) is left in place so install_plugin can update it
+	# while preserving the user's settings. The "LuaToolsLinux" name is
+	# always the old port, so it's removed unconditionally.
 	local roots=(
 		"$HOME/.local/share/millennium/plugins"
 		"$HOME/.millennium/plugins"
@@ -467,14 +474,19 @@ cleanup_previous_install() {
 		"$HOME/.steam/steam/steamui/millennium/plugins"
 		"$HOME/.local/share/Steam/millennium/plugins"
 	)
-	local root name
+	local root name p
 	for root in "${roots[@]}"; do
 		for name in luatools LuaToolsLinux; do
-			if [ -d "$root/$name" ]; then
-				log_step "$(L "Removing old plugin: $root/$name" \
-				             "Removendo plugin antigo: $root/$name")"
-				rm -rf "$root/$name" 2>/dev/null || true
+			p="$root/$name"
+			[ -d "$p" ] || continue
+			# Keep our own Lua-backend plugin (updated later in place).
+			if [ "$name" = "luatools" ] \
+			   && [ ! -f "$p/backend/main.py" ] && [ ! -d "$p/.venv" ] \
+			   && [ -f "$p/backend/platform.lua" ]; then
+				continue
 			fi
+			log_step "$(L "Removing old plugin: $p" "Removendo plugin antigo: $p")"
+			rm -rf "$p" 2>/dev/null || true
 		done
 	done
 
@@ -669,6 +681,16 @@ install_plugin() {
 	mkdir -p "$root"
 	dest="$root/$PLUGIN_NAME"
 
+	# Preserve the user's plugin data across reinstalls/updates. The plugin
+	# stores its settings (language, theme, API keys, ...) and the donated
+	# appid list inside its own backend/data dir, which we are about to
+	# replace. Stash them and restore after extracting the new version.
+	local data_bak=""
+	if [ -d "$dest/backend/data" ]; then
+		data_bak="$(mktemp -d)"
+		cp -a "$dest/backend/data/." "$data_bak/" 2>/dev/null || true
+	fi
+
 	# The zip contains a top-level luatools/ dir. Replace any prior install.
 	rm -rf "$dest"
 	log_info "$(L "Installing plugin to $dest" "Instalando o plugin em $dest")"
@@ -680,7 +702,16 @@ install_plugin() {
 	                            "plugin.json não encontrado no pacote do plugin.")"
 	cp -r "$(dirname "$inner")" "$dest"
 
-	log_success "$(L "Plugin installed" "Plugin instalado")"
+	# Restore the user's preserved data over the freshly extracted defaults.
+	if [ -n "$data_bak" ]; then
+		mkdir -p "$dest/backend/data"
+		cp -a "$data_bak/." "$dest/backend/data/" 2>/dev/null || true
+		rm -rf "$data_bak"
+		log_success "$(L "Plugin updated (settings preserved)" \
+		             "Plugin atualizado (configurações preservadas)")"
+	else
+		log_success "$(L "Plugin installed" "Plugin instalado")"
+	fi
 
 	enable_plugin_in_config
 }
