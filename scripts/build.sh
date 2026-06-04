@@ -237,7 +237,13 @@ if command -v luajit >/dev/null 2>&1; then
   echo "[build] lua syntax OK"
 fi
 
-# 6. Optional zip.
+# 6. Optional zip. The archive must contain the plugin contents at its
+#    ROOT (plugin.json, backend/, public/, .millennium/ directly), NOT
+#    wrapped in a luatools/ dir. This matches the upstream piqseu release
+#    layout so the in-plugin auto-updater (which does
+#    `unzip -d <plugin_dir>`) overwrites the install in place instead of
+#    nesting it under <plugin_dir>/luatools/. install.sh locates
+#    plugin.json by search, so it handles this layout too.
 if [[ "$MAKE_ZIP" -eq 1 ]]; then
   if ! command -v zip >/dev/null 2>&1; then
     echo "[build] zip not found; skipping --zip" >&2
@@ -245,8 +251,8 @@ if [[ "$MAKE_ZIP" -eq 1 ]]; then
     DIST_DIR="$(dirname "$OUT")"
     BUNDLE="$DIST_DIR/luatools-linux.zip"
     rm -f "$BUNDLE"
-    (cd "$DIST_DIR" && zip -qr "$BUNDLE" "$(basename "$OUT")")
-    echo "[build] wrote $BUNDLE"
+    (cd "$OUT" && zip -qr "$BUNDLE" .)
+    echo "[build] wrote $BUNDLE (contents at root)"
   fi
 fi
 

@@ -700,7 +700,10 @@ install_plugin() {
 	inner="$(find "$tmp/extracted" -maxdepth 2 -name plugin.json -type f | head -n1)"
 	[ -n "$inner" ] || fail "$(L "plugin.json not found in the plugin archive." \
 	                            "plugin.json não encontrado no pacote do plugin.")"
-	cp -r "$(dirname "$inner")" "$dest"
+	# Copy the CONTENTS of the dir holding plugin.json into dest, so this
+	# works whether the zip puts files at the root or nests them in a dir.
+	mkdir -p "$dest"
+	cp -a "$(dirname "$inner")/." "$dest/"
 
 	# Restore the user's preserved data over the freshly extracted defaults.
 	if [ -n "$data_bak" ]; then
