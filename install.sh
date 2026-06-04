@@ -337,6 +337,107 @@ install_libssl_i386() {
 }
 
 # ============================================================================
+# Cleanup: remove leftovers from the old LuaToolsLinux / headcrab port
+# ============================================================================
+# The previous Linux port (Star123451/LuaToolsLinux + ciscosweater/aglairdev
+# enter-the-wired + Deadboy666/h3adcr-b) drops files that fight this stack:
+#   - an old Millennium plugin dir (with a Python .venv)
+#   - a headcrab-patched ~/.steam/steam/steam.sh + client.sh that hijacks
+#     Steam's bootstrapper
+#   - a steam.cfg with BootStrapperInhibitAll=enable (blocks Steam updates)
+#   - ~/.headcrab, a headcrab desktop entry/icon, and CloudRedirect
+#   - an enter-the-wired SLSsteam install at ~/.local/share/SLSsteam
+#   - on Arch, a system slssteam / slssteam-git package
+#
+# This is best-effort: every removal is guarded and never aborts the install.
+# The user's depot keys (~/.config/SLSsteam) and ACCELA are left untouched.
+cleanup_previous_install() {
+	local steam_root="$HOME/.steam/steam"
+
+	# --- Old Millennium plugin directories (both historical names) --------
+	local roots=(
+		"$HOME/.local/share/millennium/plugins"
+		"$HOME/.millennium/plugins"
+		"$HOME/.steam/steam/millennium/plugins"
+		"$HOME/.steam/steam/steamui/millennium/plugins"
+		"$HOME/.local/share/Steam/millennium/plugins"
+	)
+	local root name
+	for root in "${roots[@]}"; do
+		for name in luatools LuaToolsLinux; do
+			if [ -d "$root/$name" ]; then
+				log_step "$(L "Removing old plugin: $root/$name" \
+				             "Removendo plugin antigo: $root/$name")"
+				rm -rf "$root/$name" 2>/dev/null || true
+			fi
+		done
+	done
+
+	# --- Old luatools data/config dirs ------------------------------------
+	local d
+	for d in "$HOME/.local/share/luatools" "$HOME/.config/luatools" "$HOME/.luatools"; do
+		if [ -e "$d" ]; then
+			log_step "$(L "Removing old data dir: $d" "Removendo dir de dados antigo: $d")"
+			rm -rf "$d" 2>/dev/null || true
+		fi
+	done
+
+	# --- headcrab: patched steam.sh + client.sh ---------------------------
+	# Only remove steam.sh if it's the headcrab one; Steam regenerates a
+	# clean steam.sh from the package bootstrap on next launch.
+	if [ -f "$steam_root/steam.sh" ] && grep -qi "headcrab" "$steam_root/steam.sh" 2>/dev/null; then
+		log_step "$(L "Removing headcrab-patched steam.sh" "Removendo steam.sh modificado pelo headcrab")"
+		rm -f "$steam_root/steam.sh" 2>/dev/null || true
+	fi
+	if [ -f "$steam_root/client.sh" ]; then
+		log_step "$(L "Removing headcrab client.sh" "Removendo client.sh do headcrab")"
+		rm -f "$steam_root/client.sh" 2>/dev/null || true
+	fi
+
+	# --- headcrab: steam.cfg that inhibits the bootstrapper ---------------
+	if [ -f "$steam_root/steam.cfg" ] && grep -qi "BootStrapperInhibitAll" "$steam_root/steam.cfg" 2>/dev/null; then
+		log_step "$(L "Removing update-blocking steam.cfg" "Removendo steam.cfg que bloqueia updates")"
+		rm -f "$steam_root/steam.cfg" 2>/dev/null || true
+	fi
+
+	# --- headcrab support files -------------------------------------------
+	for d in "$HOME/.headcrab" "$HOME/.local/share/CloudRedirect"; do
+		if [ -e "$d" ]; then
+			log_step "$(L "Removing $d" "Removendo $d")"
+			rm -rf "$d" 2>/dev/null || true
+		fi
+	done
+	rm -f "$HOME/.local/share/applications/headcrab.desktop" 2>/dev/null || true
+	rm -f "$HOME/.local/share/icons/hicolor/48x48/apps/headcrab.png" 2>/dev/null || true
+
+	# --- Old enter-the-wired SLSsteam install -----------------------------
+	# Our slsteam-moon setup.sh reinstalls a fresh copy; this only removes
+	# the binaries/wrapper, not the user's config at ~/.config/SLSsteam.
+	if [ -d "$HOME/.local/share/SLSsteam" ]; then
+		log_step "$(L "Removing old SLSsteam install (~/.local/share/SLSsteam)" \
+		             "Removendo instalação antiga do SLSsteam (~/.local/share/SLSsteam)")"
+		rm -rf "$HOME/.local/share/SLSsteam" 2>/dev/null || true
+	fi
+
+	# --- Arch: system slssteam package conflicts with the local install ---
+	if [ "$(get_distro_family)" = "arch" ] && command -v pacman >/dev/null 2>&1; then
+		local pkgs
+		pkgs="$(pacman -Qq 2>/dev/null | grep -E '^slssteam(-git)?$' || true)"
+		if [ -n "$pkgs" ]; then
+			local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+			log_step "$(L "Removing conflicting system package(s): $pkgs" \
+			             "Removendo pacote(s) de sistema conflitante(s): $pkgs")"
+			# shellcheck disable=SC2086
+			$sudo_cmd pacman -Rns --noconfirm $pkgs >/dev/null 2>&1 || \
+				log_warn "$(L "Could not remove $pkgs; remove it manually if install fails." \
+				             "Não foi possível remover $pkgs; remova manualmente se a instalação falhar.")"
+		fi
+	fi
+
+	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
+}
+
+# ============================================================================
 # GitHub release helpers
 # ============================================================================
 # Echo the browser_download_url of the first asset whose name matches the glob
@@ -555,6 +656,9 @@ main() {
 	check_arch
 	check_internet
 	check_steam_native
+
+	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
+	cleanup_previous_install
 
 	print_section "$(L "Dependencies" "Dependências")"
 	install_dependencies
