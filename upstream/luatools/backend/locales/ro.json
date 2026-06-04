@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Descărcare rapidă",
     "settings.general": "General",
     "settings.generalDescription": "Preferințe globale LuaTools.",
-    "settings.apis": "API-uri",
-    "settings.apisDescription": "Alege ce API-uri de manifest poate folosi LuaTools.",
     "settings.installedFixes.date": "Instalat:",
     "settings.installedFixes.delete": "Șterge",
     "settings.installedFixes.deleteConfirm": "Ești sigur că vrei să elimini această corecție? Aceasta va șterge fișierele corecției și va rula verificarea Steam.",

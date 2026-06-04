@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Hızlı İndirme",
     "settings.general": "Genel",
     "settings.generalDescription": "LuaTools genel tercihleri.",
-    "settings.apis": "API'ler",
-    "settings.apisDescription": "LuaTools'un hangi manifest API'lerini kullanabileceğini seçin.",
     "settings.installedFixes.date": "Yüklendi:",
     "settings.installedFixes.delete": "Sil",
     "settings.installedFixes.deleteConfirm": "Bu düzeltmeyi kaldırmak istediğinizden emin misiniz? Bu, düzeltme dosyalarını silecek ve Steam doğrulamasını çalıştıracaktır.",

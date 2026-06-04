@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Hurtignedlasting",
     "settings.general": "Generelt",
     "settings.generalDescription": "Globale LuaTools-innstillinger.",
-    "settings.apis": "API-er",
-    "settings.apisDescription": "Velg hvilke manifest-API-er LuaTools kan bruke.",
     "settings.installedFixes.date": "Installert:",
     "settings.installedFixes.delete": "Slett",
     "settings.installedFixes.deleteConfirm": "Er du sikker på at du vil fjerne denne fiksen? Dette vil slette fiks-filer og kjøre Steam-verifisering.",

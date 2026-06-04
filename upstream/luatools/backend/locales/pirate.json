@@ -170,8 +170,6 @@
     "settings.fastDownload.label": "Swift Sailings",
     "settings.general": "General Orders",
     "settings.generalDescription": "Ship-wide LuaTools preferences.",
-    "settings.apis": "APIs",
-    "settings.apisDescription": "Choose which manifest APIs LuaTools may sail with.",
     "settings.installedFixes.date": "Patched on:",
     "settings.installedFixes.delete": "Scuttle",
     "settings.installedFixes.deleteConfirm": "Ye sure ye wanna rip this patch off? This'll remove the fix n' inspect the hull!",

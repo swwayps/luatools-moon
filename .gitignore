@@ -12,4 +12,3 @@ upstream/luatools/backend/temp_dl/
 upstream/luatools/backend/lua_runtime.log
 upstream/luatools/backend/loadedappids.txt
 upstream/luatools/backend/appidlogs.txt
-upstream/luatools/backend/main_teste_antigo.lua

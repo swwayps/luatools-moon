@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "快速下載",
     "settings.general": "一般",
     "settings.generalDescription": "LuaTools 全域偏好設定。",
-    "settings.apis": "API",
-    "settings.apisDescription": "選擇 LuaTools 可以使用的清單 API。",
     "settings.installedFixes.date": "安裝時間：",
     "settings.installedFixes.delete": "刪除",
     "settings.installedFixes.deleteConfirm": "確定要移除此修復嗎？這將會刪除修復檔案並執行 Steam 驗證。",

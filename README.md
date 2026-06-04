@@ -17,8 +17,10 @@ Linux port of the `ltsteamplugin` Millennium plugin, built exclusively for the [
 
 Upstream:
 
-- [skyflarefox](https://github.com/skyflarefox/plugin), [madoiscool](https://github.com/madoiscool/ltsteamplugin) & [piqseu](https://github.com/piqseu/ltsteamplugin) —
-  original Windows plugin.
+- [piqseu](https://github.com/piqseu/ltsteamplugin) — the `ltsteamplugin`
+  release line this fork tracks. Originally by
+  [madoiscool](https://github.com/madoiscool/ltsteamplugin), with earlier
+  forks by [skyflarefox](https://github.com/skyflarefox/plugin).
 
 Reference material:
 

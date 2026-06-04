@@ -1,37 +1,48 @@
 # License notice
 
-`slsteammoon-ltsteamplugin` is a Linux port and integration layer for two
-upstream projects. Each carries its own license; this notice records
-the provenance so contributors can keep the boundaries clear.
+`slsteammoon-ltsteamplugin` is a Linux port and integration layer for
+the LuaTools Millennium plugin, targeting the [slsteam-moon](https://github.com/nwrafael/slsteam-moon)
+project. This notice records provenance so contributors can keep the
+boundaries clear.
 
-## Upstream: LuaTools (Windows)
+## Upstream: LuaTools (ltsteamplugin)
 
-Vendored at `upstream/luatools/`. Source: `luatools.zip` 2.7.5,
-distributed by [skyflarefox/plugin](https://github.com/skyflarefox/plugin)
-GitHub releases (downloaded as `luatools.zip`). Original plugin
-authored by [madoiscool](https://github.com/madoiscool/ltsteamplugin).
+Vendored pristine at `upstream/luatools/`. Source: `ltsteamplugin.zip`
+from [piqseu/ltsteamplugin](https://github.com/piqseu/ltsteamplugin)
+GitHub releases (the official release line). Original plugin authored
+by [madoiscool](https://github.com/madoiscool/ltsteamplugin); earlier
+forks include [skyflarefox](https://github.com/skyflarefox/plugin).
 
-The upstream zip ships without a `LICENSE` file. The original
-`ltsteamplugin` repository is also unlicensed at the time of writing.
-`shared/backend/main.lua` is a near-verbatim copy of upstream's
-`backend/main.lua` with localized adaptation patches; it inherits the
-upstream license terms (such as they are).
-
-If/when upstream clarifies licensing, this section should be updated
-and `shared/backend/main.lua` should be re-checked against the
-declared terms.
+The upstream zip ships without a `LICENSE` file. The fork keeps the
+vendored tree byte-for-byte and applies changes only at build time, so
+the shipped backend inherits the upstream license terms (such as they
+are). If/when upstream clarifies licensing, this section should be
+updated.
 
 ## Adaptation overlay (this repo's contribution)
 
-Files under `linux/`, `scripts/`, this `README.md`, and the
-`-- ADAPT-LINUX:` patch fragments inside `shared/backend/main.lua`
-are original work for this fork.
+Original work for this fork:
+
+- `linux/` — the Linux overlay files:
+  - `backend/slsteam.lua` — registers added appids into SLSsteam's
+    `AdditionalApps:` (`~/.config/SLSsteam/config.yaml`).
+  - `backend/scripts/restart_steam.sh` — wrapper-aware Steam restart.
+  - `backend/api.json` — default API list with SkyAPI added.
+- `scripts/` — `build.sh` (assembles `dist/luatools` from upstream +
+  overlay via anchored patches), `patch-frontend.sh`, and
+  `rebase-upstream.sh`.
+- `install.sh`, `README.md`, this notice.
+
+The fork does NOT edit the vendored upstream in place. `build.sh`
+applies small, anchored patches to a copy, so a future upstream rebase
+is `rebase-upstream.sh <new.zip>` followed by fixing any anchor that
+moved (the build fails loudly if one does).
 
 Contributor: nwrafael <newrafael@proton.me>.
 
-License: same as `slsteam-moon` (AGPL-3.0) until the upstream
-LuaTools licensing is clarified, at which point this overlay can be
-re-licensed to match if the original author's terms allow it.
+License: same as `slsteam-moon` (AGPL-3.0) until the upstream LuaTools
+licensing is clarified, at which point this overlay can be re-licensed
+to match if the original author's terms allow it.
 
 ## Related projects (not vendored, referenced only)
 

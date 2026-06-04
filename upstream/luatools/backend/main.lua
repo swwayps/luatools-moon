@@ -1,1545 +1,639 @@
-local millennium = require("millennium")
+-- LuaTools backend main.lua
+-- All exported functions return JSON-encoded strings, mirroring the Python backend's json.dumps() returns.
+-- This is required because Millennium's Lua bridge does not deep-serialize nested Lua tables.
 
-local function esc(value)
-  value = tostring(value or "")
-  value = value:gsub("\\", "\\\\"):gsub('"', '\\"'):gsub("\r", "\\r"):gsub("\n", "\\n")
-  return value
+local cjson            = require("json")
+local m_utils          = require("utils")
+local logger           = require("plugin_logger")
+local millennium       = require("millennium")
+local fs               = require("fs")
+local http_client      = require("http_client")
+local paths            = require("paths")
+local steam_utils      = require("steam_utils")
+local utils            = require("plugin_utils")
+local locales_mod      = require("locales.manager")
+
+local api_manifest     = require("api_manifest")
+local downloads        = require("downloads")
+local fixes            = require("fixes")
+local settings_manager = require("settings.manager")
+local auto_update      = require("auto_update")
+
+-- ── Helpers ──────────────────────────────────────────────────────────────────
+
+--- Safely encode a Lua table to a JSON string (same as Python json.dumps).
+local function json_ok(data)
+    local ok, s = pcall(cjson.encode, data)
+    if ok then return s end
+    logger.warn("json_ok encode failed: " .. tostring(s))
+    return '{"success":false,"error":"serialization error"}'
 end
 
-local function json_ok(extra)
-  extra = extra or ""
-  if extra ~= "" then extra = "," .. extra end
-  return '{"success":true' .. extra .. "}"
+local function json_err(msg)
+    return json_ok({ success = false, error = tostring(msg) })
 end
 
-local function json_fail(message)
-  return '{"success":false,"error":"' .. esc(message or "Unknown error") .. '"}'
-end
+-- ── Webkit file management ───────────────────────────────────────────────────
 
-local startup_message = ""
+local function copy_webkit_files()
+    local steam_dir = steam_utils.detect_steam_install_path()
+    if not steam_dir or steam_dir == "" then return end
 
-local function steam_path()
-  local ok, value = pcall(millennium.steam_path)
-  if ok and value then return tostring(value) end
-  return ""
-end
-
-local function exists(path)
-  local f = io.open(path, "rb")
-  if f then f:close(); return true end
-  return false
-end
-
-local function plugin_root()
-  local source = debug.getinfo(1, "S").source or ""
-  source = source:gsub("^@", ""):gsub("\\", "/")
-  return source:gsub("/backend/main%.lua$", "")
-end
-
-local function read_file(path)
-  local f = io.open(path, "rb")
-  if not f then return "" end
-  local data = f:read("*a") or ""
-  f:close()
-  return data
-end
-
-local function write_file(path, data)
-  local f = io.open(path, "wb")
-  if not f then return false end
-  f:write(data or "")
-  f:close()
-  return true
-end
-
-local function copy_file(src, dst)
-  local data = read_file(src)
-  if data == "" then return false end
-  return write_file(dst, data)
-end
-
-local base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-
-local function base64_encode(data)
-  data = tostring(data or "")
-  local out = {}
-  local len = #data
-  local i = 1
-  while i <= len do
-    local a = data:byte(i) or 0
-    local b = data:byte(i + 1) or 0
-    local c = data:byte(i + 2) or 0
-    local n = a * 65536 + b * 256 + c
-    local pad = (i + 1 > len and 2) or (i + 2 > len and 1) or 0
-    local c1 = math.floor(n / 262144) % 64
-    local c2 = math.floor(n / 4096) % 64
-    local c3 = math.floor(n / 64) % 64
-    local c4 = n % 64
-    out[#out + 1] = base64_chars:sub(c1 + 1, c1 + 1)
-    out[#out + 1] = base64_chars:sub(c2 + 1, c2 + 1)
-    out[#out + 1] = pad >= 2 and "=" or base64_chars:sub(c3 + 1, c3 + 1)
-    out[#out + 1] = pad >= 1 and "=" or base64_chars:sub(c4 + 1, c4 + 1)
-    i = i + 3
-  end
-  return table.concat(out)
-end
-
-local log_line
-
-local function appid_from_args(args)
-  if type(args) == "table" then
-    if args.appid or args[1] then return tonumber(args.appid or args[1]) end
-    for k, v in pairs(args) do
-      local nk = tostring(k):lower()
-      if nk == "appid" or nk == "app_id" or nk == "id" then return tonumber(v) end
-      if tonumber(v) and tostring(v):match("^%d+$") then return tonumber(v) end
+    local target_webkit_dir = fs.join(steam_dir, "steamui", "webkit")
+    if not fs.exists(target_webkit_dir) then
+        fs.create_directories(target_webkit_dir)
     end
-  end
-  return tonumber(args)
-end
 
-local function dump_args(label, args)
-  if not log_line then return end
-  if type(args) ~= "table" then
-    log_line(label .. " arg type=" .. type(args) .. " value=" .. tostring(args))
-    return
-  end
-  local parts = {}
-  for k, v in pairs(args) do
-    parts[#parts + 1] = tostring(k) .. "=" .. tostring(v)
-  end
-  log_line(label .. " table args: " .. table.concat(parts, ", "))
-end
+    local public_dir = fs.join(paths.get_plugin_dir(), "public")
 
-local function url_from_args(args)
-  if type(args) == "table" then return tostring(args.url or args[1] or "") end
-  return tostring(args or "")
-end
-
-local function url_encode(value)
-  return tostring(value or ""):gsub("([^%w%-%._~])", function(c)
-    return string.format("%%%02X", string.byte(c))
-  end)
-end
-
-log_line = function(message)
-  local root = plugin_root()
-  local f = io.open(root .. "/backend/lua_runtime.log", "ab")
-  if f then
-    f:write(os.date("[%Y-%m-%d %H:%M:%S] ") .. tostring(message) .. "\n")
-    f:close()
-  end
-end
-
-local require_json_cached = nil
-local require_json_warned = false
-
-local function require_json()
-  if require_json_cached ~= nil then return require_json_cached end
-  local ok, mod = pcall(require, "cjson")
-  if ok then
-    require_json_cached = mod
-    return mod
-  end
-  if not require_json_warned then
-    log_line("cjson unavailable: " .. tostring(mod))
-    require_json_warned = true
-  end
-  require_json_cached = false
-  return nil
-end
-
-local function require_http()
-  local ok, mod = pcall(require, "http")
-  if ok then return mod end
-  log_line("http unavailable: " .. tostring(mod))
-  return nil
-end
-
-local function response_status(res)
-  if type(res) ~= "table" then return 0 end
-  return tonumber(res.status or res.status_code or res.code or 0) or 0
-end
-
-local function response_body(res)
-  if type(res) ~= "table" then return "" end
-  return tostring(res.body or res.text or res.data or "")
-end
-
-local function http_request(method, url, timeout)
-  local h = require_http()
-  if not h then return nil, "http module unavailable" end
-  local opts = {
-    method = method or "GET",
-    timeout = timeout or 8,
-    follow_redirects = true,
-    headers = { ["User-Agent"] = "discord(dot)gg/luatools" },
-    user_agent = "discord(dot)gg/luatools",
-  }
-  local ok, res = pcall(function()
-    if method == "GET" and h.get then return h.get(url, opts) end
-    if h.request then return h.request(url, opts) end
-    return nil
-  end)
-  if not ok then
-    log_line("http " .. tostring(method) .. " failed for " .. tostring(url) .. ": " .. tostring(res))
-    return nil, tostring(res)
-  end
-  return res, nil
-end
-
-local function decode_json(text)
-  local json = require_json()
-  if json then
-    local ok, data = pcall(json.decode, text or "")
-    if ok and type(data) == "table" then return data end
-  end
-  return nil
-end
-
-local function get_morrenus_key()
-  local settings = read_file(plugin_root() .. "/backend/data/settings.json")
-  return settings:match('"morrenusApiKey"%s*:%s*"([^"]*)"') or ""
-end
-
-local function api_setting_key(name)
-  local key = tostring(name or "api"):lower()
-  key = key:gsub("[^%w]+", "_"):gsub("^_+", ""):gsub("_+$", "")
-  if key == "" then key = "api" end
-  return "api_" .. key
-end
-
-local function read_settings_api_overrides()
-  local text = read_file(plugin_root() .. "/backend/data/settings.json")
-  local data = decode_json(text)
-  local values = data and type(data.values) == "table" and data.values or nil
-  local apis = values and type(values.apis) == "table" and values.apis or nil
-  local out = {}
-  if apis then
-    for key, enabled in pairs(apis) do
-      if type(enabled) == "boolean" then out[tostring(key)] = enabled end
+    local src_js = fs.join(public_dir, "luatools.js")
+    local dst_js = fs.join(target_webkit_dir, "luatools.js")
+    if fs.exists(src_js) then
+        local content = m_utils.read_file(src_js)
+        if content then m_utils.write_file(dst_js, content) end
     end
-    return out
-  end
 
-  local api_block = text:match('"apis"%s*:%s*{(.-)}')
-  if api_block then
-    for key, value in api_block:gmatch('"([^"]+)"%s*:%s*([%a]+)') do
-      if value == "true" then out[key] = true end
-      if value == "false" then out[key] = false end
+    local src_css = fs.join(public_dir, "steamdb-webkit.css")
+    local dst_css = fs.join(target_webkit_dir, "steamdb-webkit.css")
+    if fs.exists(src_css) then
+        local content = m_utils.read_file(src_css)
+        if content then m_utils.write_file(dst_css, content) end
     end
-  end
-  return out
 end
 
-local function load_api_manifest_entries()
-  local path = plugin_root() .. "/backend/api.json"
-  local text = read_file(path)
-  local data = decode_json(text)
-  local entries = {}
-  if data and type(data.api_list) == "table" then
-    for _, api in ipairs(data.api_list) do
-      if type(api) == "table" then
-        entries[#entries + 1] = {
-          name = tostring(api.name or "Unknown"),
-          url = tostring(api.url or ""),
-          success_code = tonumber(api.success_code or 200) or 200,
-          enabled = api.enabled ~= false,
-        }
-      end
-    end
-  end
-  if #entries == 0 then
-    for object in text:gmatch("{(.-)}") do
-      local name = object:match('"name"%s*:%s*"([^"]+)"')
-      local url = object:match('"url"%s*:%s*"([^"]+)"')
-      local code = tonumber(object:match('"success_code"%s*:%s*(%d+)') or "200") or 200
-      local disabled = object:match('"enabled"%s*:%s*false')
-      if name and url then
-        entries[#entries + 1] = { name = name, url = url, success_code = code, enabled = not disabled }
-      end
-    end
-  end
-  return entries
+local function inject_webkit_files()
+    millennium.add_browser_css("webkit/steamdb-webkit.css")
+    millennium.add_browser_js("webkit/luatools.js")
 end
 
-local function load_apis()
-  local overrides = read_settings_api_overrides()
-  local apis = {}
-  for _, api in ipairs(load_api_manifest_entries()) do
-    local setting_key = api_setting_key(api.name)
-    local enabled = overrides[setting_key]
-    if enabled == nil then enabled = api.enabled ~= false end
-    if enabled then
-      apis[#apis + 1] = {
-        name = api.name,
-        url = api.url,
-        success_code = api.success_code,
-      }
-    end
-  end
-  return apis
-end
-
-local function refresh_free_apis()
-  local urls = {
-    "https://raw.githubusercontent.com/madoiscool/lt_api_links/refs/heads/main/load_free_manifest_apis",
-    "https://luatools.vercel.app/load_free_manifest_apis",
-  }
-  local last_error = ""
-  for _, url in ipairs(urls) do
-    local res, err = http_request("GET", url, 15)
-    if res and response_status(res) == 200 then
-      local body = response_body(res)
-      if body and body:find('"api_list"', 1, true) then
-        write_file(plugin_root() .. "/backend/api.json", body)
-        local count = 0
-        for _ in body:gmatch('"name"%s*:') do count = count + 1 end
-        return true, count, ""
-      end
-      last_error = "Empty manifest"
-    else
-      last_error = err or ("HTTP " .. tostring(response_status(res)))
-    end
-  end
-  return false, 0, last_error
-end
-
-local function ensure_cached_json_file(filename, urls, timeout)
-  local path = plugin_root() .. "/backend/temp_dl/" .. filename
-  local existing = read_file(path)
-  if existing ~= "" then return existing end
-
-  ensure_dir(plugin_root() .. "\\backend\\temp_dl")
-  for _, url in ipairs(urls) do
-    local res, err = http_request("GET", url, timeout or 30)
-    if res and response_status(res) == 200 then
-      local body = response_body(res)
-      local trimmed = body:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or body
-      if trimmed:sub(1, 1) == "{" or trimmed:sub(1, 1) == "[" then
-        write_file(path, body)
-        return body
-      end
-    else
-      log_line("Failed to refresh cache " .. tostring(filename) .. " from " .. tostring(url) .. ": " .. tostring(err or response_status(res)))
-    end
-  end
-
-  return ""
-end
-
-local function plugin_version()
-  local text = read_file(plugin_root() .. "/plugin.json")
-  return text:match('"version"%s*:%s*"([^"]+)"') or "0"
-end
-
-local function version_parts(value)
-  local parts = {}
-  for n in tostring(value or ""):gmatch("(%d+)") do parts[#parts + 1] = tonumber(n) or 0 end
-  return parts
-end
-
-local function compare_versions(a, b)
-  local av = version_parts(a)
-  local bv = version_parts(b)
-  local max = math.max(#av, #bv)
-  for i = 1, max do
-    local ai = av[i] or 0
-    local bi = bv[i] or 0
-    if ai ~= bi then return ai > bi and 1 or -1 end
-  end
-  return 0
-end
-
-local function latest_release_info()
-  local res = http_request("GET", "https://api.github.com/repos/madoiscool/ltsteamplugin/releases/latest", 15)
-  local body = res and response_body(res) or ""
-  if not res or response_status(res) ~= 200 or body == "" then
-    res = http_request("GET", "https://luatools.vercel.app/api/github-latest", 15)
-    body = res and response_body(res) or ""
-  end
-  if not res or response_status(res) ~= 200 or body == "" then return nil end
-  local tag = body:match('"tag_name"%s*:%s*"([^"]+)"') or body:match('"name"%s*:%s*"([^"]+)"') or ""
-  local version = tag:gsub("^v", "")
-  local zip_url = body:match('"name"%s*:%s*"ltsteamplugin%.zip".-"browser_download_url"%s*:%s*"([^"]+)"')
-  if zip_url then zip_url = zip_url:gsub("\\/", "/") end
-  if zip_url == nil and tag ~= "" then zip_url = "https://luatools.vercel.app/api/get-plugin/" .. tag end
-  if version == "" then return nil end
-  return { version = version, zip_url = zip_url or "" }
-end
-
-local function api_url_for_app(api, appid, morrenus_key)
-  local url = tostring(api.url or "")
-  if url:find("<moapikey>", 1, true) then
-    if morrenus_key == "" then return nil end
-    url = url:gsub("<moapikey>", url_encode(morrenus_key))
-  end
-  return url:gsub("<appid>", tostring(appid))
-end
-
-local add_state = {}
-local morrenus_stats_cache = {}
-local fixes_index_cache = nil
-local fixes_index_cache_time = 0
-
-local function json_value(value)
-  if type(value) == "number" then return tostring(value) end
-  if type(value) == "boolean" then return value and "true" or "false" end
-  return '"' .. esc(value or "") .. '"'
-end
-
-local function arg_value(args, ...)
-  if type(args) ~= "table" then return nil end
-  local keys = { ... }
-  for _, key in ipairs(keys) do
-    if args[key] ~= nil then return args[key] end
-  end
-  return nil
-end
-
-local create_directory_ready = false
-local kernel32 = nil
-
-local function ensure_dir(path)
-  path = tostring(path or ""):gsub("/", "\\")
-  if path == "" then return end
-
-  local ok, ffi = pcall(require, "ffi")
-  if ok and ffi then
-    if not create_directory_ready then
-      pcall(function()
-        ffi.cdef[[int CreateDirectoryA(const char* lpPathName, void* lpSecurityAttributes);]]
-      end)
-      create_directory_ready = true
-    end
-    if not kernel32 then
-      pcall(function() kernel32 = ffi.load("Kernel32") end)
-    end
-    local lib = kernel32 or ffi.C
-    local current = ""
-    for part in path:gmatch("[^\\]+") do
-      if current == "" then
-        current = part
-      else
-        current = current .. "\\" .. part
-      end
-      if current:match("^%a:$") then
-        current = current .. "\\"
-      else
-        pcall(function() lib.CreateDirectoryA(current, nil) end)
-      end
-    end
-    return
-  end
-
-  local vbs = plugin_root():gsub("/", "\\") .. "\\backend\\mkdir_hidden.vbs"
-  os.execute('wscript.exe //B "' .. vbs:gsub('"', '\\"') .. '" "' .. path:gsub('"', '\\"') .. '" >nul 2>nul')
-end
-
-local function poke_steam_config_watchers(appid)
-  local base = steam_path()
-  if base == "" then return end
-  local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local script = table.concat({
-    "$ErrorActionPreference='SilentlyContinue';",
-    "$steam=" .. string.format("%q", base:gsub("\\", "\\\\")) .. ";",
-    "$appid=" .. string.format("%q", tostring(appid or "")) .. ";",
-    "$paths=@(",
-    "(Join-Path $steam 'config\\stplug-in'),",
-    "(Join-Path $steam 'depotcache'),",
-    "(Join-Path $steam 'config'),",
-    "(Join-Path $steam ('config\\stplug-in\\' + $appid + '.lua'))",
-    ");",
-    "$now=Get-Date;",
-    "foreach($p in $paths){if(Test-Path -LiteralPath $p){(Get-Item -LiteralPath $p -Force).LastWriteTime=$now}}",
-    "foreach($d in $paths[0..2]){if(Test-Path -LiteralPath $d){$probe=Join-Path $d ('.luatools_rescan_probe_' + $appid + '.tmp'); Set-Content -LiteralPath $probe -Value " .. string.format("%q", now) .. " -Encoding ASCII; Remove-Item -LiteralPath $probe -Force}}"
-  }, " ")
-  local quoted_script = '"' .. tostring(script):gsub('"', '\\"') .. '"'
-  os.execute('powershell.exe -WindowStyle Hidden -NoProfile -Command ' .. quoted_script .. ' >nul 2>nul')
-  log_line("Poked Steam config watchers for " .. tostring(appid))
-end
-
-local function list_files_recursive(path)
-  local files = {}
-  local cmd = 'powershell.exe -WindowStyle Hidden -NoProfile -Command "Get-ChildItem -LiteralPath ' .. "'" .. tostring(path):gsub("'", "''") .. "'" .. ' -Recurse -File | ForEach-Object { $_.FullName }"'
-  local p = io.popen(cmd)
-  if p then
-    for line in p:lines() do files[#files + 1] = line end
-    p:close()
-  end
-  return files
-end
-
-local function filename(path)
-  return (tostring(path):gsub("/", "\\"):match("([^\\]+)$") or tostring(path))
-end
-
-local function dlc_count_from_lua(path, base_appid)
-  local text = read_file(path)
-  local count = tonumber(text:match("%-%-%s*[Tt]otal%s+DLCs%s*:%s*(%d+)") or "")
-  if count and count > 0 then return count end
-
-  local depots = {}
-  for id in text:gmatch("[Ss]etManifestid%s*%(%s*(%d+)") do
-    depots[tostring(id)] = true
-  end
-
-  local dlcs = {}
-  local base = tostring(base_appid or "")
-  for id in text:gmatch("[Aa]ddappid%s*%(%s*(%d+)") do
-    id = tostring(id)
-    if id ~= base and not depots[id] then
-      dlcs[id] = true
-    end
-  end
-
-  local total = 0
-  for _ in pairs(dlcs) do total = total + 1 end
-  return total
-end
-
-local function append_loaded_app(appid, name)
-  local path = plugin_root() .. "/backend/loadedappids.txt"
-  local lines = {}
-  local prefix = tostring(appid) .. ":"
-  for line in read_file(path):gmatch("[^\r\n]+") do
-    if line:sub(1, #prefix) ~= prefix then lines[#lines + 1] = line end
-  end
-  lines[#lines + 1] = tostring(appid) .. ":" .. tostring(name or ("UNKNOWN (" .. tostring(appid) .. ")"))
-  write_file(path, table.concat(lines, "\n") .. "\n")
-end
-
-local function state_path(appid)
-  return plugin_root() .. "/backend/temp_dl/status_" .. tostring(appid) .. ".json"
-end
-
-local function fix_state_path(appid)
-  return plugin_root() .. "/backend/temp_dl/fix_status_" .. tostring(appid) .. ".json"
-end
-
-local function unfix_state_path(appid)
-  return plugin_root() .. "/backend/temp_dl/unfix_status_" .. tostring(appid) .. ".json"
-end
-
-local function state_json(appid)
-  local text = read_file(state_path(appid))
-  text = text:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or text
-  if text ~= "" then return text end
-  return nil
-end
-
-local function status_field(text, name)
-  return tostring(text or ""):match('"' .. name .. '"%s*:%s*"([^"]*)"')
-end
-
-local function status_number(text, name)
-  return tonumber(tostring(text or ""):match('"' .. name .. '"%s*:%s*(%d+)') or "")
-end
-
-local function normalized_state_json(appid)
-  local text = state_json(appid)
-  if not text then return nil end
-  local status = status_field(text, "status") or "downloading"
-  local current_api = status_field(text, "currentApi") or status_field(text, "api") or ""
-  local err = status_field(text, "error")
-  local bytes = status_number(text, "bytesRead") or 0
-  local total = status_number(text, "totalBytes") or 0
-  local manifests = status_number(text, "manifests")
-  local dlcs = status_number(text, "dlcs")
-  local success = tostring(text):match('"success"%s*:%s*true') ~= nil
-  local out = {
-    '"status":"' .. esc(status) .. '"',
-    '"bytesRead":' .. tostring(bytes),
-    '"totalBytes":' .. tostring(total),
-  }
-  if current_api ~= "" then out[#out + 1] = '"currentApi":"' .. esc(current_api) .. '"' end
-  if current_api ~= "" then out[#out + 1] = '"api":"' .. esc(current_api) .. '"' end
-  if manifests then out[#out + 1] = '"manifests":' .. tostring(manifests) end
-  if dlcs then out[#out + 1] = '"dlcs":' .. tostring(dlcs) end
-  if success then out[#out + 1] = '"success":true' end
-  if err and err ~= "" then out[#out + 1] = '"error":"' .. esc(err) .. '"' end
-  return "{" .. table.concat(out, ",") .. "}"
-end
-
-local function raw_json_object(path)
-  local text = read_file(path)
-  text = text:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or text
-  if text ~= "" and text:sub(1, 1) == "{" then return text end
-  return "{}"
-end
-
-local function ps_quote(value)
-  return '"' .. tostring(value or ""):gsub('"', '\\"') .. '"'
-end
-
-local shell_execute_ready = false
-local shell32 = nil
-
-local function run_hidden(exe, args)
-  local ok, ffi = pcall(require, "ffi")
-  if ok and ffi then
-    if not shell_execute_ready then
-      pcall(function()
-        ffi.cdef[[
-          void* ShellExecuteA(void* hwnd, const char* lpOperation, const char* lpFile, const char* lpParameters, const char* lpDirectory, int nShowCmd);
-        ]]
-      end)
-      shell_execute_ready = true
-    end
-    if not shell32 then
-      pcall(function() shell32 = ffi.load("Shell32") end)
-    end
-    if shell_execute_ready then
-      local call_ok = pcall(function()
-        local lib = shell32 or ffi.C
-        lib.ShellExecuteA(nil, "open", tostring(exe or ""), tostring(args or ""), nil, 0)
-      end)
-      if call_ok then return true end
-    end
-  end
-  local root = plugin_root():gsub("/", "\\")
-  local temp = root .. "\\backend\\temp_dl"
-  ensure_dir(temp)
-  local command_file = temp .. "\\hidden_command_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)) .. ".txt"
-  write_file(command_file, '"' .. tostring(exe or "") .. '" ' .. tostring(args or ""))
-  local vbs = root .. "\\backend\\run_hidden.vbs"
-  os.execute('wscript.exe //B "' .. vbs:gsub('"', '\\"') .. '" /file "' .. command_file:gsub('"', '\\"') .. '" >nul 2>nul')
-  return false
-end
-
-local sleep_ready = false
-
-local function sleep_ms(ms)
-  local ok, ffi = pcall(require, "ffi")
-  if ok and ffi then
-    if not sleep_ready then
-      pcall(function()
-        ffi.cdef[[void Sleep(unsigned long dwMilliseconds);]]
-      end)
-      sleep_ready = true
-    end
-    local slept = pcall(function() ffi.C.Sleep(tonumber(ms) or 50) end)
-    if slept then return end
-  end
-
-  local until_time = os.clock() + ((tonumber(ms) or 50) / 1000)
-  while os.clock() < until_time do end
-end
-
-local function write_state_file(appid, json)
-  ensure_dir(plugin_root() .. "\\backend\\temp_dl")
-  write_file(state_path(appid), json)
-end
-
-local function launch_download_worker(appid, url, api_name)
-  local root = plugin_root():gsub("/", "\\")
-  local script = root .. "\\backend\\download_worker.ps1"
-  local args = table.concat({
-    '-WindowStyle Hidden',
-    '-NoProfile',
-    '-ExecutionPolicy Bypass',
-    '-File ' .. ps_quote(script),
-    '-AppId ' .. ps_quote(appid),
-    '-Url ' .. ps_quote(url),
-    '-ApiName ' .. ps_quote(api_name),
-    '-PluginRoot ' .. ps_quote(root),
-    '-SteamPath ' .. ps_quote(steam_path()),
-  }, " ")
-  log_line("Launching download worker for " .. tostring(appid) .. " via " .. tostring(api_name))
-  run_hidden("powershell.exe", args)
-end
-
-local function run_scan_helper(action, appid)
-  local root = plugin_root():gsub("/", "\\")
-  local script = root .. "\\backend\\steam_scan_helper.ps1"
-  local temp = root .. "\\backend\\temp_dl"
-  ensure_dir(temp)
-  local output_path = temp .. "\\scan_" .. tostring(action or "helper") .. "_" .. tostring(os.time()) .. "_" .. tostring(math.random(1000, 9999)) .. ".json"
-  local args = table.concat({
-    '-WindowStyle Hidden',
-    '-NoProfile',
-    '-ExecutionPolicy Bypass',
-    '-File ' .. ps_quote(script),
-    '-Action ' .. ps_quote(action),
-    '-PluginRoot ' .. ps_quote(root),
-    '-SteamPath ' .. ps_quote(steam_path()),
-    '-AppId ' .. ps_quote(appid or ""),
-    '-OutputPath ' .. ps_quote(output_path),
-  }, " ")
-
-  run_hidden("powershell.exe", args)
-
-  local output = ""
-  local started = os.time()
-  while (os.time() - started) < 12 do
-    output = read_file(output_path)
-    if output ~= "" then break end
-    sleep_ms(80)
-  end
-
-  output = output:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or output
-  pcall(function() os.remove(output_path) end)
-  if output ~= "" and output:sub(1, 1) == "{" then return output end
-  log_line("steam_scan_helper returned invalid output for " .. tostring(action) .. ": " .. tostring(output))
-  return json_fail("Helper timed out or returned invalid output")
-end
-
-local function launch_fix_worker(mode, appid, download_url, install_path, fix_type, game_name, fix_date)
-  local root = plugin_root():gsub("/", "\\")
-  local script = root .. "\\backend\\fix_worker.ps1"
-  local args = table.concat({
-    '-WindowStyle Hidden',
-    '-NoProfile',
-    '-ExecutionPolicy Bypass',
-    '-File ' .. ps_quote(script),
-    '-Mode ' .. ps_quote(mode),
-    '-AppId ' .. ps_quote(appid),
-    '-PluginRoot ' .. ps_quote(root),
-    '-DownloadUrl ' .. ps_quote(download_url or ""),
-    '-InstallPath ' .. ps_quote(install_path or ""),
-    '-FixType ' .. ps_quote(fix_type or ""),
-    '-GameName ' .. ps_quote(game_name or ""),
-    '-FixDate ' .. ps_quote(fix_date or ""),
-  }, " ")
-  log_line("Launching fix worker mode=" .. tostring(mode) .. " appid=" .. tostring(appid))
-  run_hidden("powershell.exe", args)
-end
-
-local function cleanup_temp_download_artifacts()
-  local root = plugin_root():gsub("/", "\\")
-  local temp = root .. "\\backend\\temp_dl"
-  ensure_dir(temp)
-  local script = table.concat({
-    "$ErrorActionPreference='SilentlyContinue';",
-    "$temp=" .. ps_quote(temp) .. ";",
-    "if(Test-Path -LiteralPath $temp){",
-    "Get-ChildItem -LiteralPath $temp -Directory -Filter 'extract_*' | Remove-Item -Recurse -Force;",
-    "Get-ChildItem -LiteralPath $temp -File -Filter '*.zip' | Remove-Item -Force;",
-    "Get-ChildItem -LiteralPath $temp -File -Filter 'scan_*.json' | Remove-Item -Force;",
-    "}",
-  }, " ")
-  run_hidden("powershell.exe", "-WindowStyle Hidden -NoProfile -Command " .. ps_quote(script))
-end
-
-local function install_lua_zip(appid, zip_path)
-  local base = steam_path()
-  local temp = plugin_root() .. "\\backend\\temp_dl\\extract_" .. tostring(appid)
-  local depotcache = base .. "\\depotcache"
-  local target = base .. "\\config\\stplug-in"
-  ensure_dir(plugin_root() .. "\\backend\\temp_dl")
-  ensure_dir(depotcache)
-  ensure_dir(target)
-  os.execute('powershell.exe -WindowStyle Hidden -NoProfile -Command "Remove-Item -LiteralPath ' .. "'" .. temp:gsub("'", "''") .. "'" .. ' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path ' .. "'" .. temp:gsub("'", "''") .. "'" .. ' -Force | Out-Null; Expand-Archive -LiteralPath ' .. "'" .. tostring(zip_path):gsub("'", "''") .. "'" .. ' -DestinationPath ' .. "'" .. temp:gsub("'", "''") .. "'" .. ' -Force"')
-
-  local lua_file = nil
-  local manifests = 0
-  for _, path in ipairs(list_files_recursive(temp)) do
-    local name = filename(path)
-    if name:lower():match("%.manifest$") then
-      copy_file(path, depotcache .. "\\" .. name)
-      manifests = manifests + 1
-    elseif name:lower() == tostring(appid) .. ".lua" then
-      lua_file = path
-    elseif not lua_file and name:lower():match("%.lua$") then
-      lua_file = path
-    end
-  end
-
-  if not lua_file then return false, "No lua file found in downloaded archive" end
-  local dlcs = dlc_count_from_lua(lua_file, appid)
-  if not copy_file(lua_file, target .. "\\" .. tostring(appid) .. ".lua") then return false, "Failed to install lua file" end
-  os.remove(zip_path)
-  os.execute('powershell.exe -WindowStyle Hidden -NoProfile -Command "Remove-Item -LiteralPath ' .. "'" .. temp:gsub("'", "''") .. "'" .. ' -Recurse -Force -ErrorAction SilentlyContinue"')
-  log_line("Installed appid " .. tostring(appid) .. " from zip; manifests=" .. tostring(manifests) .. " dlcs=" .. tostring(dlcs))
-  return true, nil, manifests, dlcs
-end
-
-local function download_and_install(appid, url, api_name)
-  local dest = plugin_root() .. "\\backend\\temp_dl\\" .. tostring(appid) .. ".zip"
-  ensure_dir(plugin_root() .. "\\backend\\temp_dl")
-  add_state[appid] = { status = "downloading", currentApi = api_name, bytesRead = 0, totalBytes = 0 }
-  local res, err = http_request("GET", url, 120)
-  if not res then
-    add_state[appid] = { status = "failed", error = err or "Download failed" }
-    return false
-  end
-  local status = response_status(res)
-  if status < 200 or status >= 300 then
-    add_state[appid] = { status = "failed", error = "HTTP " .. tostring(status) }
-    return false
-  end
-  local body = response_body(res)
-  write_file(dest, body)
-  add_state[appid] = { status = "processing", currentApi = api_name, bytesRead = #body, totalBytes = #body }
-  local ok_install, install_err, manifests, dlcs = install_lua_zip(appid, dest)
-  if not ok_install then
-    add_state[appid] = { status = "failed", error = install_err or "Install failed" }
-    return false
-  end
-  poke_steam_config_watchers(appid)
-  append_loaded_app(appid, "UNKNOWN (" .. tostring(appid) .. ")")
-  add_state[appid] = { status = "done", success = true, api = api_name, bytesRead = #body, totalBytes = #body, manifests = manifests or 0, dlcs = dlcs or 0 }
-  return true
-end
-
-function LoggerLog(args) log_line("[Frontend] " .. tostring(type(args) == "table" and args.message or args)); return json_ok() end
-function LoggerWarn(args) log_line("[Frontend WARN] " .. tostring(type(args) == "table" and args.message or args)); return json_ok() end
-function LoggerError(args) log_line("[Frontend ERROR] " .. tostring(type(args) == "table" and args.message or args)); return json_ok() end
-
-function GetPluginDir() return plugin_root() end
-function InitApis()
-  if read_file(plugin_root() .. "/backend/api.json") == "" then
-    local ok, count = refresh_free_apis()
-    if ok then startup_message = "No API's Configured, Loaded " .. tostring(count) .. " Free Ones :D" end
-  end
-  return json_ok('"message":"' .. esc(startup_message or "") .. '"')
-end
-function GetInitApisMessage()
-  local msg = startup_message or ""
-  startup_message = ""
-  return json_ok('"message":"' .. esc(msg) .. '"')
-end
-function FetchFreeApisNow()
-  local ok, count, err = refresh_free_apis()
-  if ok then return json_ok('"count":' .. tostring(count)) end
-  return json_fail(err or "Failed to fetch API manifest")
-end
-
-function CheckForUpdatesNow()
-  local info = latest_release_info()
-  if not info then return json_fail("Failed to check for updates") end
-  local current = plugin_version()
-  if compare_versions(info.version, current) > 0 then
-    return json_ok('"message":"LuaTools update available: ' .. esc(info.version) .. '. Download it from the LuaTools release page."')
-  end
-  return json_ok('"message":""')
-end
-function RestartSteam()
-  local script = plugin_root() .. "\\backend\\restart_steam.cmd"
-  run_hidden("cmd.exe", '/C "' .. script:gsub('"', '\\"') .. '"')
-  return json_ok()
-end
-
-function HasLuaToolsForApp(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  local base = steam_path()
-  local p1 = base .. "\\config\\stplug-in\\" .. tostring(appid) .. ".lua"
-  local p2 = base .. "\\config\\stplug-in\\" .. tostring(appid) .. ".lua.disabled"
-  return json_ok('"exists":' .. ((exists(p1) or exists(p2)) and "true" or "false"))
-end
-
-function GetIconDataUrl()
-  local data = read_file(plugin_root() .. "/public/luatools-icon.png")
-  if data == "" then return json_fail("Icon not found") end
-  return json_ok('"dataUrl":"data:image/png;base64,' .. base64_encode(data) .. '"')
-end
-
-function GetApiList()
-  local key = get_morrenus_key()
-  local items = {}
-  for i, api in ipairs(load_apis()) do
-    if not api.url:find("<moapikey>", 1, true) or key ~= "" then
-      items[#items + 1] = '{"name":"' .. esc(api.name) .. '","index":' .. tostring(i - 1) .. "}"
-    end
-  end
-  log_line("GetApiList returned " .. tostring(#items) .. " APIs")
-  return json_ok('"apis":[' .. table.concat(items, ",") .. "]")
-end
-
-function CheckApisForApp(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-
-  local key = get_morrenus_key()
-  local fast = nil
-  do
-    local res = http_request("GET", "http://167.235.229.108/check_apis?appid=" .. tostring(appid), 5)
-    if res and response_status(res) == 200 then
-      fast = decode_json(response_body(res))
-      log_line("Fast API check responded for " .. tostring(appid))
-    else
-      log_line("Fast API check unavailable for " .. tostring(appid))
-    end
-  end
-
-  local results = {}
-  for _, api in ipairs(load_apis()) do
-    local url = api_url_for_app(api, appid, key)
-    if url then
-      local available = false
-      if type(fast) == "table" then
-        local fast_key = api.name:lower() == "morrenus" and "Sadie (Morrenus)" or api.name
-        available = fast[fast_key] == "available"
-      else
-        local check_url = url
-        if api.name:lower() == "morrenus" then
-          check_url = "https://hubcapmanifest.com/api/v1/status/" .. tostring(appid) .. "?api_key=" .. key
-        end
-
-        local res = http_request("HEAD", check_url, 6)
-        local status = response_status(res)
-        if status == 405 or status == 0 then
-          res = http_request("GET", check_url, 6)
-          status = response_status(res)
-        end
-        available = status == api.success_code
-        log_line("Checked API " .. api.name .. " for " .. tostring(appid) .. " status=" .. tostring(status) .. " available=" .. tostring(available))
-      end
-
-      results[#results + 1] =
-        '{"name":"' .. esc(api.name) .. '","available":' .. (available and "true" or "false") ..
-        ',"url":' .. (available and ('"' .. esc(url) .. '"') or "null") .. "}"
-    end
-  end
-
-  return json_ok('"results":[' .. table.concat(results, ",") .. "]")
-end
-function StartAddViaLuaTools(args, maybe_url, maybe_api_name)
-  dump_args("StartAddViaLuaTools", args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  log_line("StartAddViaLuaTools called for " .. tostring(appid))
-  local key = get_morrenus_key()
-  add_state[appid] = { status = "checking", bytesRead = 0, totalBytes = 0 }
-  for _, api in ipairs(load_apis()) do
-    local url = api_url_for_app(api, appid, key)
-    if url then
-      local res = http_request("HEAD", url, 6)
-      local status = response_status(res)
-      if status == 405 or status == 0 then
-        res = http_request("GET", url, 10)
-        status = response_status(res)
-      end
-      if status == api.success_code then
-        write_state_file(appid, '{"status":"downloading","currentApi":"' .. esc(api.name) .. '","bytesRead":0,"totalBytes":0}')
-        launch_download_worker(appid, url, api.name)
-        return json_ok()
-      end
-    end
-  end
-  add_state[appid] = { status = "failed", error = "Not available on any API" }
-  return json_ok()
-end
-
-function StartAddViaLuaToolsFromUrl(args, maybe_url, maybe_api_name)
-  dump_args("StartAddViaLuaToolsFromUrl", args)
-  local appid = appid_from_args(args)
-  local url = ""
-  local api_name = "Unknown"
-  if type(args) == "table" then
-    url = tostring(args.url or args.URL or "")
-    api_name = tostring(args.apiName or args.apiname or args.api_name or args.name or "Unknown")
-    if api_name == "Unknown" and args[1] then api_name = tostring(args[1]) end
-    if not appid and args[2] then appid = tonumber(args[2]) end
-    if url == "" and args[3] then url = tostring(args[3]) end
-    if url == "" then
-      for _, v in pairs(args) do
-        local s = tostring(v)
-        if s:match("^https?://") then url = s end
-      end
-    end
-  else
-    if appid then
-      url = tostring(maybe_url or "")
-      api_name = tostring(maybe_api_name or "Unknown")
-    else
-      api_name = tostring(args or "Unknown")
-      appid = tonumber(maybe_url)
-      url = tostring(maybe_api_name or "")
-    end
-  end
-  if not appid then return json_fail("Invalid appid") end
-  if url == "" then return json_fail("Missing URL") end
-  log_line("StartAddViaLuaToolsFromUrl called for " .. tostring(appid) .. " via " .. tostring(api_name))
-  add_state[appid] = { status = "downloading", currentApi = api_name, bytesRead = 0, totalBytes = 0 }
-  write_state_file(appid, '{"status":"downloading","currentApi":"' .. esc(api_name) .. '","bytesRead":0,"totalBytes":0}')
-  launch_download_worker(appid, url, api_name)
-  return json_ok()
-end
-
-function GetAddViaLuaToolsStatus(args)
-  local appid = appid_from_args(args)
-  local file_state = appid and normalized_state_json(appid) or nil
-  if file_state then return json_ok('"state":' .. file_state) end
-  local state = add_state[appid or 0] or {}
-  local parts = {}
-  for k, v in pairs(state) do
-    if type(v) == "number" then parts[#parts + 1] = '"' .. esc(k) .. '":' .. tostring(v)
-    elseif type(v) == "boolean" then parts[#parts + 1] = '"' .. esc(k) .. '":' .. (v and "true" or "false")
-    else parts[#parts + 1] = '"' .. esc(k) .. '":"' .. esc(v) .. '"' end
-  end
-  return json_ok('"state":{' .. table.concat(parts, ",") .. "}")
-end
-
-function CancelAddViaLuaTools(args)
-  local appid = appid_from_args(args)
-  if appid then
-    add_state[appid] = { status = "cancelled", error = "Cancelled by user" }
-    write_state_file(appid, '{"status":"cancelled","error":"Cancelled by user"}')
-  end
-  return json_ok()
-end
-
-function GetGamesDatabase()
-  local data = ensure_cached_json_file("games.json", {
-    "https://toolsdb.piqseu.cc/games.json",
-  }, 60)
-  if data ~= "" then return data end
-  return "{}"
-end
-
-function ReadLoadedApps()
-  local path = plugin_root() .. "/backend/loadedappids.txt"
-  local apps = {}
-  for line in read_file(path):gmatch("[^\r\n]+") do
-    local id, name = line:match("^(%d+):(.*)$")
-    if id and name then apps[#apps + 1] = '{"appid":' .. id .. ',"name":"' .. esc(name) .. '"}' end
-  end
-  return json_ok('"apps":[' .. table.concat(apps, ",") .. "]")
-end
-
-function DismissLoadedApps()
-  write_file(plugin_root() .. "/backend/loadedappids.txt", "")
-  return json_ok()
-end
-
-function DeleteLuaToolsForApp(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  local base = steam_path() .. "\\config\\stplug-in\\"
-  local deleted = {}
-  for _, suffix in ipairs({ ".lua", ".lua.disabled" }) do
-    local path = base .. tostring(appid) .. suffix
-    if exists(path) then
-      local ok = os.remove(path)
-      if ok then deleted[#deleted + 1] = '"' .. esc(path) .. '"' end
-    end
-  end
-
-  local loaded_path = plugin_root() .. "/backend/loadedappids.txt"
-  local lines = {}
-  local removed_name = "UNKNOWN (" .. tostring(appid) .. ")"
-  local prefix = tostring(appid) .. ":"
-  for line in read_file(loaded_path):gmatch("[^\r\n]+") do
-    if line:sub(1, #prefix) == prefix then
-      removed_name = line:sub(#prefix + 1)
-    else
-      lines[#lines + 1] = line
-    end
-  end
-  write_file(loaded_path, (#lines > 0 and table.concat(lines, "\n") .. "\n" or ""))
-  if #deleted > 0 then
-    local log_path = plugin_root() .. "/backend/appidlogs.txt"
-    local existing = read_file(log_path)
-    write_file(log_path, existing .. "[REMOVED] " .. tostring(appid) .. " - " .. removed_name .. " - " .. os.date("%Y-%m-%d %H:%M:%S") .. "\n")
-  end
-  return json_ok('"deleted":[' .. table.concat(deleted, ",") .. '],"count":' .. tostring(#deleted))
-end
-
-function CheckForFixes(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  local generic_url = "https://files.luatools.work/GameBypasses/" .. tostring(appid) .. ".zip"
-  local online_url = "https://files.luatools.work/OnlineFix1/" .. tostring(appid) .. ".zip"
-  local generic_available = false
-  local online_available = false
-
-  local now = os.time()
-  if not fixes_index_cache or (now - fixes_index_cache_time) > 900 then
-    local res = http_request("GET", "https://index.luatools.work/fixes-index.json", 10)
-    if res and response_status(res) == 200 then
-      fixes_index_cache = response_body(res)
-      fixes_index_cache_time = now
-      log_line("Loaded fixes index")
-    else
-      fixes_index_cache = nil
-    end
-  end
-
-  local function array_has(key)
-    local body = tostring(fixes_index_cache or "")
-    local pattern = '"' .. key .. '"%s*:%s*(%b[])'
-    local segment = body:match(pattern) or ""
-    return segment:find("[^%d]" .. tostring(appid) .. "[^%d]") ~= nil or segment:find("^%[" .. tostring(appid) .. "[^%d]") ~= nil
-  end
-
-  if fixes_index_cache then
-    generic_available = array_has("genericFixes")
-    online_available = array_has("onlineFixes")
-  else
-    local generic = http_request("HEAD", generic_url, 8)
-    local online = http_request("HEAD", online_url, 8)
-    generic_available = response_status(generic) == 200
-    online_available = response_status(online) == 200
-  end
-
-  return '{"success":true,"appid":' .. tostring(appid) ..
-    ',"gameName":"Unknown Game (' .. esc(appid) .. ')"' ..
-    ',"genericFix":{"status":' .. (generic_available and "200" or "404") .. ',"available":' .. (generic_available and "true" or "false") .. (generic_available and ',"url":"' .. esc(generic_url) .. '"' or "") .. "}" ..
-    ',"onlineFix":{"status":' .. (online_available and "200" or "404") .. ',"available":' .. (online_available and "true" or "false") .. (online_available and ',"url":"' .. esc(online_url) .. '"' or "") .. "}}"
-end
-
-function ApplyGameFix(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  local download_url = tostring(arg_value(args, "downloadUrl", "download_url", "url") or "")
-  local install_path = tostring(arg_value(args, "installPath", "install_path", "path") or "")
-  local fix_type = tostring(arg_value(args, "fixType", "fix_type") or "")
-  local game_name = tostring(arg_value(args, "gameName", "game_name") or "")
-  if download_url == "" or install_path == "" then return json_fail("Missing download URL or install path") end
-  write_file(fix_state_path(appid), '{"status":"queued","bytesRead":0,"totalBytes":0}')
-  launch_fix_worker("Apply", appid, download_url, install_path, fix_type, game_name, "")
-  return json_ok()
-end
-
-function GetApplyFixStatus(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  return json_ok('"state":' .. raw_json_object(fix_state_path(appid)))
-end
-
-function CancelApplyFix(args)
-  local appid = appid_from_args(args)
-  if appid then write_file(fix_state_path(appid), '{"status":"cancelled","success":false,"error":"Cancelled by user"}') end
-  return json_ok()
-end
-
-function UnFixGame(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  local install_path = tostring(arg_value(args, "installPath", "install_path", "path") or "")
-  local fix_date = tostring(arg_value(args, "fixDate", "fix_date", "date") or "")
-  if install_path == "" then
-    local payload = run_scan_helper("GetGameInstallPath", appid)
-    install_path = payload:match('"installPath"%s*:%s*"([^"]+)"') or ""
-    install_path = install_path:gsub("\\\\", "\\")
-  end
-  if install_path == "" then return json_fail("Could not find game install path") end
-  write_file(unfix_state_path(appid), '{"status":"queued","progress":""}')
-  launch_fix_worker("Unfix", appid, "", install_path, "", "", fix_date)
-  return json_ok()
-end
-
-function GetUnfixStatus(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  return json_ok('"state":' .. raw_json_object(unfix_state_path(appid)))
-end
-
-function GetInstalledFixes()
-  return run_scan_helper("GetInstalledFixes")
-end
-
-function GetInstalledLuaScripts()
-  return run_scan_helper("GetInstalledLuaScripts")
-end
-
-function GetGameInstallPath(args)
-  local appid = appid_from_args(args)
-  if not appid then return json_fail("Invalid appid") end
-  return run_scan_helper("GetGameInstallPath", appid)
-end
-
-function OpenGameFolder(args)
-  local path = type(args) == "table" and tostring(args.path or "") or tostring(args or "")
-  if path == "" then return json_fail("Failed to open path") end
-  os.execute('explorer "' .. path:gsub('"', '\\"') .. '"')
-  return json_ok()
-end
-
-function OpenExternalUrl(args)
-  local url = url_from_args(args)
-  if not url:match("^https?://") then return json_fail("Invalid URL") end
-  local safe_url = url:gsub('"', '\\"')
-  local ok = run_hidden("rundll32.exe", 'url.dll,FileProtocolHandler "' .. safe_url .. '"')
-  if not ok then
-    os.execute('cmd.exe /C start "" "' .. safe_url .. '"')
-  end
-  return json_ok()
-end
-
-local LOCALE_CODES = {
-  "ar", "bg", "cs", "da", "de", "el", "en", "es", "fi", "fr", "he", "hu",
-  "id", "it", "ja", "ko", "nl", "no", "peakstupid", "pirate", "pl", "pt",
-  "pt-BR", "pt-decria", "ro", "ru", "sv", "th", "tr", "uk", "vi", "zh-CN",
-  "zh-TW",
-}
-
-local STEAM_LANG_TO_LOCALE = {
-  arabic = "ar", brazilian = "pt-BR", bulgarian = "bg", czech = "cs",
-  danish = "da", dutch = "nl", english = "en", finnish = "fi", french = "fr",
-  german = "de", greek = "el", hebrew = "he", hungarian = "hu",
-  indonesian = "id", italian = "it", japanese = "ja", koreana = "ko",
-  latam = "es", norwegian = "no", polish = "pl", portuguese = "pt",
-  romanian = "ro", russian = "ru", schinese = "zh-CN", spanish = "es",
-  swedish = "sv", tchinese = "zh-TW", thai = "th", turkish = "tr",
-  ukrainian = "uk", vietnamese = "vi",
-}
-
-local function json_string(value)
-  return '"' .. esc(value or "") .. '"'
-end
-
-local function settings_path()
-  return plugin_root() .. "/backend/data/settings.json"
-end
-
-local function setting_string(text, key, default)
-  local value = tostring(text or ""):match('"' .. key .. '"%s*:%s*"([^"]*)"')
-  if value == nil or value == "" then return default end
-  return value
-end
-
-local function setting_bool(text, key, default)
-  local value = tostring(text or ""):match('"' .. key .. '"%s*:%s*(true)') or tostring(text or ""):match('"' .. key .. '"%s*:%s*(false)')
-  if value == "true" then return true end
-  if value == "false" then return false end
-  return default
-end
-
-local function normalize_locale_code(value)
-  local raw = tostring(value or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if raw == "" then return "en" end
-  local lower = raw:lower():gsub("_", "-")
-  local aliases = {
-    ["brazilian"] = "pt-BR",
-    ["pt-br"] = "pt-BR",
-    ["schinese"] = "zh-CN",
-    ["zh-cn"] = "zh-CN",
-    ["tchinese"] = "zh-TW",
-    ["zh-tw"] = "zh-TW",
-    ["latam"] = "es",
-    ["es-419"] = "es",
-  }
-  if aliases[lower] then return aliases[lower] end
-  for _, code in ipairs(LOCALE_CODES) do
-    if lower == code:lower() then return code end
-  end
-  return raw
-end
-
-local function read_settings_values()
-  local text = read_file(settings_path())
-  return {
-    useSteamLanguage = setting_bool(text, "useSteamLanguage", true),
-    language = normalize_locale_code(setting_string(text, "language", "en")),
-    donateKeys = setting_bool(text, "donateKeys", true),
-    theme = setting_string(text, "theme", "original"),
-    fastDownload = setting_bool(text, "fastDownload", true),
-    morrenusApiKey = setting_string(text, "morrenusApiKey", ""),
-    apis = read_settings_api_overrides(),
-  }
-end
-
-local function api_settings_json(values)
-  local apis = values and type(values.apis) == "table" and values.apis or {}
-  local keys = {}
-  for key, enabled in pairs(apis) do
-    if type(enabled) == "boolean" then keys[#keys + 1] = tostring(key) end
-  end
-  table.sort(keys)
-  local items = {}
-  for _, key in ipairs(keys) do
-    items[#items + 1] = json_string(key) .. ":" .. (apis[key] == true and "true" or "false")
-  end
-  return "{" .. table.concat(items, ",") .. "}"
-end
-
-local function settings_values_json(values)
-  values = values or read_settings_values()
-  return '{"general":{"useSteamLanguage":' .. (values.useSteamLanguage ~= false and "true" or "false") ..
-    ',"language":' .. json_string(values.language or "en") ..
-    ',"donateKeys":' .. (values.donateKeys ~= false and "true" or "false") ..
-    ',"theme":' .. json_string(values.theme or "original") ..
-    ',"fastDownload":' .. (values.fastDownload ~= false and "true" or "false") ..
-    ',"morrenusApiKey":' .. json_string(values.morrenusApiKey or "") ..
-    '},"apis":' .. api_settings_json(values) .. "}"
-end
-
-local function write_settings_values(values)
-  ensure_dir(plugin_root() .. "\\backend\\data")
-  return write_file(settings_path(), '{\n  "version": 1,\n  "values": ' .. settings_values_json(values) .. "\n}\n")
-end
-
-local function locales_json()
-  local items = {}
-  for _, code in ipairs(LOCALE_CODES) do
-    local path = plugin_root() .. "/backend/locales/" .. code .. ".json"
-    if exists(path) then
-      local text = read_file(path)
-      local name = text:match('"__name"%s*:%s*"([^"]+)"') or code
-      local native = text:match('"__nativeName"%s*:%s*"([^"]+)"') or name
-      items[#items + 1] = '{"code":' .. json_string(code) .. ',"name":' .. json_string(name) .. ',"nativeName":' .. json_string(native) .. "}"
-    end
-  end
-  if #items == 0 then items[#items + 1] = '{"code":"en","name":"English","nativeName":"English"}' end
-  return "[" .. table.concat(items, ",") .. "]"
-end
-
-local function themes_json()
-  local text = read_file(plugin_root() .. "/public/themes/themes.json")
-  text = text:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or text
-  if text ~= "" and text:sub(1, 1) == "[" then return text end
-  return '[{"value":"original","label":"Original"}]'
-end
-
-local function settings_schema_json()
-  local locale_choices = {}
-  for _, code in ipairs(LOCALE_CODES) do
-    if exists(plugin_root() .. "/backend/locales/" .. code .. ".json") then
-      locale_choices[#locale_choices + 1] = '{"value":' .. json_string(code) .. ',"label":' .. json_string(code) .. "}"
-    end
-  end
-  local groups = {}
-  groups[#groups + 1] = '{"key":"general","label":"General","description":"Global LuaTools preferences.","options":[' ..
-    '{"key":"useSteamLanguage","label":"Use Steam Language","type":"toggle","description":"Use the Steam client language for LuaTools.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
-    '{"key":"language","label":"Language","type":"select","description":"Choose the language used by LuaTools.","default":"en","choices":[' .. table.concat(locale_choices, ",") .. '],"requiresRestart":false,"metadata":{"dynamicChoices":"locales"}},' ..
-    '{"key":"donateKeys","label":"Donate Keys","type":"toggle","description":"Allow LuaTools to donate spare Steam keys.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
-    '{"key":"theme","label":"Theme","type":"select","description":"Choose the color theme for LuaTools interface.","default":"original","choices":' .. themes_json() .. ',"requiresRestart":false,"metadata":{"dynamicChoices":"themes"}},' ..
-    '{"key":"fastDownload","label":"Fast Download","type":"toggle","description":"Automatically choose the first available source when adding a game.","default":true,"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"Yes","noLabel":"No"}},' ..
-    '{"key":"morrenusApiKey","label":"Morrenus API Key","type":"text","description":"API Key required to use Sadie Source. Get from hubcapmanifest.com","default":"","choices":[],"requiresRestart":false,"metadata":{"placeholder":"Enter your API key..."}}' ..
-    "]}"
-
-  local api_options = {}
-  for _, api in ipairs(load_api_manifest_entries()) do
-    local name = tostring(api.name or "Unknown")
-    api_options[#api_options + 1] =
-      '{"key":' .. json_string(api_setting_key(name)) ..
-      ',"label":' .. json_string(name) ..
-      ',"type":"toggle","description":' ..
-      json_string("Use " .. name .. " when checking and downloading Lua manifests.") ..
-      ',"default":' .. (api.enabled ~= false and "true" or "false") ..
-      ',"choices":[],"requiresRestart":false,"metadata":{"yesLabel":"On","noLabel":"Off"}}'
-  end
-  if #api_options > 0 then
-    groups[#groups + 1] =
-      '{"key":"apis","label":"APIs","description":"Choose which manifest APIs LuaTools can use.","options":[' ..
-      table.concat(api_options, ",") .. "]}"
-  end
-
-  return "[" .. table.concat(groups, ",") .. "]"
-end
-
-local reg_get_value_ready = false
-local advapi32 = nil
-
-local function detect_steam_locale()
-  local language = ""
-  local ok, ffi = pcall(require, "ffi")
-  if ok and ffi then
-    pcall(function()
-      if not reg_get_value_ready then
-        pcall(function()
-          ffi.cdef[[long RegGetValueA(void* hkey, const char* lpSubKey, const char* lpValue, unsigned long dwFlags, unsigned long* pdwType, void* pvData, unsigned long* pcbData);]]
-        end)
-        reg_get_value_ready = true
-      end
-      if not advapi32 then
-        pcall(function() advapi32 = ffi.load("Advapi32") end)
-      end
-      local hkey = ffi.cast("void*", tonumber("0x80000001"))
-      local typ = ffi.new("unsigned long[1]")
-      local size = ffi.new("unsigned long[1]", 512)
-      local buf = ffi.new("char[512]")
-      local lib = advapi32 or ffi.C
-      if lib.RegGetValueA(hkey, "Software\\Valve\\Steam", "Language", 0x00000002, typ, buf, size) == 0 then
-        language = ffi.string(buf):lower()
-      end
-    end)
-  end
-  return STEAM_LANG_TO_LOCALE[language]
-end
-
-local function current_settings_language(values)
-  values = values or read_settings_values()
-  if values.useSteamLanguage ~= false then
-    local detected = detect_steam_locale()
-    if detected then return detected end
-  end
-  if exists(plugin_root() .. "/backend/locales/" .. tostring(values.language or "") .. ".json") then return tostring(values.language) end
-  return "en"
-end
-
-local function translations_json(language)
-  local lang = language and normalize_locale_code(language) or current_settings_language()
-  local path = plugin_root() .. "/backend/locales/" .. tostring(lang) .. ".json"
-  if not exists(path) then lang = "en"; path = plugin_root() .. "/backend/locales/en.json" end
-  local text = read_file(path)
-  text = text:gsub("^\239\187\191", ""):match("^%s*(.-)%s*$") or text
-  if text == "" or text:sub(1, 1) ~= "{" then text = "{}" end
-  return lang, text
-end
-
-local function apply_setting_payload(values, payload)
-  local text = type(payload) == "string" and payload or ""
-  if type(payload) == "table" then
-    local general = type(payload.general) == "table" and payload.general or payload
-    if type(payload.apis) == "table" then
-      values.apis = values.apis or {}
-      for key, enabled in pairs(payload.apis) do
-        values.apis[tostring(key)] = enabled == true
-      end
-    end
-    if general.useSteamLanguage ~= nil then values.useSteamLanguage = general.useSteamLanguage == true end
-    if general.language ~= nil then
-      values.language = normalize_locale_code(general.language)
-      values.useSteamLanguage = false
-    end
-    if general.donateKeys ~= nil then values.donateKeys = general.donateKeys == true end
-    if general.theme ~= nil then values.theme = tostring(general.theme) end
-    if general.fastDownload ~= nil then values.fastDownload = general.fastDownload == true end
-    if general.morrenusApiKey ~= nil then values.morrenusApiKey = tostring(general.morrenusApiKey) end
-    return values
-  end
-  local decoded = decode_json(text)
-  if type(decoded) == "table" then return apply_setting_payload(values, decoded) end
-
-  values.apis = values.apis or {}
-  local api_block = text:match('"apis"%s*:%s*{(.-)}')
-  if api_block then
-    for key, value in api_block:gmatch('"([^"]+)"%s*:%s*([%a]+)') do
-      if value == "true" then values.apis[key] = true end
-      if value == "false" then values.apis[key] = false end
-    end
-  end
-
-  local function maybe_bool(key)
-    local v = setting_bool(text, key, nil)
-    if v ~= nil then values[key] = v end
-  end
-  maybe_bool("useSteamLanguage")
-  maybe_bool("donateKeys")
-  maybe_bool("fastDownload")
-  local next_language = setting_string(text, "language", values.language)
-  values.language = normalize_locale_code(next_language)
-  if text:find('"language"%s*:') then values.useSteamLanguage = false end
-  values.theme = setting_string(text, "theme", values.theme)
-  values.morrenusApiKey = setting_string(text, "morrenusApiKey", values.morrenusApiKey)
-  return values
-end
-
-function GetSettingsConfig()
-  local values = read_settings_values()
-  local lang, strings = translations_json(current_settings_language(values))
-  return json_ok('"schemaVersion":1,"schema":' .. settings_schema_json() .. ',"values":' .. settings_values_json(values) .. ',"language":' .. json_string(lang) .. ',"locales":' .. locales_json() .. ',"translations":' .. strings)
-end
-
-function ApplySettingsChanges(args)
-  local values = read_settings_values()
-  local payload = args
-  if type(args) == "table" then payload = args.changes or args.changesJson or args end
-  values = apply_setting_payload(values, payload)
-  write_settings_values(values)
-  local lang, strings = translations_json(current_settings_language(values))
-  log_line("Settings saved: language=" .. tostring(values.language) .. " useSteamLanguage=" .. tostring(values.useSteamLanguage) .. " resolved=" .. tostring(lang) .. " theme=" .. tostring(values.theme))
-  return json_ok('"values":' .. settings_values_json(values) .. ',"language":' .. json_string(lang) .. ',"translations":' .. strings .. ',"locales":' .. locales_json())
-end
-
-function GetAvailableLocales() return json_ok('"locales":' .. locales_json()) end
-function GetTranslations(args)
-  local language = type(args) == "table" and (args.language or args[1]) or args
-  if language == "" then language = nil end
-  local lang, strings = translations_json(language)
-  return json_ok('"language":' .. json_string(lang) .. ',"locales":' .. locales_json() .. ',"strings":' .. strings)
-end
-function GetThemes() return json_ok('"themes":' .. themes_json()) end
-function GetAvailableThemes() return GetThemes() end
-function GetMorrenusStats(args)
-  local key = ""
-  local force_refresh = false
-  if type(args) == "table" then
-    key = tostring(args.api_key or args.apiKey or args[1] or "")
-    force_refresh = args.force_refresh == true or args.forceRefresh == true
-  else
-    key = tostring(args or "")
-  end
-  key = key:gsub("^%s+", ""):gsub("%s+$", "")
-  if key == "" then return json_fail("Missing API key") end
-
-  local now = os.time()
-  if not force_refresh and morrenus_stats_cache[key] and now - morrenus_stats_cache[key].time < 600 then
-    return morrenus_stats_cache[key].data
-  end
-
-  local res, err = http_request("GET", "https://hubcapmanifest.com/api/v1/user/stats?api_key=" .. url_encode(key), 10)
-  local status = response_status(res)
-  local body = response_body(res)
-  if body ~= "" then
-    if status == 200 then morrenus_stats_cache[key] = { time = now, data = body } end
-    return body
-  end
-  return json_fail(err or ("HTTP " .. tostring(status)))
-end
-
-local function on_frontend_loaded()
-  local root = plugin_root()
-  local dst = steam_path() .. "\\steamui\\LuaTools"
-  ensure_dir(dst)
-  copy_file(root .. "/public/luatools.js", dst .. "\\luatools.js")
-  copy_file(root .. "/public/luatools-icon.png", dst .. "\\luatools-icon.png")
-  ensure_dir(dst .. "\\themes")
-  local themes_src = root .. "\\public\\themes"
-  for _, path in ipairs(list_files_recursive(themes_src)) do
-    local name = filename(path)
-    if name:lower():match("%.css$") then copy_file(path, dst .. "\\themes\\" .. name) end
-  end
-end
+-- ── Lifecycle ────────────────────────────────────────────────────────────────
 
 local function on_load()
-  log_line("LuaTools bootstrap loading")
-  millennium.ready()
-  cleanup_temp_download_artifacts()
-  on_frontend_loaded()
-  millennium.add_browser_js("LuaTools/luatools.js")
-  log_line("LuaTools bootstrap ready")
+    logger.log("Bootstrapping LuaTools plugin, millennium " .. millennium.version())
+    steam_utils.detect_steam_install_path()
+    utils.ensure_temp_download_dir()
+
+    local ok_s, err_s = pcall(settings_manager.init_settings)
+    if not ok_s then logger.warn("settings init failed: " .. tostring(err_s)) end
+
+    local ok_u, upd_msg = pcall(auto_update.apply_pending_update_if_any)
+    if ok_u and upd_msg and upd_msg ~= "" then
+        api_manifest.store_last_message(upd_msg)
+    end
+
+    copy_webkit_files()
+    inject_webkit_files()
+
+    local res = api_manifest.init_apis()
+    logger.log("InitApis (boot) result: " .. tostring(res.message or ""))
+
+    millennium.ready()
+
+    local keys = {}
+    for k, v in pairs(millennium) do table.insert(keys, k .. ":" .. type(v)) end
+    logger.log("MILLENNIUM KEYS: " .. table.concat(keys, ", "))
 end
 
 local function on_unload()
-  log_line("LuaTools bootstrap unloading")
+    logger.log("unloading LuaTools plugin")
 end
 
+local function on_frontend_loaded()
+    logger.log("Frontend loaded")
+    copy_webkit_files()
+end
+
+-- ── Logger (called as "Logger.log" from JS) ──────────────────────────────────
+
+Logger = {}
+
+function Logger.log(message)
+    local msg = type(message) == "table" and tostring(message.message or "") or tostring(message or "")
+    logger.log("[Frontend] " .. msg)
+    return json_ok({ success = true })
+end
+
+function Logger.warn(message)
+    local msg = type(message) == "table" and tostring(message.message or "") or tostring(message or "")
+    logger.warn("[Frontend] " .. msg)
+    return json_ok({ success = true })
+end
+
+function Logger.error(message)
+    local msg = type(message) == "table" and tostring(message.message or "") or tostring(message or "")
+    logger.error("[Frontend] " .. msg)
+    return json_ok({ success = true })
+end
+
+-- Millennium looks up "Logger.log" as a dotted global key
+_G["Logger.log"]   = Logger.log
+_G["Logger.warn"]  = Logger.warn
+_G["Logger.error"] = Logger.error
+
+-- ── Exported API Methods ─────────────────────────────────────────────────────
+-- Every function returns a JSON string, matching the Python backend exactly.
+
+function GetPluginDir()
+    return paths.get_plugin_dir() -- plain string, matches Python
+end
+
+function InitApis()
+    local ok, res = pcall(api_manifest.init_apis)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetInitApisMessage()
+    local ok, res = pcall(api_manifest.get_init_apis_message)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function FetchFreeApisNow()
+    local ok, res = pcall(api_manifest.fetch_free_apis_now)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function CheckForUpdatesNow()
+    local ok, res = pcall(auto_update.check_for_updates_now)
+    if not ok then
+        logger.warn("CheckForUpdatesNow failed: " .. tostring(res))
+        return json_err(res)
+    end
+    return json_ok(res)
+end
+
+function RestartSteam()
+    local ok, success = pcall(auto_update.restart_steam)
+    if ok and success then
+        return json_ok({ success = true })
+    end
+    return json_ok({ success = false, error = "Failed to restart Steam" })
+end
+
+function HasLuaToolsForApp(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, exists = pcall(steam_utils.has_lua_for_app, tonumber(appid))
+    if not ok then return json_err(exists) end
+    return json_ok({ success = true, exists = exists == true })
+end
+
+function StartAddViaLuaTools(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.start_add_via_luatools, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetAddViaLuaToolsStatus(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.get_add_status, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetApiList()
+    local ok, res = pcall(api_manifest.get_api_list)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function AddCustomApi(api_key, contentScriptQuery, name, url)
+    -- JS passes: { api_key, contentScriptQuery, name, url }
+    -- Reconstruct the payload object for api_manifest
+    local payload = {
+        name = tostring(name or ""),
+        url = tostring(url or ""),
+        api_key = tostring(api_key or "")
+    }
+    local ok, res = pcall(api_manifest.add_custom_api, payload)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetAllApis()
+    local ok, res = pcall(api_manifest.get_all_apis)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function ToggleApi(params, contentScriptQuery)
+    local apiName = params
+    if type(params) == "table" then apiName = params.apiName or params.name end
+    local ok, res = pcall(api_manifest.toggle_api, tostring(apiName or ""))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function RemoveApi(params, contentScriptQuery)
+    local apiName = params
+    if type(params) == "table" then apiName = params.apiName or params.name end
+    local ok, res = pcall(api_manifest.remove_api, tostring(apiName or ""))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function RenameApi(params, contentScriptQuery)
+    local old_name, new_name
+    if type(params) == "table" then
+        new_name = params.new_name
+        old_name = params.old_name or params.apiName or params.name
+    else
+        -- If somehow positional
+        old_name = params
+    end
+    local ok, res = pcall(api_manifest.rename_api, tostring(old_name or ""), tostring(new_name or ""))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function ReorderApis(params, contentScriptQuery)
+    local names = params
+    if type(params) == "table" and params.apiNames then
+        names = params.apiNames
+    end
+    -- Millennium's Lua bridge doesn't deep-deserialize nested JSON arrays/objects
+    if type(names) == "string" then
+        local ok, parsed = pcall(cjson.decode, names)
+        if ok and type(parsed) == "table" then
+            names = parsed
+        end
+    end
+    if type(names) ~= "table" then
+        return json_ok({ success = false, error = "Invalid argument, got type: " .. type(names) })
+    end
+    local ok, res = pcall(api_manifest.set_api_order, names)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function CancelAddViaLuaTools(appid)
+    -- No-op cancel stub; download is synchronous in Lua
+    return json_ok({ success = true })
+end
+
+function CheckApisForApp(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.check_apis_for_app, tonumber(appid))
+    if not ok then return json_err(res) end
+
+    -- Ensure empty arrays encode as [] and not {}
+    if res and type(res.results) == "table" and #res.results == 0 then
+        -- Serialize manually or inject cjson.empty_array
+        local success_json = res.success and "true" or "false"
+        return '{"success":' .. success_json .. ',"results":[]}'
+    end
+
+    return json_ok(res)
+end
+
+function GetMorrenusStats(api_key, force_refresh)
+    if type(api_key) == "table" then
+        force_refresh = api_key.force_refresh
+        api_key = api_key.api_key
+    end
+    api_key = tostring(api_key or "")
+    if api_key == "" then return json_err("api_key required") end
+    local endpoint = "https://hubcapmanifest.com/api/v1/user/stats?api_key=" .. api_key
+    local ok, resp = pcall(http_client.get, endpoint, { timeout = 10 })
+    if ok and resp and resp.status == 200 then
+        return resp.body -- already JSON string
+    end
+    return json_err("request failed")
+end
+
+function StartAddViaLuaToolsFromUrl(apiName, appid, contentScriptQuery, url)
+    -- Millennium's IPC bridge sorts JS object keys alphabetically and passes their values as positional arguments.
+    -- The JS passes: { apiName: ..., appid: ..., contentScriptQuery: "", url: ... }
+    -- So the Lua signature MUST be (apiName, appid, contentScriptQuery, url)
+
+    logger.log("StartAddViaLuaToolsFromUrl CALLED: appid=" ..
+    tostring(appid) .. ", url=" .. tostring(url) .. ", apiName=" .. tostring(apiName))
+
+    local ok, res = pcall(downloads.start_add_via_luatools_from_url, appid, url, apiName)
+    if not ok then
+        logger.warn("StartAddViaLuaToolsFromUrl CRASHED inside pcall: " .. tostring(res))
+        return json_err(res)
+    end
+
+    return json_ok(res)
+end
+
+function GetIconDataUrl()
+    -- Python read an icon file from the public dir and base64-encoded it
+    local icon_path = fs.join(paths.get_plugin_dir(), "public", "luatools-icon.png")
+    if fs.exists(icon_path) then
+        local content = m_utils.read_file(icon_path)
+        if content then
+            return json_ok({ success = true, dataUrl = "data:image/png;base64," ..
+            (m_utils.base64_encode and m_utils.base64_encode(content) or "") })
+        end
+    end
+    return json_ok({ success = false, error = "icon not found" })
+end
+
+function GetGamesDatabase()
+    local ok, res = pcall(function()
+        local db_path = paths.backend_path("data/applist.json")
+        if fs.exists(db_path) then
+            local data = utils.read_json(db_path)
+            return { success = true, apps = data.apps or data or {} }
+        end
+        return { success = true, apps = {} }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function ReadLoadedApps()
+    local ok, res = pcall(function()
+        local log_path = paths.backend_path("loadedappids.txt")
+        local apps = {}
+        if fs.exists(log_path) then
+            local text = utils.read_text(log_path)
+            for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+                local appid = tonumber(line:match("^%s*(%d+)%s*$"))
+                if appid then table.insert(apps, appid) end
+            end
+        end
+        return { success = true, apps = apps }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function DismissLoadedApps()
+    local ok, err = pcall(function()
+        local log_path = paths.backend_path("loadedappids.txt")
+        if fs.exists(log_path) then
+            m_utils.write_file(log_path, "")
+        end
+    end)
+    if not ok then return json_err(err) end
+    return json_ok({ success = true })
+end
+
+function DeleteLuaToolsForApp(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local base = steam_utils.detect_steam_install_path()
+    local target_dir = fs.join(base, "config", "stplug-in")
+    local candidates = {
+        fs.join(target_dir, tostring(appid) .. ".lua"),
+        fs.join(target_dir, tostring(appid) .. ".lua.disabled"),
+    }
+    local deleted = {}
+    for _, p in ipairs(candidates) do
+        if fs.exists(p) then
+            pcall(fs.remove, p)
+            table.insert(deleted, p)
+        end
+    end
+    return json_ok({ success = true, deleted = deleted, count = #deleted })
+end
+
+function CheckForFixes(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.check_for_fixes, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function ApplyGameFix(appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath)
+    -- Millennium's IPC bridge sorts JS object keys alphabetically and passes their values as positional arguments.
+    -- The JS passes: { appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath }
+    -- So the Lua signature MUST be (appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath)
+
+    local ok, res = pcall(fixes.apply_game_fix,
+        tonumber(appid), tostring(downloadUrl or ""),
+        tostring(installPath or ""), tostring(fixType or ""), tostring(gameName or ""))
+    if not ok then
+        logger.warn("ApplyGameFix CRASHED: " .. tostring(res))
+        return json_err(res)
+    end
+    return json_ok(res)
+end
+
+function GetApplyFixStatus(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.get_apply_status, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function CancelApplyFix(appid)
+    return json_ok({ success = true })
+end
+
+function UninstallFix(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.uninstall_fix, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function UnFixGame(appid, installPath, fixDate)
+    if type(appid) == "table" then
+        installPath = appid.installPath; fixDate = appid.fixDate; appid = appid.appid
+    end
+    -- Stub - unfix logic not yet ported
+    return json_ok({ success = false, error = "Not yet implemented" })
+end
+
+function GetUnfixStatus(appid)
+    return json_ok({ success = true, state = { status = "done" } })
+end
+
+function GetInstalledFixes()
+    return json_ok({ success = true, fixes = {} })
+end
+
+function GetInstalledLuaScripts()
+    local ok, res = pcall(function()
+        local base = steam_utils.detect_steam_install_path()
+        local target_dir = fs.join(base, "config", "stplug-in")
+        local scripts = {}
+        local ok2, files = pcall(fs.list, target_dir)
+        if ok2 and files then
+            for _, entry in ipairs(files) do
+                local name = entry.name or ""
+                if name:match("%.lua$") or name:match("%.lua%.disabled$") then
+                    local aid = name:match("^(%d+)%.")
+                    if aid then
+                        table.insert(scripts, {
+                            appid      = tonumber(aid),
+                            gameName   = "Unknown Game (" .. aid .. ")",
+                            filename   = name,
+                            isDisabled = name:match("%.disabled$") ~= nil,
+                            path       = entry.path or ""
+                        })
+                    end
+                end
+            end
+        end
+        return { success = true, scripts = scripts }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetGameInstallPath(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(steam_utils.get_game_install_path_response, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function OpenGameFolder(path)
+    if type(path) == "table" then path = path.path end
+    local ok, success = pcall(steam_utils.open_game_folder, tostring(path or ""))
+    if ok and success then
+        return json_ok({ success = true })
+    end
+    return json_ok({ success = false, error = "Failed to open path" })
+end
+
+function OpenExternalUrl(url)
+    if type(url) == "table" then url = url.url end
+    url = tostring(url or "")
+    if not (url:sub(1, 7) == "http://" or url:sub(1, 8) == "https://") then
+        return json_err("Invalid URL")
+    end
+    local is_win = (m_utils.getenv("OS") or ""):find("Windows") ~= nil
+    if is_win then
+        pcall(m_utils.exec, 'start "" "' .. url .. '"')
+    else
+        pcall(m_utils.exec, 'xdg-open "' .. url .. '"')
+    end
+    return json_ok({ success = true })
+end
+
+function GetSettingsConfig()
+    local ok, payload = pcall(settings_manager.get_settings_payload)
+    if not ok then
+        logger.warn("GetSettingsConfig failed: " .. tostring(payload))
+        return json_err(payload)
+    end
+    return json_ok({
+        success       = true,
+        schemaVersion = payload.version,
+        schema        = payload.schema or {},
+        values        = payload.values or {},
+        language      = payload.language,
+        locales       = payload.locales or {},
+        translations  = payload.translations or {}
+    })
+end
+
+function GetThemes()
+    local themes_json_path = fs.join(paths.get_plugin_dir(), "public", "themes", "themes.json")
+    local themes_array = {}
+
+    if fs.exists(themes_json_path) then
+        local success, data = pcall(cjson.decode, utils.read_text(themes_json_path))
+        if success and type(data) == "table" then
+            themes_array = data
+        else
+            logger.warn("GetThemes failed to decode themes.json")
+        end
+    else
+        logger.warn("GetThemes: themes.json not found")
+    end
+
+    return json_ok({ success = true, themes = themes_array })
+end
+
+function ApplySettingsChanges(changes)
+    -- Millennium may pass the argument as a JSON string rather than a decoded table.
+    -- Mirror the Python version's parsing logic exactly.
+    local payload = nil
+
+    if type(changes) == "string" and changes ~= "" then
+        -- Try to decode the JSON string
+        local ok, decoded = pcall(cjson.decode, changes)
+        if not ok then
+            logger.warn("ApplySettingsChanges: failed to parse changes string")
+            return json_err("Invalid JSON payload")
+        end
+        -- Unwrap nested wrappers the JS bridge sometimes adds
+        if type(decoded) == "table" and decoded.changes then
+            payload = decoded.changes
+        elseif type(decoded) == "table" and type(decoded.changesJson) == "string" then
+            local ok2, inner = pcall(cjson.decode, decoded.changesJson)
+            if ok2 then payload = inner else return json_err("Invalid JSON payload") end
+        else
+            payload = decoded
+        end
+    elseif type(changes) == "table" then
+        -- Already a decoded table – handle wrapper keys
+        if changes.changes then
+            payload = changes.changes
+        elseif type(changes.changesJson) == "string" then
+            local ok2, inner = pcall(cjson.decode, changes.changesJson)
+            if ok2 then payload = inner else return json_err("Invalid JSON payload") end
+        else
+            payload = changes
+        end
+    else
+        payload = {}
+    end
+
+    if payload == nil then payload = {} end
+
+    if type(payload) ~= "table" then
+        logger.warn("ApplySettingsChanges: payload is not a table: " .. tostring(payload))
+        return json_err("Invalid payload format")
+    end
+
+    logger.log("ApplySettingsChanges payload: " .. (pcall(cjson.encode, payload) and cjson.encode(payload) or "?"))
+
+    local ok, res = pcall(settings_manager.apply_settings_changes, payload)
+    if not ok then
+        logger.warn("ApplySettingsChanges failed: " .. tostring(res))
+        return json_err(res)
+    end
+    return json_ok(res)
+end
+
+function GetAvailableLocales()
+    local ok, locs = pcall(settings_manager.get_available_locales)
+    if not ok then return json_err(locs) end
+    return json_ok({ success = true, locales = locs })
+end
+
+function GetTranslations(language)
+    -- Handle both {language="en"} table and plain string argument
+    if type(language) == "table" then
+        language = language.language or language.lang
+    end
+    language = tostring(language or locales_mod.DEFAULT_LOCALE)
+
+    local ok, strings = pcall(function()
+        return locales_mod.get_locale_manager():get_locale_strings(language)
+    end)
+    if not ok then
+        logger.warn("GetTranslations failed: " .. tostring(strings))
+        return json_err(strings)
+    end
+
+    -- Frontend expects: { success, strings:{...}, language, locales:[...] }
+    local ok2, locs = pcall(settings_manager.get_available_locales)
+    return json_ok({
+        success  = true,
+        strings  = strings or {},
+        language = language,
+        locales  = ok2 and locs or {}
+    })
+end
+
+function GetAvailableThemes()
+    return json_ok({ success = true, themes = {} })
+end
+
+-- ── Return lifecycle table ────────────────────────────────────────────────────
+
 return {
-  on_load = on_load,
-  on_unload = on_unload,
-  on_frontend_loaded = on_frontend_loaded,
-  LoggerLog = LoggerLog,
-  LoggerWarn = LoggerWarn,
-  LoggerError = LoggerError,
-  GetPluginDir = GetPluginDir,
-  InitApis = InitApis,
-  GetInitApisMessage = GetInitApisMessage,
-  FetchFreeApisNow = FetchFreeApisNow,
-  CheckForUpdatesNow = CheckForUpdatesNow,
-  RestartSteam = RestartSteam,
-  HasLuaToolsForApp = HasLuaToolsForApp,
-  GetIconDataUrl = GetIconDataUrl,
-  GetApiList = GetApiList,
-  CheckApisForApp = CheckApisForApp,
-  StartAddViaLuaTools = StartAddViaLuaTools,
-  StartAddViaLuaToolsFromUrl = StartAddViaLuaToolsFromUrl,
-  GetAddViaLuaToolsStatus = GetAddViaLuaToolsStatus,
-  CancelAddViaLuaTools = CancelAddViaLuaTools,
-  GetGamesDatabase = GetGamesDatabase,
-  ReadLoadedApps = ReadLoadedApps,
-  DismissLoadedApps = DismissLoadedApps,
-  DeleteLuaToolsForApp = DeleteLuaToolsForApp,
-  CheckForFixes = CheckForFixes,
-  ApplyGameFix = ApplyGameFix,
-  GetApplyFixStatus = GetApplyFixStatus,
-  CancelApplyFix = CancelApplyFix,
-  UnFixGame = UnFixGame,
-  GetUnfixStatus = GetUnfixStatus,
-  GetInstalledFixes = GetInstalledFixes,
-  GetInstalledLuaScripts = GetInstalledLuaScripts,
-  GetGameInstallPath = GetGameInstallPath,
-  OpenGameFolder = OpenGameFolder,
-  OpenExternalUrl = OpenExternalUrl,
-  GetSettingsConfig = GetSettingsConfig,
-  ApplySettingsChanges = ApplySettingsChanges,
-  GetAvailableLocales = GetAvailableLocales,
-  GetTranslations = GetTranslations,
-  GetThemes = GetThemes,
-  GetAvailableThemes = GetAvailableThemes,
-  GetMorrenusStats = GetMorrenusStats,
+    on_load            = on_load,
+    on_unload          = on_unload,
+    on_frontend_loaded = on_frontend_loaded,
 }

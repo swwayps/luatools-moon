@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Γρήγορη λήψη",
     "settings.general": "Γενικά",
     "settings.generalDescription": "Γενικές προτιμήσεις LuaTools.",
-    "settings.apis": "API",
-    "settings.apisDescription": "Επιλέξτε ποια API manifest μπορεί να χρησιμοποιεί το LuaTools.",
     "settings.installedFixes.date": "Εγκατεστάθηκε:",
     "settings.installedFixes.delete": "Διαγραφή",
     "settings.installedFixes.deleteConfirm": "Είστε σίγουροι ότι θέλετε να αφαιρέσετε αυτό το διορθωτικό; Αυτό θα διαγράψει τα αρχεία του διορθώματος και θα εκτελέσει την επαλήθευση Steam.",

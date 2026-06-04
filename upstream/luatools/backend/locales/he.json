@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "הורדה מהירה",
     "settings.general": "כללי",
     "settings.generalDescription": "העדפות גלובליות של LuaTools.",
-    "settings.apis": "ממשקי API",
-    "settings.apisDescription": "בחר באילו ממשקי API של מניפסט LuaTools יכול להשתמש.",
     "settings.installedFixes.date": "הותקן:",
     "settings.installedFixes.delete": "מחק",
     "settings.installedFixes.deleteConfirm": "האם אתה בטוח שברצונך להסיר תיקון זה? זה ימחק את קבצי התיקון ויריץ אימות Steam.",

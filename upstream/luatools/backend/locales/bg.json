@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Бързо изтегляне",
     "settings.general": "Общи",
     "settings.generalDescription": "Общи настройки на LuaTools",
-    "settings.apis": "API-та",
-    "settings.apisDescription": "Изберете кои API-та за манифести може да използва LuaTools.",
     "settings.installedFixes.date": "Дата",
     "settings.installedFixes.delete": "Изтрий",
     "settings.installedFixes.deleteConfirm": "Сигурни ли сте, че искате да изтриете тази поправка?",

@@ -1,14 +1,8 @@
-{"api_list": [
+{
+    "api_list": [
         {
             "name": "Morrenus",
             "url": "https://hubcapmanifest.com/api/v1/manifest/<appid>?api_key=<moapikey>",
-            "success_code": 200,
-            "unavailable_code": 404,
-            "enabled": true
-        },
-		 {
-            "name": "SkyApi",
-            "url": "https://github.com/skyflarefox/Skyapi/raw/refs/heads/main/<appid>.zip",
             "success_code": 200,
             "unavailable_code": 404,
             "enabled": true
@@ -29,9 +23,10 @@
         },
         {
             "name": "Sushi",
-            "url": "https://github.com/sushi-dev55-alt/sushitools-games-repo-alt/raw/refs/heads/main/<appid>.zip",
+            "url": "https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/<appid>.zip",
             "success_code": 200,
             "unavailable_code": 404,
             "enabled": true
         }
-    ]}
+    ]
+}

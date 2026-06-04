@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Szybkie pobieranie",
     "settings.general": "Ogólne",
     "settings.generalDescription": "Globalne preferencje LuaTools.",
-    "settings.apis": "API",
-    "settings.apisDescription": "Wybierz, których API manifestów może używać LuaTools.",
     "settings.installedFixes.date": "Zainstalowano:",
     "settings.installedFixes.delete": "Usuń",
     "settings.installedFixes.deleteConfirm": "Czy na pewno chcesz usunąć tę poprawkę? Spowoduje to usunięcie plików poprawki i uruchomienie weryfikacji Steam.",

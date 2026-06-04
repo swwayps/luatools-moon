@@ -173,8 +173,6 @@
     "settings.fastDownload.label": "Pikalataus",
     "settings.general": "Yleiset",
     "settings.generalDescription": "LuaTools-yleiset asetukset",
-    "settings.apis": "APIt",
-    "settings.apisDescription": "Valitse, mitä manifesti-APIeja LuaTools voi käyttää.",
     "settings.installedFixes.date": "Päivämäärä",
     "settings.installedFixes.delete": "Poista",
     "settings.installedFixes.deleteConfirm": "Haluatko varmasti poistaa tämän korjauksen?",
