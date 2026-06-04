@@ -351,6 +351,63 @@ install_libssl_i386() {
 #
 # This is best-effort: every removal is guarded and never aborts the install.
 # The user's depot keys (~/.config/SLSsteam) and ACCELA are left untouched.
+
+# Detect a foreign (headcrab-style) internal steam.sh and put the genuine
+# Valve one back. The real steam.sh is a large launcher that references
+# bootstrap.tar.xz; the hijacked wrapper is tiny and sources client.sh /
+# injects SLSsteam instead. We restore from the data-dir bootstrap.tar.xz
+# (what Steam itself re-bootstraps from), then the system bootstrap tarball,
+# and as a last resort just remove it so Steam regenerates it on next launch.
+restore_steam_sh() {
+	local steam_root="$1"
+	local sh="$steam_root/steam.sh"
+
+	[ -f "$sh" ] || return 0
+
+	# Genuine Valve steam.sh always mentions bootstrap.tar.xz. If it does and
+	# it does not inject SLSsteam, it's already clean — leave it alone.
+	if grep -q "bootstrap.tar.xz" "$sh" 2>/dev/null \
+	   && ! grep -qiE "SLSsteam|client\.sh|headcrab|LD_AUDIT" "$sh" 2>/dev/null; then
+		return 0
+	fi
+
+	log_step "$(L "Restoring Steam's original steam.sh (was hijacked by the old port)" \
+	             "Restaurando o steam.sh original da Steam (sequestrado pelo port antigo)")"
+
+	# Resolve the data dir steam.sh actually lives in (follow the symlink).
+	local data_dir
+	data_dir="$(readlink -f "$steam_root" 2>/dev/null || echo "$steam_root")"
+
+	mv -f "$sh" "$sh.old-port-bak" 2>/dev/null || rm -f "$sh" 2>/dev/null || true
+
+	# 1) Steam's own bootstrap copy in the data dir.
+	local boot="$data_dir/bootstrap.tar.xz"
+	if [ -f "$boot" ] && tar xJf "$boot" -C "$data_dir" steam.sh 2>/dev/null; then
+		chmod +x "$data_dir/steam.sh" 2>/dev/null || true
+		log_success "$(L "Restored steam.sh from bootstrap.tar.xz" \
+		             "steam.sh restaurado a partir do bootstrap.tar.xz")"
+		return 0
+	fi
+
+	# 2) The system-wide bootstrap tarball shipped by the steam package.
+	local sys_boot
+	for sys_boot in \
+		/usr/lib/steam/bootstraplinux_ubuntu12_32.tar.xz \
+		/usr/share/steam/bootstraplinux_ubuntu12_32.tar.xz; do
+		if [ -f "$sys_boot" ] && tar xJf "$sys_boot" -C "$data_dir" steam.sh 2>/dev/null; then
+			chmod +x "$data_dir/steam.sh" 2>/dev/null || true
+			log_success "$(L "Restored steam.sh from the system bootstrap" \
+			             "steam.sh restaurado a partir do bootstrap do sistema")"
+			return 0
+		fi
+	done
+
+	# 3) Nothing to restore from — leaving it absent makes Steam re-extract a
+	#    clean steam.sh from bootstrap.tar.xz on the next launch.
+	log_warn "$(L "Removed hijacked steam.sh; Steam will regenerate it on next launch" \
+	             "steam.sh sequestrado removido; a Steam vai regenerá-lo no próximo início")"
+}
+
 cleanup_previous_install() {
 	local steam_root="$HOME/.steam/steam"
 
@@ -382,15 +439,19 @@ cleanup_previous_install() {
 		fi
 	done
 
-	# --- headcrab: patched steam.sh + client.sh ---------------------------
-	# Only remove steam.sh if it's the headcrab one; Steam regenerates a
-	# clean steam.sh from the package bootstrap on next launch.
-	if [ -f "$steam_root/steam.sh" ] && grep -qi "headcrab" "$steam_root/steam.sh" 2>/dev/null; then
-		log_step "$(L "Removing headcrab-patched steam.sh" "Removendo steam.sh modificado pelo headcrab")"
-		rm -f "$steam_root/steam.sh" 2>/dev/null || true
-	fi
+	# --- headcrab: hijacked internal steam.sh + client.sh -----------------
+	# The old port replaces Steam's own ~/.steam/steam/steam.sh with a tiny
+	# wrapper that sources client.sh and injects SLSsteam via LD_AUDIT. When
+	# we remove client.sh that wrapper sources a missing file and Steam dies
+	# silently on launch. The genuine Valve steam.sh is a large script that
+	# always references bootstrap.tar.xz; the hijacked one does not. Detect a
+	# foreign steam.sh and restore the real one (Steam also re-extracts it
+	# from bootstrap.tar.xz when it's absent, so deletion is the safe
+	# fallback).
+	restore_steam_sh "$steam_root"
+
 	if [ -f "$steam_root/client.sh" ]; then
-		log_step "$(L "Removing headcrab client.sh" "Removendo client.sh do headcrab")"
+		log_step "$(L "Removing leftover client.sh" "Removendo client.sh residual")"
 		rm -f "$steam_root/client.sh" 2>/dev/null || true
 	fi
 
