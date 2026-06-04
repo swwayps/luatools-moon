@@ -12,3 +12,6 @@ upstream/luatools/backend/temp_dl/
 upstream/luatools/backend/lua_runtime.log
 upstream/luatools/backend/loadedappids.txt
 upstream/luatools/backend/appidlogs.txt
+
+# Local backup of published release assets (not tracked).
+.release-backup/

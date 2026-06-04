@@ -185,6 +185,30 @@ cat > "$OUT/backend/update.json" <<'EOF'
 }
 EOF
 
+# 4b. plugin.json version -> this fork's VERSION (single source of truth).
+#     The in-app auto-update compares the GitHub release TAG (e.g. "v2")
+#     against this version. Keeping it as upstream's "8.0.4" would make
+#     a "v1"/"v2" tag always read as older -> auto-update never fires.
+#     So we stamp our own monotonic fork version that matches the tag
+#     scheme (tag "vN" -> version "N").
+if [[ -f "$ROOT/VERSION" ]]; then
+  FORK_VER="$(tr -d ' \t\n\r' < "$ROOT/VERSION")"
+  if [[ -n "$FORK_VER" ]]; then
+    FORK_VER="$FORK_VER" "$PYBIN" - "$OUT/plugin.json" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+ver = os.environ["FORK_VER"]
+with open(path, "r", encoding="utf-8") as f:
+    data = json.load(f)
+data["version"] = ver
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+PY
+    echo "[build] stamped plugin.json version = $FORK_VER"
+  fi
+fi
+
 # 5. Frontend patch: add a "Restart Steam" button to the "Game Added"
 #    success modal. Applied by a dedicated script to keep build.sh
 #    readable (the JS anchor is large).
