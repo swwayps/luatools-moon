@@ -408,6 +408,54 @@ restore_steam_sh() {
 	             "steam.sh sequestrado removido; a Steam vai regenerá-lo no próximo início")"
 }
 
+# Stop any running Steam so the cleanup/install can safely modify Steam's
+# files (steam.sh, the Millennium plugin dir, config.json). Tries a graceful
+# shutdown first, then SIGTERM, then SIGKILL. Mirrors slsteam-moon setup.sh.
+stop_steam() {
+	if ! pgrep -x steam >/dev/null 2>&1 \
+	   && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+	   && ! pgrep -f '/steam$|/steam ' >/dev/null 2>&1; then
+		log_success "$(L "No running Steam process detected" "Nenhum processo da Steam em execução")"
+		return 0
+	fi
+
+	log_info "$(L "Stopping running Steam" "Parando a Steam em execução")"
+
+	# Graceful: ask Steam to shut itself down.
+	if command -v steam >/dev/null 2>&1; then
+		steam -shutdown >/dev/null 2>&1 || true
+	fi
+
+	local i
+	for i in 1 2 3 4 5 6 7 8; do
+		if ! pgrep -x steam >/dev/null 2>&1 \
+		   && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
+			log_success "$(L "Steam stopped" "Steam parada")"
+			return 0
+		fi
+		sleep 1
+	done
+
+	# Escalate to SIGTERM.
+	pkill -TERM -x steam 2>/dev/null || true
+	pkill -TERM -f 'steamwebhelper' 2>/dev/null || true
+	pkill -TERM -f '/steam$|/steam ' 2>/dev/null || true
+	sleep 2
+
+	# Last resort: SIGKILL.
+	if pgrep -x steam >/dev/null 2>&1 \
+	   || pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+	   || pgrep -f '/steam$|/steam ' >/dev/null 2>&1; then
+		log_warn "$(L "Steam still running — forcing it to stop" "Steam ainda rodando — forçando o encerramento")"
+		pkill -KILL -x steam 2>/dev/null || true
+		pkill -KILL -f 'steamwebhelper' 2>/dev/null || true
+		pkill -KILL -f '/steam$|/steam ' 2>/dev/null || true
+		sleep 1
+	fi
+
+	log_success "$(L "Steam stopped" "Steam parada")"
+}
+
 cleanup_previous_install() {
 	local steam_root="$HOME/.steam/steam"
 
@@ -717,6 +765,9 @@ main() {
 	check_arch
 	check_internet
 	check_steam_native
+
+	print_section "$(L "Stopping Steam" "Parando a Steam")"
+	stop_steam
 
 	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
 	cleanup_previous_install
