@@ -106,6 +106,9 @@ rm -f  "$OUT/backend/lua_runtime.log" \
 cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
 mkdir -p "$OUT/backend/scripts"
 cp "$OVERLAY/backend/scripts/restart_steam.sh" "$OUT/backend/scripts/restart_steam.sh"
+# Override upstream downloader.sh with our env-resetting version (the
+# upstream one fails under Steam's runtime LD_LIBRARY_PATH on Linux).
+cp "$OVERLAY/backend/scripts/downloader.sh" "$OUT/backend/scripts/downloader.sh"
 chmod +x "$OUT/backend/scripts/restart_steam.sh" \
          "$OUT/backend/scripts/downloader.sh" 2>/dev/null || true
 cp "$OVERLAY/backend/api.json" "$OUT/backend/api.json"
@@ -173,6 +176,13 @@ patch_replace "$OUT/backend/auto_update.lua" \
         m_utils.exec('"'"'nohup bash "'"'"' .. sh .. '"'"'" > /dev/null 2>&1 &'"'"')
         return true
     end'
+
+# 3d. auto_update.lua — the in-app updater downloads via a direct
+#     curl|unzip that also runs under Steam'"'"'s runtime LD_LIBRARY_PATH;
+#     strip those env vars so system curl/unzip load system libs.
+patch_replace "$OUT/backend/auto_update.lua" \
+'        cmd = string.format('"'"'curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())' \
+'        cmd = string.format('"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())'
 
 # 4. update.json -> this fork.
 cat > "$OUT/backend/update.json" <<'EOF'
