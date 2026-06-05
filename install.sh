@@ -247,6 +247,18 @@ pkg_for() {
 			echo "tar" ;;
 		unzip)
 			echo "unzip" ;;
+		notify-send)
+			# slsteam-moon shells out to notify-send for in-Steam status
+			# popups (download progress, errors). Missing on minimal
+			# installs; package name varies per family.
+			case "$family" in
+				debian)   echo "libnotify-bin" ;;
+				fedora)   echo "libnotify" ;;
+				arch)     echo "libnotify" ;;
+				opensuse) echo "libnotify-tools" ;;
+				*)        echo "libnotify" ;;
+			esac
+			;;
 	esac
 }
 
@@ -277,11 +289,11 @@ pm_install() {
 install_dependencies() {
 	local family; family="$(get_distro_family)"
 
-	log_info "$(L "Checking required tools (jq, curl, tar, unzip)" \
-	             "Verificando ferramentas necessárias (jq, curl, tar, unzip)")"
+	log_info "$(L "Checking required tools (jq, curl, tar, unzip, notify-send)" \
+	             "Verificando ferramentas necessárias (jq, curl, tar, unzip, notify-send)")"
 
 	local missing_pkgs=() tool
-	for tool in jq curl tar unzip; do
+	for tool in jq curl tar unzip notify-send; do
 		if ! command -v "$tool" >/dev/null 2>&1; then
 			missing_pkgs+=("$(pkg_for "$tool" "$family")")
 		fi
