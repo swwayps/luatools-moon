@@ -32,3 +32,11 @@ Reference material:
 ## Support
 
 Reach out by email: newrafael@proton.me
+
+## Uninstall
+
+Want to remove everything? Run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nwrafael/slsteammoon-ltsteamplugin/main/uninstall.sh | bash
+```
