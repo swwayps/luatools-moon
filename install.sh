@@ -31,6 +31,18 @@ PLUGIN_NAME="luatools"                          # plugin.json "name"
 
 MILLENNIUM_INSTALL_URL="https://steambrew.app/install.sh"
 
+# CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
+# user's own Google Drive / OneDrive / local folder. We pull the 32-bit hook
+# (cloud_redirect.so) from the latest GitHub release and load it via the Steam
+# wrapper; the flatpak companion app provides the cloud-provider login UI.
+CR_REPO="Selectively11/CloudRedirect"
+CR_SO_ASSET="cloud_redirect.so"
+CR_FLATPAK_ASSET="cloudredirect.flatpak"
+CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
+CR_DIR="$HOME/.local/share/CloudRedirect"
+CR_SO_PATH="$CR_DIR/cloud_redirect.so"
+CR_KDE_RUNTIME="org.kde.Platform//6.10"
+
 # ============================================================================
 # Pretty output — "moonlit night" palette, matching slsteam-moon's setup.sh.
 # Degrades to plain text on dumb / non-TTY terminals.
@@ -357,7 +369,8 @@ install_libssl_i386() {
 #   - a headcrab-patched ~/.steam/steam/steam.sh + client.sh that hijacks
 #     Steam's bootstrapper
 #   - a steam.cfg with BootStrapperInhibitAll=enable (blocks Steam updates)
-#   - ~/.headcrab, a headcrab desktop entry/icon, and CloudRedirect
+#   - ~/.headcrab and a headcrab desktop entry/icon (CloudRedirect is kept —
+#     we manage it ourselves for cloud saves, see install_cloudredirect)
 #   - an enter-the-wired SLSsteam install at ~/.local/share/SLSsteam
 #   - on Arch, a system slssteam / slssteam-git package
 #
@@ -534,7 +547,13 @@ cleanup_previous_install() {
 	fi
 
 	# --- headcrab support files -------------------------------------------
-	for d in "$HOME/.headcrab" "$HOME/.local/share/CloudRedirect"; do
+	# NOTE: ~/.local/share/CloudRedirect is intentionally PRESERVED. We now
+	# manage CloudRedirect ourselves (see install_cloudredirect) to provide
+	# Steam Cloud saves for unowned games; it does not conflict with our stack
+	# the way the steam.sh hijack / client.sh / BootStrapperInhibitAll do
+	# (those are still removed above). Only the headcrab desktop entry/icon and
+	# ~/.headcrab are cleaned up here.
+	for d in "$HOME/.headcrab"; do
 		if [ -e "$d" ]; then
 			log_step "$(L "Removing $d" "Removendo $d")"
 			rm -rf "$d" 2>/dev/null || true
@@ -779,6 +798,158 @@ EOF
 }
 
 # ============================================================================
+# Step: CloudRedirect (optional) — Steam Cloud saves for unowned games
+# ============================================================================
+# CloudRedirect (https://github.com/Selectively11/CloudRedirect) redirects
+# Steam Cloud reads/writes for unowned (lua) games to the user's own cloud
+# provider. Two pieces:
+#   1. cloud_redirect.so — the 32-bit hook loaded into Steam. We always install
+#      this (downloaded from the latest GitHub release) and the Steam wrapper
+#      loads it via LD_PRELOAD when present.
+#   2. The flatpak companion app — the cloud-provider login UI (Google Drive /
+#      OneDrive). We install it ONLY if the user already has flatpak; we never
+#      install flatpak itself (too invasive). Without it the .so still loads but
+#      there is nowhere to sync to, so we just tell the user how to finish.
+#
+# We also flip SLSsteam's DisableCloud to "no" so the cloud RPCs reach
+# CloudRedirect instead of being suppressed for AddedApps.
+
+# Track, for the final notice, whether the login app got installed.
+CR_FLATPAK_INSTALLED=0
+
+# Download the latest 32-bit cloud_redirect.so into ~/.local/share/CloudRedirect.
+install_cloudredirect_so() {
+	local url tmp so
+
+	log_info "$(L "Resolving latest CloudRedirect release" \
+	             "Buscando a última release do CloudRedirect")"
+	url="$(latest_release_asset_url "$CR_REPO" "^${CR_SO_ASSET}$")"
+	if [ -z "$url" ]; then
+		log_warn "$(L "Could not find cloud_redirect.so in the latest release; skipping cloud saves." \
+		             "Não foi possível encontrar cloud_redirect.so na última release; pulando cloud saves.")"
+		return 1
+	fi
+
+	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
+	so="$tmp/cloud_redirect.so"
+
+	log_info "$(L "Downloading cloud_redirect.so" "Baixando cloud_redirect.so")"
+	if ! curl -fL "$url" -o "$so"; then
+		log_warn "$(L "Download of cloud_redirect.so failed; skipping cloud saves." \
+		             "Falha ao baixar cloud_redirect.so; pulando cloud saves.")"
+		return 1
+	fi
+
+	# The Steam client is 32-bit, so the hook must be a 32-bit ELF or it will be
+	# silently ignored by the loader. Verify before deploying.
+	if command -v file >/dev/null 2>&1; then
+		if ! file -b "$so" | grep -q "ELF 32-bit"; then
+			log_warn "$(L "Downloaded cloud_redirect.so is not 32-bit; skipping cloud saves." \
+			             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
+			return 1
+		fi
+	fi
+
+	mkdir -p "$CR_DIR"
+	install -m 755 "$so" "$CR_SO_PATH" 2>/dev/null || {
+		cp -f "$so" "$CR_SO_PATH" && chmod 755 "$CR_SO_PATH"
+	}
+	log_success "$(L "cloud_redirect.so installed to $CR_SO_PATH" \
+	             "cloud_redirect.so instalado em $CR_SO_PATH")"
+	return 0
+}
+
+# Flip DisableCloud to "no" in the SLSsteam config so cloud RPCs reach
+# CloudRedirect. The config is created by slsteam-moon's setup.sh, which runs
+# before this step.
+enable_cloud_in_slsteam_config() {
+	local cfg="$HOME/.config/SLSsteam/config.yaml"
+	[ -f "$cfg" ] || { log_warn "$(L "SLSsteam config not found; leaving cloud setting as-is." \
+	                                "Config do SLSsteam não encontrada; mantendo o cloud como está.")"; return 0; }
+
+	if grep -qE "^DisableCloud:" "$cfg"; then
+		sed -i "s/^DisableCloud:.*/DisableCloud: no/" "$cfg"
+	else
+		printf '\nDisableCloud: no\n' >> "$cfg"
+	fi
+	log_success "$(L "Enabled cloud saves in SLSsteam config (DisableCloud: no)" \
+	             "Cloud saves ativado na config do SLSsteam (DisableCloud: no)")"
+}
+
+# Install the flatpak companion app from the release bundle. Only called when
+# flatpak is present. Best-effort: failure just means the user finishes setup
+# manually (the .so is already in place).
+install_cloudredirect_flatpak() {
+	local url tmp bundle
+
+	# Already installed? Nothing to do.
+	if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
+		log_success "$(L "CloudRedirect app already installed" "App CloudRedirect já instalado")"
+		CR_FLATPAK_INSTALLED=1
+		return 0
+	fi
+
+	log_info "$(L "Resolving CloudRedirect companion app (flatpak)" \
+	             "Buscando o app companheiro do CloudRedirect (flatpak)")"
+	url="$(latest_release_asset_url "$CR_REPO" "^${CR_FLATPAK_ASSET}$")"
+	if [ -z "$url" ]; then
+		log_warn "$(L "Could not find the CloudRedirect flatpak bundle; skipping the login app." \
+		             "Não foi possível encontrar o bundle flatpak do CloudRedirect; pulando o app de login.")"
+		return 1
+	fi
+
+	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
+	bundle="$tmp/$CR_FLATPAK_ASSET"
+
+	log_info "$(L "Downloading CloudRedirect app" "Baixando o app CloudRedirect")"
+	if ! curl -fL "$url" -o "$bundle"; then
+		log_warn "$(L "Download of the CloudRedirect app failed; you can install it later." \
+		             "Falha ao baixar o app CloudRedirect; você pode instalá-lo depois.")"
+		return 1
+	fi
+
+	# The bundle needs the KDE runtime. It is not bundled, so make sure flathub
+	# is available as a user remote and pull the runtime first.
+	flatpak remote-add --user --if-not-exists flathub \
+		https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
+
+	log_info "$(L "Installing KDE runtime (required by the app)" \
+	             "Instalando o runtime KDE (exigido pelo app)")"
+	flatpak install --user -y flathub "$CR_KDE_RUNTIME" >/dev/null 2>&1 || true
+
+	log_info "$(L "Installing the CloudRedirect app" "Instalando o app CloudRedirect")"
+	if flatpak install --user -y --bundle "$bundle" >/dev/null 2>&1; then
+		log_success "$(L "CloudRedirect app installed" "App CloudRedirect instalado")"
+		CR_FLATPAK_INSTALLED=1
+		return 0
+	fi
+
+	log_warn "$(L "Could not install the CloudRedirect app automatically; you can install it later." \
+	             "Não foi possível instalar o app CloudRedirect automaticamente; você pode instalá-lo depois.")"
+	return 1
+}
+
+install_cloudredirect() {
+	# The .so is the core piece — always install it (and enable cloud in the
+	# SLSsteam config) regardless of flatpak.
+	if ! install_cloudredirect_so; then
+		# No hook → no cloud saves; nothing else to do.
+		return 0
+	fi
+
+	enable_cloud_in_slsteam_config
+
+	# The login UI is a flatpak. Only install it if the user already has
+	# flatpak — we never install flatpak itself.
+	if command -v flatpak >/dev/null 2>&1; then
+		install_cloudredirect_flatpak
+	else
+		log_warn "$(L "flatpak not found — installing the cloud hook only." \
+		             "flatpak não encontrado — instalando apenas o hook de cloud.")"
+	fi
+}
+
+# ============================================================================
 # Completion notice
 # ============================================================================
 print_complete() {
@@ -793,7 +964,35 @@ print_complete() {
 	echo -e "    ${GREEN}•${NC} slsteam-moon"
 	echo -e "    ${GREEN}•${NC} Millennium"
 	echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
+	if [ -f "$CR_SO_PATH" ]; then
+		echo -e "    ${GREEN}•${NC} CloudRedirect ($(L "cloud saves" "cloud saves"))"
+	fi
 	echo ""
+
+	# Cloud-save guidance: the .so is installed but the user still needs the
+	# login app + a provider sign-in before saves actually sync.
+	if [ -f "$CR_SO_PATH" ]; then
+		if [ "$CR_FLATPAK_INSTALLED" = 1 ]; then
+			echo -e "  ${MOON}$(L "Cloud saves:" "Cloud saves:")${NC}"
+			echo -e "    $(L "Open the CloudRedirect app and sign in to a provider" \
+			               "Abra o app CloudRedirect e faça login em um provedor")"
+			echo -e "    $(L "(Google Drive / OneDrive), then restart Steam." \
+			               "(Google Drive / OneDrive), depois reinicie a Steam.")"
+			echo ""
+		else
+			echo -e "  ${YELLOW}$(L "Cloud saves (optional):" "Cloud saves (opcional):")${NC}"
+			echo -e "    $(L "The cloud hook is installed, but you need the login app to sync." \
+			               "O hook de cloud está instalado, mas você precisa do app de login para sincronizar.")"
+			echo -e "    $(L "1) Install flatpak (from your package manager)." \
+			               "1) Instale o flatpak (pelo seu gerenciador de pacotes).")"
+			echo -e "    $(L "2) Re-run this installer, or install the CloudRedirect flatpak yourself." \
+			               "2) Rode este instalador de novo, ou instale o flatpak do CloudRedirect manualmente.")"
+			echo -e "    $(L "3) Open the app, sign in to a provider, then restart Steam." \
+			               "3) Abra o app, faça login em um provedor, depois reinicie a Steam.")"
+			echo ""
+		fi
+	fi
+
 	echo -e "  $(L "Start Steam to begin using LuaTools." \
 	               "Inicie a Steam para começar a usar o LuaTools.")"
 	echo ""
@@ -829,6 +1028,9 @@ main() {
 
 	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
 	install_plugin
+
+	print_section "$(L "Setting up cloud saves (CloudRedirect)" "Configurando cloud saves (CloudRedirect)")"
+	install_cloudredirect
 
 	print_complete
 }

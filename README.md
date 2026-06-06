@@ -28,6 +28,8 @@ Reference material:
   prior Linux port.
 - [Millennium](https://github.com/SteamClientHomebrew/Millennium) —
   Steam client modding framework.
+- [CloudRedirect](https://github.com/Selectively11/CloudRedirect) by
+  Selectively11 — optional cloud saves for unowned games.
 
 ## Support
 

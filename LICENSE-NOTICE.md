@@ -54,3 +54,9 @@ to match if the original author's terms allow it.
 - [LuaToolsLinux 1.x](https://github.com/Star123451/LuaToolsLinux) —
   prior Linux port by StarWarsK & geovanygrdt. Referenced for path
   resolution patterns; no code copied directly.
+- [CloudRedirect](https://github.com/Selectively11/CloudRedirect) by
+  Selectively11 — optional cloud-save redirection. **Not redistributed**: the
+  installer downloads `cloud_redirect.so` from the project's GitHub releases at
+  install time and, when flatpak is available, installs the project's flatpak
+  companion app from its release bundle. No CloudRedirect code or binaries are
+  vendored in this repo. License terms are the upstream project's.

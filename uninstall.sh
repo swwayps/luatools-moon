@@ -13,8 +13,10 @@
 #    • Millennium            (~/.config/millennium, ~/.local/share/millennium,
 #                             /usr/lib/millennium, /usr/share/millennium).
 #    • LuaTools plugin       (any "luatools" dir under known plugin roots).
-#    • Old port leftovers    (~/.headcrab, ~/.local/share/CloudRedirect,
-#                             hijacked steam.sh / client.sh / steam.cfg, etc.)
+#    • Old port leftovers    (~/.headcrab, hijacked steam.sh / client.sh /
+#                             steam.cfg, etc.)
+#    • CloudRedirect         (the cloud-save hook, its data, and the flatpak
+#                             companion app, if installed)
 #
 #  Bilingual (English / Português) based on the system locale.
 # ============================================================================
@@ -449,7 +451,7 @@ cleanup_old_port_leftovers() {
 	fi
 
 	local d
-	for d in "$HOME/.headcrab" "$HOME/.local/share/CloudRedirect"; do
+	for d in "$HOME/.headcrab"; do
 		if [ -e "$d" ]; then
 			log_step "$(L "Removing $d" "Removendo $d")"
 			rm -rf "$d" 2>/dev/null || true
@@ -457,6 +459,22 @@ cleanup_old_port_leftovers() {
 	done
 	rm -f "$HOME/.local/share/applications/headcrab.desktop" 2>/dev/null || true
 	rm -f "$HOME/.local/share/icons/hicolor/48x48/apps/headcrab.png" 2>/dev/null || true
+
+	# CloudRedirect: we install this as part of our stack (cloud saves), so
+	# remove it on uninstall. Drop the hook + data dir and, if present, the
+	# flatpak companion app. The user's cloud provider data (on their Drive)
+	# is untouched.
+	if [ -e "$HOME/.local/share/CloudRedirect" ]; then
+		log_step "$(L "Removing CloudRedirect (~/.local/share/CloudRedirect)" \
+		             "Removendo CloudRedirect (~/.local/share/CloudRedirect)")"
+		rm -rf "$HOME/.local/share/CloudRedirect" 2>/dev/null || true
+	fi
+	rm -rf "$HOME/.config/CloudRedirect" 2>/dev/null || true
+	if command -v flatpak >/dev/null 2>&1 \
+	   && flatpak list 2>/dev/null | grep -q "org.cloudredirect.CloudRedirect"; then
+		log_step "$(L "Removing the CloudRedirect app" "Removendo o app CloudRedirect")"
+		flatpak uninstall --user -y org.cloudredirect.CloudRedirect >/dev/null 2>&1 || true
+	fi
 
 	# Arch: system slssteam package conflicts with the local install.
 	if command -v pacman >/dev/null 2>&1; then
