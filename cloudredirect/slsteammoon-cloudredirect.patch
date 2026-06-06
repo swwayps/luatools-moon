@@ -1,0 +1,121 @@
+diff --git a/src/common/app_state.cpp b/src/common/app_state.cpp
+index 67d4eea..581f03f 100644
+--- a/src/common/app_state.cpp
++++ b/src/common/app_state.cpp
+@@ -225,11 +225,30 @@ StateFetchResult FetchCloudState(uint32_t accountId, uint32_t appId) {
+             state.cn = legacyCN;
+             if (legacyResult.status == ManifestFetchStatus::Ok) {
+                 for (const auto& [name, me] : legacyResult.manifest) {
++                    // Heal CAS-corrupted legacy keys: builds <= 2.0.4 wrote the
++                    // blob path "<file>/<sha40>" as the manifest key, which makes
++                    // restore land at "<file>/<sha40>" (a directory) instead of
++                    // the real save file. Strip a 40-hex-char leaf so the
++                    // migrated state uses the true filename.
++                    std::string clean = name;
++                    size_t lastSlash = clean.rfind('/');
++                    if (lastSlash != std::string::npos && lastSlash != 0 &&
++                        lastSlash + 1 < clean.size()) {
++                        std::string leaf = clean.substr(lastSlash + 1);
++                        if (leaf.size() == 40 &&
++                            leaf.find_first_not_of("0123456789abcdef") == std::string::npos) {
++                            clean = clean.substr(0, lastSlash);
++                        }
++                    }
++                    if (clean.empty()) continue;
+                     FileEntry fe;
+                     fe.sha = me.sha;
+                     fe.timestamp = me.timestamp;
+                     fe.size = me.size;
+-                    state.files[name] = std::move(fe);
++                    // CAS dedup: if multiple SHAs collapsed to one name, keep largest.
++                    auto it = state.files.find(clean);
++                    if (it != state.files.end() && it->second.size >= fe.size) continue;
++                    state.files[clean] = std::move(fe);
+                 }
+             }
+             if (state.cn > 0 && state.files.empty() && g_stateProvider) {
+diff --git a/src/platform/linux/init.cpp b/src/platform/linux/init.cpp
+index 9aceaa3..a2aee04 100644
+--- a/src/platform/linux/init.cpp
++++ b/src/platform/linux/init.cpp
+@@ -384,13 +384,27 @@ static bool SteamclientMapped()
+ 
+ static void* DeferredInitThread(void*)
+ {
+-    // Poll for steamclient.so -- under LD_PRELOAD we load before Steam has
+-    // mapped steamclient, so a fixed delay is insufficient.
++    // Poll for steamclient.so. Under LD_PRELOAD we load before Steam has mapped
++    // steamclient, so a fixed short delay is insufficient. Upstream used a fixed
++    // 10s window, which is too short on distros where steamclient.so maps late
++    // (e.g. Arch/CachyOS mapped it >10s after start in testing) -- there the hook
++    // would time out and never attach. Poll with a generous bound instead so the
++    // single LD_PRELOAD load path works universally, only initialising once
++    // steamclient is present. (LD_AUDIT was tried as an event-driven alternative
++    // but its audit-context heap ops corrupted the client heap; LD_PRELOAD +
++    // long poll is the safe cross-distro path.)
+     DebugLog("[CR] DeferredInit: waiting for steamclient.so\n");
+-    for (int i = 0; i < 20; i++) {  // up to 10 seconds
+-        if (SteamclientMapped()) break;
++    bool mapped = false;
++    for (int i = 0; i < 240; i++) {  // up to 120 seconds
++        if (SteamclientMapped()) { mapped = true; break; }
+         usleep(500000);
+     }
++    if (!mapped) {
++        DebugLog("[CR] DeferredInit: steamclient.so never mapped within window, aborting\n");
++        Log::Error("Init aborted: steamclient.so not mapped within wait window");
++        g_initThreadDone.store(true, std::memory_order_release);
++        return nullptr;
++    }
+     DebugLog("[CR] DeferredInit: starting\n");
+ 
+     // Install crash guard so a bad memory read aborts correctly
+@@ -425,30 +439,37 @@ static void* DeferredInitThread(void*)
+ 
+ 
+ 
+-__attribute__((constructor))
+-static void OnLoad()
++// Spawn the deferred-init thread exactly once. The compare_exchange gate
++// guarantees a single init thread per process.
++static void SpawnDeferredInit()
+ {
+-    std::string proc = GetProcessName();
+-    if (proc != "steam" && !SteamclientMapped())
+-        return;
+-
+-    // Clean ourselves from LD_PRELOAD so child processes don't inherit us
+     CleanLdPreload();
+-
+     EnsureLogInit();
+-    DebugLog("[CR] OnLoad: target process (steam), spawning deferred init thread\n");
+-    Log::Info("cloud_redirect.so active in process 'steam' (pid=%d)", getpid());
+ 
+     bool expected = false;
+     if (g_hookAttempted.compare_exchange_strong(expected, true))
+     {
++        DebugLog("[CR] spawning deferred init thread\n");
++        Log::Info("cloud_redirect.so active in process 'steam' (pid=%d)", getpid());
+         if (pthread_create(&g_initThread, nullptr, DeferredInitThread, nullptr) != 0) {
+-            DebugLog("[CR] OnLoad: FAILED to create init thread\n");
++            DebugLog("[CR] FAILED to create init thread\n");
+             g_initThreadDone.store(true, std::memory_order_release);
+         }
+     }
+ }
+ 
++__attribute__((constructor))
++static void OnLoad()
++{
++    std::string proc = GetProcessName();
++    if (proc != "steam" && !SteamclientMapped())
++        return;
++
++    // Clean ourselves from LD_PRELOAD so child processes don't inherit us
++    DebugLog("[CR] OnLoad: target process (steam), spawning deferred init thread\n");
++    SpawnDeferredInit();
++}
++
+ __attribute__((destructor))
+ static void OnUnload()
+ {

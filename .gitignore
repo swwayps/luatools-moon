@@ -15,3 +15,6 @@ upstream/luatools/backend/appidlogs.txt
 
 # Local backup of published release assets (not tracked).
 .release-backup/
+
+# CloudRedirect reproducible-build scratch (build.sh clones upstream here).
+cloudredirect/.build-src/
