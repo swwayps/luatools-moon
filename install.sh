@@ -859,21 +859,27 @@ install_cloudredirect_so() {
 	return 0
 }
 
-# Flip DisableCloud to "no" in the SLSsteam config so cloud RPCs reach
-# CloudRedirect. The config is created by slsteam-moon's setup.sh, which runs
-# before this step.
+# Make sure cloud saves are enabled in the SLSsteam config so cloud RPCs reach
+# CloudRedirect. Fresh installs already get DisableCloud: no from slsteam-moon's
+# default config (created on Steam's first launch), so this only needs to act
+# when an OLDER config already exists on disk with DisableCloud: yes (upgrade
+# from a build that defaulted to yes). If the config doesn't exist yet, the
+# default handles it — nothing to do.
 enable_cloud_in_slsteam_config() {
 	local cfg="$HOME/.config/SLSsteam/config.yaml"
-	[ -f "$cfg" ] || { log_warn "$(L "SLSsteam config not found; leaving cloud setting as-is." \
-	                                "Config do SLSsteam não encontrada; mantendo o cloud como está.")"; return 0; }
+	[ -f "$cfg" ] || return 0
+
+	if grep -qE "^DisableCloud:[[:space:]]*no\b" "$cfg"; then
+		return 0
+	fi
 
 	if grep -qE "^DisableCloud:" "$cfg"; then
 		sed -i "s/^DisableCloud:.*/DisableCloud: no/" "$cfg"
 	else
 		printf '\nDisableCloud: no\n' >> "$cfg"
 	fi
-	log_success "$(L "Enabled cloud saves in SLSsteam config (DisableCloud: no)" \
-	             "Cloud saves ativado na config do SLSsteam (DisableCloud: no)")"
+	log_success "$(L "Enabled cloud saves in existing SLSsteam config (DisableCloud: no)" \
+	             "Cloud saves ativado na config existente do SLSsteam (DisableCloud: no)")"
 }
 
 # Install the flatpak companion app from the release bundle. Only called when
