@@ -890,6 +890,55 @@ enable_cloud_in_slsteam_config() {
 	             "Cloud saves ativado na config existente do SLSsteam (DisableCloud: no)")"
 }
 
+# Repair the CAS-corrupt save layout left by older CloudRedirect builds
+# (<= 2.0.4). Those builds wrote a save's bytes into a directory named after the
+# file ("<file>/<sha40>") instead of the file itself. Steam then sees a
+# directory where it expects a save and reports "Steam Cloud Error / Unable to
+# sync", and the game can't read the save. Convert each such directory back into
+# the regular file. Scans the CloudRedirect local storage and the Proton
+# compatdata prefixes. Idempotent and conservative: only acts on a directory
+# whose name looks like a save and that holds exactly one 40-hex-named file.
+repair_cas_save_layout() {
+	local roots=(
+		"$HOME/.config/CloudRedirect/storage"
+		"$HOME/.steam/steam/steamapps/compatdata"
+		"$HOME/.steam/debian-installation/steamapps/compatdata"
+	)
+	local repaired=0 root dir base leaf tmp
+	for root in "${roots[@]}"; do
+		[ -d "$root" ] || continue
+		while IFS= read -r -d '' dir; do
+			base="$(basename "$dir")"
+			case "$base" in
+				*.es3|*.jpg|*.sav|*.save|*.dat|*.bin|*.json|*.xml) ;;
+				*) continue ;;
+			esac
+			# Must hold exactly one regular file...
+			local files=()
+			while IFS= read -r -d '' f; do files+=("$f"); done \
+				< <(find "$dir" -maxdepth 1 -type f -print0 2>/dev/null)
+			[ "${#files[@]}" -eq 1 ] || continue
+			leaf="$(basename "${files[0]}")"
+			# ...named like a 40-char SHA-1 (the CAS leaf).
+			case "$leaf" in
+				*[!0-9a-f]*) continue ;;
+			esac
+			[ "${#leaf}" -eq 40 ] || continue
+
+			tmp="$(mktemp "$(dirname "$dir")/.casrepair.XXXXXX")" || continue
+			if cp -p "${files[0]}" "$tmp" && rm -rf "$dir" && mv "$tmp" "$dir"; then
+				repaired=$((repaired+1))
+			else
+				rm -f "$tmp" 2>/dev/null
+			fi
+		done < <(find "$root" -type d -print0 2>/dev/null)
+	done
+	if [ "$repaired" -gt 0 ]; then
+		log_success "$(L "Repaired $repaired cloud-save file(s) from a legacy storage layout" \
+		             "Reparado(s) $repaired arquivo(s) de cloud-save de um layout de armazenamento antigo")"
+	fi
+}
+
 # Install the flatpak companion app from the release bundle. Only called when
 # flatpak is present. Best-effort: failure just means the user finishes setup
 # manually (the .so is already in place).
@@ -952,6 +1001,10 @@ install_cloudredirect() {
 	fi
 
 	enable_cloud_in_slsteam_config
+
+	# Heal any saves left in the legacy CAS-corrupt directory layout so Steam
+	# stops reporting "Steam Cloud Error" for them.
+	repair_cas_save_layout
 
 	# The login UI is a flatpak. Only install it if the user already has
 	# flatpak — we never install flatpak itself.

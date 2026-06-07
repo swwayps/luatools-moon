@@ -144,6 +144,42 @@ index 72acf81..0ce337c 100644
      f.read(reinterpret_cast<char*>(out.data()), size);
      if (f.fail() || f.gcount() != size) {
          LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d)",
+diff --git a/src/common/manifest_store.cpp b/src/common/manifest_store.cpp
+index 2bf11f1..e162a43 100644
+--- a/src/common/manifest_store.cpp
++++ b/src/common/manifest_store.cpp
+@@ -152,7 +152,30 @@ static Manifest ParseManifestJson(const std::string& json) {
+         if (entry.has("sha"))   me.sha      = HexToSha(entry["sha"].str());
+         if (entry.has("ts"))    me.timestamp = (uint64_t)entry["ts"].integer();
+         if (entry.has("size"))  me.size     = (uint64_t)entry["size"].integer();
+-        result[filename] = std::move(me);
++
++        // Heal CAS-corrupt keys: builds <= 2.0.4 stored the blob path
++        // "<file>/<sha40>" as the manifest key. Left as-is, the key never
++        // matches the clean filename Steam asks for, so file_size resolves to
++        // 0 (download size mismatch -> "Unable to sync") and the blob path
++        // points at a directory. Strip a 40-hex-char leaf so the manifest is
++        // keyed by the true filename.
++        std::string key = filename;
++        size_t lastSlash = key.rfind('/');
++        if (lastSlash != std::string::npos && lastSlash != 0 &&
++            lastSlash + 1 < key.size()) {
++            std::string leaf = key.substr(lastSlash + 1);
++            if (leaf.size() == 40 &&
++                leaf.find_first_not_of("0123456789abcdef") == std::string::npos) {
++                key = key.substr(0, lastSlash);
++            }
++        }
++        if (key.empty()) continue;
++
++        // If multiple CAS keys collapse onto one filename, keep the largest
++        // (matches the dedup rule used when healing legacy cloud state).
++        auto existing = result.find(key);
++        if (existing != result.end() && existing->second.size >= me.size) continue;
++        result[key] = std::move(me);
+     }
+     return result;
+ }
 diff --git a/src/platform/linux/http_server.cpp b/src/platform/linux/http_server.cpp
 index 06faff4..edf4001 100644
 --- a/src/platform/linux/http_server.cpp
