@@ -82,7 +82,7 @@ index 0432f17..28e2797 100644
      }
  
 diff --git a/src/common/cloud_storage.cpp b/src/common/cloud_storage.cpp
-index 72acf81..057dfc5 100644
+index 72acf81..0ce337c 100644
 --- a/src/common/cloud_storage.cpp
 +++ b/src/common/cloud_storage.cpp
 @@ -1071,18 +1071,51 @@ bool StoreBlobStaged(uint32_t accountId, uint32_t appId, uint64_t batchId,
@@ -144,44 +144,6 @@ index 72acf81..057dfc5 100644
      f.read(reinterpret_cast<char*>(out.data()), size);
      if (f.fail() || f.gcount() != size) {
          LOG("[CloudStorage] RetrieveBlob: cache read failed for %s (gcount=%lld of %lld, fail=%d)",
-@@ -1237,6 +1270,37 @@ std::vector<uint8_t> RetrieveBlob(uint32_t accountId, uint32_t appId,
-             }
-         }
- 
-+        // slsteam-moon: cache-first for callers that DON'T supply an
-+        // expected SHA (notably the localhost HTTP download path, which
-+        // Steam hits for every save file at login). Without this, a save
-+        // that has not changed since the last boot is still re-fetched
-+        // from the cloud provider every launch — several sequential Drive
-+        // round-trips (state, cn, blob, plus the mismatch fallback chain)
-+        // that dominate boot time (~4-6s per app with a save).
-+        //
-+        // Safety: only skip the network when we can PROVE nothing changed
-+        // — i.e. the cloud CN equals the local CN. In that case the local
-+        // manifest is cloud-authoritative, so the local blob (verified to
-+        // match the manifest SHA) is exactly what the cloud would serve.
-+        // Any of: CN probe fails, CN advanced, no local SHA, blob missing
-+        // or content-mismatch -> fall through to the normal cloud fetch.
-+        if (expectedShaHex.empty() && !shaHex.empty()) {
-+            const uint64_t localCN = LocalStorage::GetChangeNumber(accountId, appId);
-+            if (localCN > 0) {
-+                const uint64_t cloudCN = FetchCloudCN(accountId, appId);
-+                if (cloudCN != 0 && cloudCN == localCN) {
-+                    std::vector<uint8_t> cached;
-+                    if (TryReadCachedBlob(localPath, filename, cached) &&
-+                        ShaToHex(FileUtil::SHA1(cached.data(), cached.size())) == shaHex) {
-+                        LOG("[CloudStorage] RetrieveBlob: cache hit (CN unchanged %llu, local SHA match): %s (%zu bytes)",
-+                            (unsigned long long)localCN, filename.c_str(), cached.size());
-+                        if (found) *found = true;
-+                        return cached;
-+                    }
-+                }
-+            }
-+        }
-+
-         if (!shaHex.empty()) {
-             std::vector<uint8_t> data;
-             std::string canonicalPath = CloudBlobPathByNameAndSHA(accountId, appId, filename, shaHex);
 diff --git a/src/common/manifest_store.cpp b/src/common/manifest_store.cpp
 index 2bf11f1..e162a43 100644
 --- a/src/common/manifest_store.cpp
