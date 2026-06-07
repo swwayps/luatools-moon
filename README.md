@@ -19,8 +19,7 @@ Upstream:
 
 - [piqseu](https://github.com/piqseu/ltsteamplugin) — the `ltsteamplugin`
   release line this fork tracks. Originally by
-  [madoiscool](https://github.com/madoiscool/ltsteamplugin), with earlier
-  forks by [skyflarefox](https://github.com/skyflarefox/plugin).
+  [madoiscool](https://github.com/madoiscool/ltsteamplugin).
 
 Reference material:
 

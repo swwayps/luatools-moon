@@ -10,8 +10,7 @@ boundaries clear.
 Vendored pristine at `upstream/luatools/`. Source: `ltsteamplugin.zip`
 from [piqseu/ltsteamplugin](https://github.com/piqseu/ltsteamplugin)
 GitHub releases (the official release line). Original plugin authored
-by [madoiscool](https://github.com/madoiscool/ltsteamplugin); earlier
-forks include [skyflarefox](https://github.com/skyflarefox/plugin).
+by [madoiscool](https://github.com/madoiscool/ltsteamplugin).
 
 The upstream zip ships without a `LICENSE` file. The fork keeps the
 vendored tree byte-for-byte and applies changes only at build time, so
