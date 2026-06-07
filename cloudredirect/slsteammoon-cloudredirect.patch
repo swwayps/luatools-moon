@@ -245,10 +245,23 @@ index 06faff4..edf4001 100644
                          g_activeConnections.fetch_sub(1);
                          done->store(true, std::memory_order_release);
 diff --git a/src/platform/linux/init.cpp b/src/platform/linux/init.cpp
-index 9aceaa3..a2aee04 100644
+index 9aceaa3..2e2d213 100644
 --- a/src/platform/linux/init.cpp
 +++ b/src/platform/linux/init.cpp
-@@ -384,13 +384,27 @@ static bool SteamclientMapped()
+@@ -243,7 +243,11 @@ static void DoInit()
+     g_initialized.store(true, std::memory_order_release);
+     DebugLog("[CR] DoInit: SUCCESS\n");
+     Log::Info("CloudRedirect initialized successfully (all hooks active)");
+-    Notify("Loaded successfully");
++    // slsteam-moon: suppress the "Loaded successfully" desktop popup. The
++    // stack already shows SLSsteam's own "Loaded successfully" notification on
++    // every Steam start; a second CloudRedirect popup is redundant noise. The
++    // critical/error Notify() calls above are kept so genuine init failures
++    // still surface to the user.
+ }
+ 
+ 
+@@ -384,13 +388,27 @@ static bool SteamclientMapped()
  
  static void* DeferredInitThread(void*)
  {
@@ -280,7 +293,7 @@ index 9aceaa3..a2aee04 100644
      DebugLog("[CR] DeferredInit: starting\n");
  
      // Install crash guard so a bad memory read aborts correctly
-@@ -425,30 +439,37 @@ static void* DeferredInitThread(void*)
+@@ -425,30 +443,37 @@ static void* DeferredInitThread(void*)
  
  
  
