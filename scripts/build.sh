@@ -184,6 +184,105 @@ patch_replace "$OUT/backend/auto_update.lua" \
 '        cmd = string.format('"'"'curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())' \
 '        cmd = string.format('"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())'
 
+# 3e. main.lua — OpenExternalUrl (Discord button + other external links).
+#     TWO upstream bugs on Linux:
+#     (1) Millennium'"'"'s IPC bridge sorts JS object keys alphabetically and
+#         passes their VALUES positionally. The frontend calls it with
+#         { url, contentScriptQuery }, which sorts to [contentScriptQuery,
+#         url]. The upstream signature OpenExternalUrl(url) therefore binds
+#         `url` to the empty contentScriptQuery and the real URL is lost
+#         (confirmed via logging: "ENTER raw= type=string"). Fix the
+#         signature to (contentScriptQuery, url) to match the sorted order.
+#     (2) The non-Windows branch ran `xdg-open` under Steam'"'"'s runtime env
+#         (LD_LIBRARY_PATH/LD_AUDIT/LD_PRELOAD -> 32-bit Steam runtime),
+#         which can crash spawned GUI binaries. Reset those vars + detach.
+patch_replace "$OUT/backend/main.lua" \
+'function OpenExternalUrl(url)
+    if type(url) == "table" then url = url.url end' \
+'function OpenExternalUrl(contentScriptQuery, url)
+    -- Millennium sorts JS keys alphabetically -> { url, contentScriptQuery }
+    -- arrives as (contentScriptQuery, url). Accept the table form too, and
+    -- fall back to whichever arg actually carries the URL.
+    if type(contentScriptQuery) == "table" then
+        url = contentScriptQuery.url or url
+    end
+    if (type(url) ~= "string") or url == "" then
+        if type(contentScriptQuery) == "string" and contentScriptQuery ~= "" then
+            url = contentScriptQuery
+        end
+    end' \
+
+patch_replace "$OUT/backend/main.lua" \
+'    else
+        pcall(m_utils.exec, '"'"'xdg-open "'"'"' .. url .. '"'"'"'"'"')
+    end' \
+'    else
+        -- slsteammoon: reset the Steam runtime env and detach so the
+        -- system browser launches with system libs (Steam exports a
+        -- 32-bit runtime LD_LIBRARY_PATH/LD_AUDIT that crashes spawned
+        -- GUI binaries otherwise).
+        pcall(m_utils.exec,
+            '"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; '"'"' ..
+            '"'"'setsid xdg-open "'"'"' .. url .. '"'"'" >/dev/null 2>&1 &'"'"')
+    end'
+
+# 3f. main.lua — OpenGameFolder wrapper. Same Millennium key-sort bug:
+#     the frontend calls it with { path, contentScriptQuery }, which sorts
+#     to [contentScriptQuery, path], so the upstream OpenGameFolder(path)
+#     binds `path` to the empty contentScriptQuery (confirmed via logging).
+#     Fix the signature to (contentScriptQuery, path) and resolve
+#     defensively.
+patch_replace "$OUT/backend/main.lua" \
+'function OpenGameFolder(path)
+    if type(path) == "table" then path = path.path end' \
+'function OpenGameFolder(contentScriptQuery, path)
+    -- Millennium sorts JS keys alphabetically -> { path, contentScriptQuery }
+    -- arrives as (contentScriptQuery, path). Accept the table form too and
+    -- fall back to whichever arg carries the path.
+    if type(contentScriptQuery) == "table" then
+        path = contentScriptQuery.path or path
+    end
+    if (type(path) ~= "string") or path == "" then
+        if type(contentScriptQuery) == "string" and contentScriptQuery ~= "" then
+            path = contentScriptQuery
+        end
+    end'
+
+# 3g. steam_utils.lua — open_game_folder (Game folder button). Upstream
+#     is Windows-only: it backslash-escapes the path and runs `explorer`,
+#     which does nothing on Linux. Branch on OS and use xdg-open on Linux
+#     with the same Steam-runtime env reset + detach as above.
+patch_replace "$OUT/backend/steam_utils.lua" \
+'function steam_utils.open_game_folder(path)
+    if not path or path == "" or not fs.exists(path) then return false end
+    
+    -- In Windows, explorer accepts backslashes
+    path = path:gsub("/", "\\")
+    local cmd = '"'"'explorer "'"'"' .. path .. '"'"'"'"'"'
+    m_utils.exec(cmd)
+    return true
+end' \
+'function steam_utils.open_game_folder(path)
+    if not path or path == "" or not fs.exists(path) then return false end
+
+    local is_win = (m_utils.getenv("OS") or ""):find("Windows") ~= nil
+    if is_win then
+        -- In Windows, explorer accepts backslashes
+        path = path:gsub("/", "\\")
+        m_utils.exec('"'"'explorer "'"'"' .. path .. '"'"'"'"'"')
+    else
+        -- slsteammoon: open in the system file manager. Reset the Steam
+        -- runtime env (LD_LIBRARY_PATH/LD_AUDIT/LD_PRELOAD point at the
+        -- 32-bit Steam runtime and crash spawned GUI binaries) and
+        -- detach via setsid so the manager uses system libs and outlives
+        -- the Steam session.
+        m_utils.exec(
+            '"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; '"'"' ..
+            '"'"'setsid xdg-open "'"'"' .. path .. '"'"'" >/dev/null 2>&1 &'"'"')
+    end
+    return true
+end'
+
 # 4. update.json -> this fork.
 cat > "$OUT/backend/update.json" <<'EOF'
 {
