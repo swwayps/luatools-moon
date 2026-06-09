@@ -51,7 +51,6 @@ LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 PLUGIN_RAW_BASE="https://codeberg.org/${PLUGIN_REPO}/raw/branch/main"
 CR_SO_BUNDLED_URL="${PLUGIN_RAW_BASE}/cloudredirect/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
-CR_FLATPAK_ASSET="cloudredirect.flatpak"
 CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
 CR_DIR="$HOME/.local/share/CloudRedirect"
 CR_SO_PATH="$CR_DIR/cloud_redirect.so"
@@ -651,6 +650,22 @@ latest_release_asset_url() {
 		'.assets[] | select(.name | test($glob)) | .browser_download_url' 2>/dev/null | head -n1
 }
 
+# Like latest_release_asset_url but scans ALL releases (newest first) for the
+# first asset matching the glob. Needed when the latest release does not carry
+# the asset we want — e.g. CloudRedirect's most recent tag ships no flatpak, so
+# the newest flatpak lives in an older release under a versioned filename.
+any_release_asset_url() {
+	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
+	case "$forge" in
+		github) api="https://api.github.com/repos/${repo}/releases?per_page=50" ;;
+		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50" ;;
+	esac
+	meta="$(curl -fsSL -H 'Accept: application/json' "$api" 2>/dev/null)" || return 1
+	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
+		'[.[].assets[]? | select(.name | test($glob)) | .browser_download_url][0] // empty' \
+		2>/dev/null | head -n1
+}
+
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
 extract_zip() {
 	local archive="$1" dest="$2"
@@ -940,7 +955,10 @@ install_cloudredirect_flatpak() {
 
 	log_info "$(L "Resolving CloudRedirect companion app (flatpak)" \
 	             "Buscando o app companheiro do CloudRedirect (flatpak)")"
-	url="$(latest_release_asset_url "$CR_REPO" "^${CR_FLATPAK_ASSET}$" github)"
+	# The newest CloudRedirect tag may ship no flatpak (e.g. 2.1.7), and recent
+	# ones name it cloudredirect-<ver>.flatpak rather than cloudredirect.flatpak.
+	# Scan all releases for the first matching bundle, excluding .sha256 sidecars.
+	url="$(any_release_asset_url "$CR_REPO" "^cloudredirect.*\\.flatpak$" github)"
 	if [ -z "$url" ]; then
 		log_warn "$(L "Could not find the CloudRedirect flatpak bundle; skipping the login app." \
 		             "Não foi possível encontrar o bundle flatpak do CloudRedirect; pulando o app de login.")"
@@ -948,7 +966,7 @@ install_cloudredirect_flatpak() {
 	fi
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
-	bundle="$tmp/$CR_FLATPAK_ASSET"
+	bundle="$tmp/$(basename "$url")"
 
 	log_info "$(L "Downloading CloudRedirect app" "Baixando o app CloudRedirect")"
 	if ! curl -fL "$url" -o "$bundle"; then
