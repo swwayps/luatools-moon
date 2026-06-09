@@ -566,7 +566,67 @@ cleanup_previous_install() {
 		fi
 	fi
 
+	# --- Millennium framework ---------------------------------------------
+	# Lumen replaces Millennium. Crucially, Millennium forces the Steam
+	# webhelper onto --remote-debugging-pipe, which keeps the CEF port 8080
+	# CLOSED — and Lumen attaches via that port. So a pre-existing Millennium
+	# install would BLOCK Lumen. Remove the whole framework here (not just the
+	# old plugin dir handled above) so 8080 is free for Lumen.
+	remove_millennium_framework
+
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
+}
+
+# Remove an officially-installed Millennium framework (steambrew.app). Mirrors
+# uninstall.sh::uninstall_millennium. Millennium and Lumen are mutually
+# exclusive over Steam's single CEF DevTools endpoint, so Lumen requires
+# Millennium to be gone.
+remove_millennium_framework() {
+	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+	local xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}/millennium"
+	local xdg_data="${XDG_DATA_HOME:-$HOME/.local/share}/millennium"
+	local steam_root="$HOME/.steam/steam"
+
+	# Anything to do? (user dirs or system dirs present, or injected symlinks)
+	if [ ! -d "$xdg_config" ] && [ ! -d "$xdg_data" ] \
+	   && [ ! -d /usr/lib/millennium ] && [ ! -d /usr/share/millennium ] \
+	   && [ ! -L "$steam_root/ubuntu12_64/libmillennium_hhx64.so" ]; then
+		return 0
+	fi
+
+	log_step "$(L "Removing existing Millennium (replaced by Lumen)" \
+	             "Removendo Millennium existente (substituído pelo Lumen)")"
+
+	# Symlinks Millennium drops into Steam's runtime dirs (point at its libs).
+	local link target
+	for link in \
+		"$steam_root/ubuntu12_32/libXtst.so.6" \
+		"$steam_root/ubuntu12_64/libXtst.so.6" \
+		"$steam_root/ubuntu12_64/libmillennium_hhx64.so"; do
+		if [ -L "$link" ]; then
+			target="$(readlink "$link" 2>/dev/null || true)"
+			case "$target" in
+				*/millennium/*|*libmillennium*)
+					rm -f "$link" 2>/dev/null || true ;;
+			esac
+		fi
+	done
+
+	# User-side dirs (themes, plugins, config.json).
+	rm -rf "$xdg_config" "$xdg_data" 2>/dev/null || true
+
+	# System-side dirs (Millennium's loader). Needs sudo.
+	if [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ]; then
+		if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+			$sudo_cmd rm -rf /usr/lib/millennium /usr/share/millennium 2>/dev/null || true
+		else
+			log_warn "$(L "sudo unavailable; remove /usr/lib/millennium manually so Lumen can attach" \
+			             "sudo indisponível; remova /usr/lib/millennium manualmente para o Lumen funcionar")"
+		fi
+	fi
+
+	log_success "$(L "Millennium removed (Steam re-extracts libXtst.so.6 on next launch)" \
+	             "Millennium removido (a Steam reextrai libXtst.so.6 no próximo início)")"
 }
 
 # ============================================================================
