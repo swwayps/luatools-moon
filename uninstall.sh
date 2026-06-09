@@ -95,7 +95,8 @@ print_complete() {
 	echo ""
 	echo -e "  $(L "Removed:" "Removido:")"
 	echo -e "    ${GREEN}•${NC} slsteam-moon"
-	echo -e "    ${GREEN}•${NC} Millennium"
+	echo -e "    ${GREEN}•${NC} Lumen"
+	echo -e "    ${GREEN}•${NC} Millennium ($(L "if present" "se presente"))"
 	echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
 	echo ""
 }
@@ -362,6 +363,20 @@ uninstall_luatools_plugin() {
 }
 
 # ============================================================================
+# Step: Lumen (millennium-less bridge) + its install dir
+# ============================================================================
+uninstall_lumen() {
+	if [ -d "$HOME/.local/share/Lumen" ]; then
+		log_step "$(L "Removing ~/.local/share/Lumen" "Removendo ~/.local/share/Lumen")"
+		rm -rf "$HOME/.local/share/Lumen" 2>/dev/null || true
+	fi
+	# CEF remote-debugging flag we created for Lumen (harmless, but tidy up).
+	rm -f "$HOME/.steam/steam/.cef-enable-remote-debugging" \
+	      "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" 2>/dev/null || true
+	log_success "$(L "Lumen removed" "Lumen removido")"
+}
+
+# ============================================================================
 # Step: Millennium (per upstream uninstall docs)
 # ============================================================================
 uninstall_millennium() {
@@ -508,6 +523,9 @@ main() {
 
 	print_section "$(L "Removing LuaTools plugin" "Removendo plugin LuaTools")"
 	uninstall_luatools_plugin
+
+	print_section "$(L "Removing Lumen" "Removendo Lumen")"
+	uninstall_lumen
 
 	print_section "$(L "Removing Millennium" "Removendo Millennium")"
 	uninstall_millennium
