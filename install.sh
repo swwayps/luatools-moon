@@ -615,6 +615,9 @@ remove_millennium_framework() {
 	# User-side dirs (themes, plugins, config.json).
 	rm -rf "$xdg_config" "$xdg_data" 2>/dev/null || true
 
+	# Millennium also drops a dir inside Steam's own install (themes, etc.).
+	rm -rf "$steam_root/millennium" 2>/dev/null || true
+
 	# System-side dirs (Millennium's loader). Needs sudo.
 	if [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ]; then
 		if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
