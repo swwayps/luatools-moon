@@ -4,7 +4,7 @@
 # ============================================================================
 #  Removes EVERYTHING this stack installs, in a single command:
 #
-#    curl -fsSL https://raw.githubusercontent.com/nwrafael/slsteammoon-ltsteamplugin/main/uninstall.sh | bash
+#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/uninstall.sh | bash
 #
 #  What it removes (no flags, no prompts):
 #    • slsteam-moon          (~/.local/share/SLSsteam, ~/.config/SLSsteam,
