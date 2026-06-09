@@ -4,7 +4,7 @@
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://raw.githubusercontent.com/nwrafael/slsteammoon-ltsteamplugin/main/install.sh | bash
+#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -21,14 +21,14 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
-SLS_REPO="nwrafael/slsteam-moon"
+SLS_REPO="unplausible/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
 
-PLUGIN_REPO="nwrafael/slsteammoon-ltsteamplugin"
+PLUGIN_REPO="unplausible/slsteammoon-ltsteamplugin"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
-LUMEN_REPO="nwrafael/lumen"
+LUMEN_REPO="unplausible/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
@@ -48,7 +48,7 @@ LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 # legacy-migration path. Built for an old-enough glibc to load in the Steam
 # runtime. See cloudredirect/README.md. The companion flatpak app is still
 # fetched from upstream releases.
-PLUGIN_RAW_BASE="https://raw.githubusercontent.com/${PLUGIN_REPO}/main"
+PLUGIN_RAW_BASE="https://codeberg.org/${PLUGIN_REPO}/raw/branch/main"
 CR_SO_BUNDLED_URL="${PLUGIN_RAW_BASE}/cloudredirect/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
 CR_FLATPAK_ASSET="cloudredirect.flatpak"
@@ -175,7 +175,7 @@ check_arch() {
 }
 
 check_internet() {
-	if ! curl -fsS --head "https://github.com" >/dev/null 2>&1; then
+	if ! curl -fsS --head "https://codeberg.org" >/dev/null 2>&1; then
 		fail "$(L "No internet connection." "Sem conexão com a internet.")"
 	fi
 	log_success "$(L "Internet reachable" "Internet acessível")"
@@ -570,14 +570,20 @@ cleanup_previous_install() {
 }
 
 # ============================================================================
-# GitHub release helpers
+# Release helpers (Codeberg / Forgejo + GitHub)
 # ============================================================================
 # Echo the browser_download_url of the first asset whose name matches the glob
-# $2 in the latest release of repo $1. Empty string if not found.
+# $2 in the latest release of repo $1. Optional $3 selects the forge:
+# "codeberg" (default) or "github". Codeberg's Forgejo API mirrors GitHub's
+# release JSON shape (.tag_name, .assets[].browser_download_url), so the same
+# jq query works for both. Empty string if not found.
 latest_release_asset_url() {
-	local repo="$1" asset_glob="$2" meta
-	meta="$(curl -fsSL -H 'Accept: application/vnd.github.v3+json' \
-	             "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)" || return 1
+	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
+	case "$forge" in
+		github) api="https://api.github.com/repos/${repo}/releases/latest" ;;
+		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases/latest" ;;
+	esac
+	meta="$(curl -fsSL -H 'Accept: application/json' "$api" 2>/dev/null)" || return 1
 	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
 		'.assets[] | select(.name | test($glob)) | .browser_download_url' 2>/dev/null | head -n1
 }
@@ -871,7 +877,7 @@ install_cloudredirect_flatpak() {
 
 	log_info "$(L "Resolving CloudRedirect companion app (flatpak)" \
 	             "Buscando o app companheiro do CloudRedirect (flatpak)")"
-	url="$(latest_release_asset_url "$CR_REPO" "^${CR_FLATPAK_ASSET}$")"
+	url="$(latest_release_asset_url "$CR_REPO" "^${CR_FLATPAK_ASSET}$" github)"
 	if [ -z "$url" ]; then
 		log_warn "$(L "Could not find the CloudRedirect flatpak bundle; skipping the login app." \
 		             "Não foi possível encontrar o bundle flatpak do CloudRedirect; pulando o app de login.")"

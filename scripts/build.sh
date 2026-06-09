@@ -177,6 +177,54 @@ patch_replace "$OUT/backend/auto_update.lua" \
         return true
     end'
 
+# 3c-bis. auto_update.lua — point the in-app updater at Codeberg'"'"'s
+#     Forgejo releases API instead of GitHub. update.json now carries a
+#     "codeberg" key (see step 4); read it (falling back to a legacy
+#     "github" key) and query https://codeberg.org/api/v1/... which
+#     returns the same JSON shape (.tag_name + .assets[].browser_download_url).
+patch_replace "$OUT/backend/auto_update.lua" \
+'    local gh_cfg = cfg.github
+    if gh_cfg then
+        local owner = gh_cfg.owner or ""
+        local repo = gh_cfg.repo or ""
+        local asset_name = gh_cfg.asset_name or "ltsteamplugin.zip"
+        local tag = gh_cfg.tag or ""
+        local tag_prefix = gh_cfg.tag_prefix or ""
+        
+        local endpoint = "https://api.github.com/repos/" .. owner .. "/" .. repo .. "/releases/latest"
+        if tag ~= "" then
+            endpoint = "https://api.github.com/repos/" .. owner .. "/" .. repo .. "/releases/tags/" .. tag
+        end
+        
+        local resp = http_client.get(endpoint, {
+            headers = {
+                ["Accept"] = "application/vnd.github+json",
+                ["User-Agent"] = "LuaTools-Updater"
+            },
+            timeout = 10
+        })' \
+'    local gh_cfg = cfg.codeberg or cfg.github
+    if gh_cfg then
+        local owner = gh_cfg.owner or ""
+        local repo = gh_cfg.repo or ""
+        local asset_name = gh_cfg.asset_name or "ltsteamplugin.zip"
+        local tag = gh_cfg.tag or ""
+        local tag_prefix = gh_cfg.tag_prefix or ""
+
+        local api_base = "https://codeberg.org/api/v1/repos/"
+        local endpoint = api_base .. owner .. "/" .. repo .. "/releases/latest"
+        if tag ~= "" then
+            endpoint = api_base .. owner .. "/" .. repo .. "/releases/tags/" .. tag
+        end
+
+        local resp = http_client.get(endpoint, {
+            headers = {
+                ["Accept"] = "application/json",
+                ["User-Agent"] = "LuaTools-Updater"
+            },
+            timeout = 10
+        })'
+
 # 3d. auto_update.lua — the in-app updater downloads via a direct
 #     curl|unzip that also runs under Steam'"'"'s runtime LD_LIBRARY_PATH;
 #     strip those env vars so system curl/unzip load system libs.
@@ -283,11 +331,13 @@ end' \
     return true
 end'
 
-# 4. update.json -> this fork.
+# 4. update.json -> this fork (Codeberg). auto_update.lua reads the
+#    "codeberg" key and queries the Forgejo releases API (same JSON shape
+#    as GitHub: .tag_name + .assets[].browser_download_url).
 cat > "$OUT/backend/update.json" <<'EOF'
 {
-  "github": {
-    "owner": "nwrafael",
+  "codeberg": {
+    "owner": "unplausible",
     "repo": "slsteammoon-ltsteamplugin",
     "asset_name": "luatools-linux.zip"
   }
