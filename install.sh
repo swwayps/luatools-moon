@@ -980,12 +980,15 @@ install_cloudredirect_flatpak() {
 	flatpak remote-add --user --if-not-exists flathub \
 		https://flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 || true
 
-	log_info "$(L "Installing KDE runtime (required by the app)" \
-	             "Instalando o runtime KDE (exigido pelo app)")"
-	flatpak install --user -y flathub "$CR_KDE_RUNTIME" >/dev/null 2>&1 || true
+	# Let flatpak print its own download/install progress (the KDE runtime is
+	# ~400 MB) instead of hiding it — otherwise the installer looks frozen for
+	# minutes. stderr carries the progress bar; keep it on the terminal.
+	log_info "$(L "Installing KDE runtime (required by the app, ~400 MB)" \
+	             "Instalando o runtime KDE (exigido pelo app, ~400 MB)")"
+	flatpak install --user -y flathub "$CR_KDE_RUNTIME" || true
 
 	log_info "$(L "Installing the CloudRedirect app" "Instalando o app CloudRedirect")"
-	if flatpak install --user -y --bundle "$bundle" >/dev/null 2>&1; then
+	if flatpak install --user -y --bundle "$bundle"; then
 		log_success "$(L "CloudRedirect app installed" "App CloudRedirect instalado")"
 		CR_FLATPAK_INSTALLED=1
 		return 0
