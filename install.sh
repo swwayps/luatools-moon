@@ -24,7 +24,10 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 SLS_REPO="unplausible/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
-SLS_TAG="v2.0"                                 # Millennium line: stock wrapper (no sidecar)
+# Millennium line: pick the newest release whose asset is the stock wrapper
+# build (slsteam-moon-linux-<ver>.zip, never the -lumen one). Convention-based,
+# so publishing a new version (e.g. v2.5) needs no installer edit.
+SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-[0-9][0-9.]*\\.zip$"
 
 PLUGIN_REPO="unplausible/slsteammoon-ltsteamplugin"
 PLUGIN_ASSET="luatools-linux.zip"
@@ -637,22 +640,6 @@ any_release_asset_url() {
 		2>/dev/null | head -n1
 }
 
-# Echo the browser_download_url of the first asset matching glob $3 in the
-# release tagged $2 of repo $1 (forge $4, default codeberg). Used to pin an
-# install to a SPECIFIC release tag instead of "latest" — the main (Millennium)
-# and lumen-beta (Lumen) branches each pin their own slsteam-moon release, so a
-# new release on the other line never changes what this branch installs.
-release_asset_url_by_tag() {
-	local repo="$1" tag="$2" asset_glob="$3" forge="${4:-codeberg}" api meta
-	case "$forge" in
-		github) api="https://api.github.com/repos/${repo}/releases/tags/${tag}" ;;
-		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases/tags/${tag}" ;;
-	esac
-	meta="$(curl -fsSL -H 'Accept: application/json' "$api" 2>/dev/null)" || return 1
-	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
-		'.assets[] | select(.name | test($glob)) | .browser_download_url' 2>/dev/null | head -n1
-}
-
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
 extract_zip() {
 	local archive="$1" dest="$2"
@@ -679,11 +666,11 @@ PY
 install_slsteam_moon() {
 	local url tmp zip extract_root setup
 
-	log_info "$(L "Resolving slsteam-moon release ${SLS_TAG}" \
-	             "Buscando a release ${SLS_TAG} do slsteam-moon")"
-	url="$(release_asset_url_by_tag "$SLS_REPO" "$SLS_TAG" "^${SLS_ASSET_PREFIX}.*\\.zip$")"
-	[ -n "$url" ] || fail "$(L "Could not find the slsteam-moon ${SLS_TAG} release asset." \
-	                          "Não foi possível encontrar o asset da release ${SLS_TAG} do slsteam-moon.")"
+	log_info "$(L "Resolving the latest slsteam-moon release" \
+	             "Buscando a última release do slsteam-moon")"
+	url="$(any_release_asset_url "$SLS_REPO" "$SLS_ASSET_GLOB")"
+	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon release asset." \
+	                          "Não foi possível encontrar o asset da release do slsteam-moon.")"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/slsteam-moon.zip"
