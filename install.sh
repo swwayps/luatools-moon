@@ -964,6 +964,27 @@ repair_cas_save_layout() {
 	fi
 }
 
+# Run flatpak with the real terminal attached to stdin.
+#
+# flatpak's interactive progress bar probes the terminal for the cursor
+# position (it writes the ANSI "\e[6n" query and reads the terminal's reply
+# back from stdin). When this installer is run as `curl ... | bash`, the
+# script's stdin is the pipe — not the terminal — so those replies have nowhere
+# to go: they leak onto the tty as stray "^[[24;69R" sequences and corrupt the
+# next shell prompt (a "syntax error near unexpected token `;'" at the end).
+#
+# Reconnecting stdin to the controlling terminal (/dev/tty) lets the terminal
+# answer flatpak's probes directly, so the progress bar stays fully visible and
+# nothing leaks. If there is no controlling terminal (truly non-interactive,
+# e.g. CI), fall back to a plain invocation.
+flatpak_tty() {
+	if [ -e /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
+		flatpak "$@" </dev/tty
+	else
+		flatpak "$@"
+	fi
+}
+
 # Install the flatpak companion app from the release bundle. Only called when
 # flatpak is present. Best-effort: failure just means the user finishes setup
 # manually (the .so is already in place).
@@ -1007,12 +1028,15 @@ install_cloudredirect_flatpak() {
 	# Let flatpak print its own download/install progress (the KDE runtime is
 	# ~400 MB) instead of hiding it — otherwise the installer looks frozen for
 	# minutes. stderr carries the progress bar; keep it on the terminal.
+	# flatpak_tty hands flatpak the real terminal on stdin so its progress bar's
+	# cursor-position probes are answered by the terminal, not leaked as stray
+	# escape sequences (see flatpak_tty).
 	log_info "$(L "Installing KDE runtime (required by the app, ~400 MB)" \
 	             "Instalando o runtime KDE (exigido pelo app, ~400 MB)")"
-	flatpak install --user -y flathub "$CR_KDE_RUNTIME" || true
+	flatpak_tty install --user -y flathub "$CR_KDE_RUNTIME" || true
 
 	log_info "$(L "Installing the CloudRedirect app" "Instalando o app CloudRedirect")"
-	if flatpak install --user -y --bundle "$bundle"; then
+	if flatpak_tty install --user -y --bundle "$bundle"; then
 		log_success "$(L "CloudRedirect app installed" "App CloudRedirect instalado")"
 		CR_FLATPAK_INSTALLED=1
 		return 0
