@@ -260,6 +260,58 @@ check_steam_native() {
 	esac
 }
 
+# Steam must have been launched at least once before we touch its data dirs.
+# On first launch the Valve launcher (bin_steam.sh / the steam-installer stub)
+# runs its bootstrap: it extracts the client and, crucially, makes
+# ~/.steam/steam a SYMLINK to the real data dir (~/.local/share/Steam on
+# Fedora/Arch, ~/.steam/debian-installation on Debian/Mint/Ubuntu). The symlink
+# target differs per distro, but it is ALWAYS a symlink once bootstrapped.
+#
+# If we run before that, two things break:
+#   1. Steam's own data dir is just the package skeleton (no bootstrap.tar.xz,
+#      no full client) — not yet a working install.
+#   2. The plugin/Lumen would resolve the Steam root to a not-yet-existing
+#      ~/.steam/steam and CREATE it as a real directory to drop webkit assets
+#      in. That stray directory then blocks Valve's bootstrap, which needs to
+#      put a symlink there — Steam dies with "Couldn't set up Steam data -
+#      please contact technical support".
+#
+# So: require that ~/.steam/steam is a symlink that resolves to a real Steam
+# root (has steam.sh). This is layout-independent (we don't care WHERE it
+# points, only that Steam bootstrapped it).
+check_steam_bootstrapped() {
+	local link="$HOME/.steam/steam"
+	local root
+	root="$(readlink -e -q "$link" 2>/dev/null || true)"
+
+	# Bootstrapped: ~/.steam/steam is a symlink resolving to a dir with steam.sh.
+	if [ -L "$link" ] && [ -n "$root" ] && [ -f "$root/steam.sh" ]; then
+		log_success "$(L "Steam has been initialized" "Steam já foi inicializada")"
+		return 0
+	fi
+
+	echo ""
+	log_error "$(L "Steam hasn't been opened yet." \
+	              "A Steam ainda não foi aberta.")"
+	echo ""
+	echo -e "  $(L "Steam needs to run once before installing, so it can finish" \
+	               "A Steam precisa rodar uma vez antes da instalação, para terminar")"
+	echo -e "  $(L "setting itself up." "de se configurar.")"
+	echo ""
+	echo -e "  $(L "Please do this first:" "Faça isto primeiro:")"
+	echo -e "    $(L "1) Open Steam normally (from the menu / app icon)." \
+	               "1) Abra a Steam normalmente (pelo menu / ícone do app).")"
+	echo -e "    $(L "2) Wait until the login window appears." \
+	               "2) Espere até a janela de login aparecer.")"
+	echo -e "    $(L "   (You do NOT need to log in.)" \
+	               "   (Você NÃO precisa fazer login.)")"
+	echo -e "    $(L "3) Close Steam, then run this installer again." \
+	               "3) Feche a Steam e rode este instalador de novo.")"
+	echo ""
+	fail "$(L "Aborted. Open Steam once, then re-run this installer." \
+	          "Abortado. Abra a Steam uma vez e rode este instalador novamente.")"
+}
+
 # ============================================================================
 # Runtime dependencies
 # ============================================================================
@@ -1132,6 +1184,7 @@ main() {
 	check_arch
 	check_internet
 	check_steam_native
+	check_steam_bootstrapped
 
 	print_section "$(L "Stopping Steam" "Parando a Steam")"
 	stop_steam
