@@ -108,3 +108,56 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(s)
 print("[patch-frontend] Restart Steam button injected into Game Added modal")
 PY
+
+# ---------------------------------------------------------------------------
+# Remove the Millennium disclaimer modal trigger.
+#
+# This fork (lumen-beta) runs on Lumen, not Millennium — the modal warning
+# users that "LuaTools is not affiliated with Millennium" / "you'll be banned
+# from the Millennium Discord" no longer applies, so suppress it. We neutralize
+# the TRIGGER (leaving showMillenniumDisclaimerModal defined but uncalled) so
+# the anchor stays small and the modal never appears.
+#
+# Anchored: aborts loudly if the upstream trigger block moved.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = (
+'          // Show disclaimer after translations are loaded so it displays in the correct language\n'
+'          try {\n'
+'            if (window.location.hostname === "store.steampowered.com") {\n'
+'              if (\n'
+'                localStorage.getItem(\n'
+'                  "luatools millennium disclaimer accepted",\n'
+'                ) !== "1"\n'
+'              ) {\n'
+'                showMillenniumDisclaimerModal();\n'
+'              }\n'
+'            }\n'
+'          } catch (_) {}\n'
+)
+
+replacement = (
+'          // slsteammoon: Millennium disclaimer removed — this fork runs on\n'
+'          // Lumen, not Millennium, so the affiliation/ban warning no longer\n'
+'          // applies and the modal is not shown.\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] DISCLAIMER ANCHOR FAILED: found %d matches (need 1).\n"
+        "The disclaimer trigger moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % n)
+    sys.exit(3)
+
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Millennium disclaimer modal trigger removed")
+PY
