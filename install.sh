@@ -8,11 +8,10 @@
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
-#    2. Runtime dependencies (jq, curl, tar, unzip, libssl-dev:i386 on Debian).
+#    2. Runtime dependencies (jq, curl, tar, unzip).
 #    3. slsteam-moon   — download latest release, extract, run setup.sh install.
-#    4. Millennium     — curl https://steambrew.app/install.sh | bash.
-#    5. This plugin    — download latest release into Millennium's plugins dir
-#                        and pre-enable it in config.json.
+#    4. Lumen          — download latest release into ~/.local/share/Lumen.
+#    5. This plugin    — download latest release into ~/.local/share/Lumen/luatools.
 #
 #  Bilingual (English / Português) based on the system locale.
 # ============================================================================
@@ -24,16 +23,18 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 SLS_REPO="unplausible/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
-# Millennium line: pick the newest release whose asset is the stock wrapper
-# build (slsteam-moon-linux-<ver>.zip, never the -lumen one). Convention-based,
-# so publishing a new version (e.g. v2.5) needs no installer edit.
-SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-[0-9][0-9.]*\\.zip$"
+# Lumen line: pick the newest release whose asset is the Lumen wrapper build
+# (named slsteam-moon-linux-<ver>-lumen.zip). Convention-based, so publishing a
+# new version (e.g. v2.5-lumen) needs no installer edit.
+SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-.*-lumen\\.zip$"
 
 PLUGIN_REPO="unplausible/slsteammoon-ltsteamplugin"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
-MILLENNIUM_INSTALL_URL="https://steambrew.app/install.sh"
+LUMEN_REPO="unplausible/lumen"
+LUMEN_ASSET="lumen-linux.zip"
+LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
 # CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
 # user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
@@ -227,8 +228,8 @@ check_steam_native() {
 			log_error "$(L "Steam was installed via ${steam_type^}." \
 			              "A Steam foi instalada via ${steam_type^}.")"
 			echo ""
-			echo -e "  $(L "Millennium and slsteam-moon only work with NATIVE Steam" \
-			               "Millennium e slsteam-moon só funcionam com a Steam NATIVA")"
+			echo -e "  $(L "slsteam-moon only works with NATIVE Steam" \
+			               "slsteam-moon só funciona com a Steam NATIVA")"
 			echo -e "  $(L "(the one from your package manager)." \
 			               "(a do seu gerenciador de pacotes).")"
 			echo ""
@@ -365,7 +366,7 @@ pm_install() {
 	esac
 }
 
-# Ensure the generic CLI tools Millennium + this installer need are present.
+# Ensure the generic CLI tools this installer + the stack need are present.
 install_dependencies() {
 	local family; family="$(get_distro_family)"
 
@@ -392,40 +393,6 @@ install_dependencies() {
 		fi
 	fi
 	log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
-
-	# Debian-based: Millennium needs the 32-bit OpenSSL dev libs.
-	if [ "$family" = "debian" ]; then
-		install_libssl_i386
-	fi
-}
-
-# Millennium's installer aborts on Debian-based distros without
-# libssl-dev:i386, asking the user to add the i386 architecture first.
-# We do it for them.
-install_libssl_i386() {
-	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
-
-	if dpkg -s libssl-dev:i386 2>/dev/null | grep -q '^Status:.*installed'; then
-		log_success "$(L "libssl-dev:i386 already installed" "libssl-dev:i386 já instalado")"
-		return 0
-	fi
-
-	log_info "$(L "Installing libssl-dev:i386 (required by Millennium)" \
-	             "Instalando libssl-dev:i386 (exigido pelo Millennium)")"
-
-	# Enable the i386 architecture so the :i386 package is resolvable.
-	if ! dpkg --print-foreign-architectures 2>/dev/null | grep -qx i386; then
-		$sudo_cmd dpkg --add-architecture i386 || \
-			fail "$(L "Failed to add i386 architecture (dpkg --add-architecture i386)" \
-			          "Falha ao adicionar a arquitetura i386 (dpkg --add-architecture i386)")"
-	fi
-
-	$sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-	if ! $sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y libssl-dev:i386; then
-		fail "$(L "Failed to install libssl-dev:i386. Install it manually and re-run." \
-		          "Falha ao instalar libssl-dev:i386. Instale manualmente e rode de novo.")"
-	fi
-	log_success "$(L "libssl-dev:i386 installed" "libssl-dev:i386 instalado")"
 }
 
 # ============================================================================
@@ -654,7 +621,70 @@ cleanup_previous_install() {
 		fi
 	fi
 
+	# --- Millennium framework ---------------------------------------------
+	# Lumen replaces Millennium. Crucially, Millennium forces the Steam
+	# webhelper onto --remote-debugging-pipe, which keeps the CEF port 8080
+	# CLOSED — and Lumen attaches via that port. So a pre-existing Millennium
+	# install would BLOCK Lumen. Remove the whole framework here (not just the
+	# old plugin dir handled above) so 8080 is free for Lumen.
+	remove_millennium_framework
+
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
+}
+
+# Remove an officially-installed Millennium framework (steambrew.app). Mirrors
+# uninstall.sh::uninstall_millennium. Millennium and Lumen are mutually
+# exclusive over Steam's single CEF DevTools endpoint, so Lumen requires
+# Millennium to be gone.
+remove_millennium_framework() {
+	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+	local xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}/millennium"
+	local xdg_data="${XDG_DATA_HOME:-$HOME/.local/share}/millennium"
+	local steam_root="$HOME/.steam/steam"
+
+	# Anything to do? (user dirs or system dirs present, or injected symlinks)
+	if [ ! -d "$xdg_config" ] && [ ! -d "$xdg_data" ] \
+	   && [ ! -d /usr/lib/millennium ] && [ ! -d /usr/share/millennium ] \
+	   && [ ! -L "$steam_root/ubuntu12_64/libmillennium_hhx64.so" ]; then
+		return 0
+	fi
+
+	log_step "$(L "Removing existing Millennium (replaced by Lumen)" \
+	             "Removendo Millennium existente (substituído pelo Lumen)")"
+
+	# Symlinks Millennium drops into Steam's runtime dirs (point at its libs).
+	local link target
+	for link in \
+		"$steam_root/ubuntu12_32/libXtst.so.6" \
+		"$steam_root/ubuntu12_64/libXtst.so.6" \
+		"$steam_root/ubuntu12_64/libmillennium_hhx64.so"; do
+		if [ -L "$link" ]; then
+			target="$(readlink "$link" 2>/dev/null || true)"
+			case "$target" in
+				*/millennium/*|*libmillennium*)
+					rm -f "$link" 2>/dev/null || true ;;
+			esac
+		fi
+	done
+
+	# User-side dirs (themes, plugins, config.json).
+	rm -rf "$xdg_config" "$xdg_data" 2>/dev/null || true
+
+	# Millennium also drops a dir inside Steam's own install (themes, etc.).
+	rm -rf "$steam_root/millennium" 2>/dev/null || true
+
+	# System-side dirs (Millennium's loader). Needs sudo.
+	if [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ]; then
+		if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+			$sudo_cmd rm -rf /usr/lib/millennium /usr/share/millennium 2>/dev/null || true
+		else
+			log_warn "$(L "sudo unavailable; remove /usr/lib/millennium manually so Lumen can attach" \
+			             "sudo indisponível; remova /usr/lib/millennium manualmente para o Lumen funcionar")"
+		fi
+	fi
+
+	log_success "$(L "Millennium removed (Steam re-extracts libXtst.so.6 on next launch)" \
+	             "Millennium removido (a Steam reextrai libXtst.so.6 no próximo início)")"
 }
 
 # ============================================================================
@@ -718,11 +748,11 @@ PY
 install_slsteam_moon() {
 	local url tmp zip extract_root setup
 
-	log_info "$(L "Resolving the latest slsteam-moon release" \
-	             "Buscando a última release do slsteam-moon")"
+	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
+	             "Buscando a última release do slsteam-moon (Lumen)")"
 	url="$(any_release_asset_url "$SLS_REPO" "$SLS_ASSET_GLOB")"
-	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon release asset." \
-	                          "Não foi possível encontrar o asset da release do slsteam-moon.")"
+	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
+	                          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/slsteam-moon.zip"
@@ -751,40 +781,37 @@ install_slsteam_moon() {
 }
 
 # ============================================================================
-# Step: Millennium (Steam client modding framework)
+# Step: Lumen (millennium-less LuaTools bridge)
 # ============================================================================
-install_millennium() {
-	log_info "$(L "Installing Millennium from steambrew.app" \
-	             "Instalando Millennium via steambrew.app")"
-
-	# --yes makes the official installer non-interactive (no prompt over a pipe).
-	if ! curl -fsSL "$MILLENNIUM_INSTALL_URL" | bash -s -- --yes; then
-		fail "$(L "Millennium installation failed." "Falha na instalação do Millennium.")"
+# Downloads the lumen release (static binary + lua/) and extracts it to
+# ~/.local/share/Lumen. The Steam wrapper (slsteam-moon setup.sh) launches it
+# as a sidecar; it injects the LuaTools frontend via CDP and hosts the backend.
+install_lumen() {
+	local url tmp zip dest
+	dest="$LUMEN_DIR"
+	log_info "$(L "Resolving latest Lumen release" "Buscando a última release do Lumen")"
+	url="$(latest_release_asset_url "$LUMEN_REPO" "^${LUMEN_ASSET}$")"
+	[ -n "$url" ] || fail "$(L "Could not find the Lumen release asset." \
+	                          "Não foi possível encontrar o asset da release do Lumen.")"
+	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
+	zip="$tmp/$LUMEN_ASSET"
+	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
+	curl -fL "$url" -o "$zip" || fail "$(L "Download failed" "Falha no download")"
+	mkdir -p "$dest"
+	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
+	chmod +x "$dest/lumen" 2>/dev/null || true
+	if ! file "$dest/lumen" 2>/dev/null | grep -q "ELF 64-bit"; then
+		fail "$(L "Lumen binary is not a valid ELF executable" \
+		         "O binário do Lumen não é um ELF válido")"
 	fi
-	log_success "$(L "Millennium installed" "Millennium instalado")"
+	log_success "$(L "Lumen installed" "Lumen instalado")"
 }
 
 # ============================================================================
 # Step: LuaTools plugin (this repo)
 # ============================================================================
-# Resolve where Millennium reads plugins from, creating the default if needed.
-plugin_install_root() {
-	local dir
-	for dir in \
-		"$HOME/.local/share/millennium/plugins" \
-		"$HOME/.millennium/plugins" \
-		"$HOME/.steam/steam/millennium/plugins" \
-		"$HOME/.local/share/Steam/millennium/plugins"; do
-		if [ -d "$dir" ]; then
-			echo "$dir"
-			return
-		fi
-	done
-	echo "$HOME/.local/share/millennium/plugins"
-}
-
 install_plugin() {
-	local url tmp zip root dest
+	local url tmp zip dest
 
 	log_info "$(L "Resolving latest LuaTools plugin release" \
 	             "Buscando a última release do plugin LuaTools")"
@@ -798,9 +825,10 @@ install_plugin() {
 	log_info "$(L "Downloading plugin" "Baixando o plugin")"
 	curl -fL "$url" -o "$zip" || fail "$(L "Download failed" "Falha no download")"
 
-	root="$(plugin_install_root)"
-	mkdir -p "$root"
-	dest="$root/$PLUGIN_NAME"
+	# Lumen hosts the plugin under ~/.local/share/Lumen/luatools (the wrapper
+	# points LUMEN_BACKEND_DIR at .../luatools/backend, and the injector reads
+	# .../luatools/public for the frontend assets).
+	dest="$LUMEN_DIR/luatools"
 
 	# Preserve the user's plugin data across reinstalls/updates. The plugin
 	# stores its settings (language, theme, API keys, ...) and the donated
@@ -812,7 +840,8 @@ install_plugin() {
 		cp -a "$dest/backend/data/." "$data_bak/" 2>/dev/null || true
 	fi
 
-	# The zip contains a top-level luatools/ dir. Replace any prior install.
+	# The zip contains the plugin contents (plugin.json, backend/, public/).
+	# Replace any prior install.
 	rm -rf "$dest"
 	log_info "$(L "Installing plugin to $dest" "Instalando o plugin em $dest")"
 	extract_zip "$zip" "$tmp/extracted" || fail "$(L "Extraction failed" "Falha na extração")"
@@ -835,55 +864,6 @@ install_plugin() {
 		             "Plugin atualizado (configurações preservadas)")"
 	else
 		log_success "$(L "Plugin installed" "Plugin instalado")"
-	fi
-
-	enable_plugin_in_config
-}
-
-# Pre-activate the plugin in Millennium's config.json so the user doesn't have
-# to enable it by hand after first launch.
-enable_plugin_in_config() {
-	local config_dir="$HOME/.config/millennium"
-	local config_file="$config_dir/config.json"
-
-	log_info "$(L "Enabling plugin in Millennium config" \
-	             "Ativando o plugin na config do Millennium")"
-	mkdir -p "$config_dir"
-
-	if [ ! -f "$config_file" ]; then
-		cat > "$config_file" <<EOF
-{
-  "general": {
-    "injectCSS": true,
-    "injectJavascript": true
-  },
-  "plugins": {
-    "enabledPlugins": [
-      "$PLUGIN_NAME"
-    ]
-  }
-}
-EOF
-		log_success "$(L "Created config.json with plugin enabled" \
-		             "config.json criado com o plugin ativado")"
-		return 0
-	fi
-
-	# Merge into the existing config with jq (guaranteed present by now).
-	local tmp_cfg
-	tmp_cfg="$(mktemp)"
-	if jq --arg p "$PLUGIN_NAME" '
-		.plugins //= {} |
-		.plugins.enabledPlugins //= [] |
-		.plugins.enabledPlugins = (.plugins.enabledPlugins + [$p] | unique)
-	' "$config_file" > "$tmp_cfg" 2>/dev/null; then
-		mv "$tmp_cfg" "$config_file"
-		log_success "$(L "Plugin enabled in existing config.json" \
-		             "Plugin ativado no config.json existente")"
-	else
-		rm -f "$tmp_cfg"
-		log_warn "$(L "Could not edit config.json automatically; enable '$PLUGIN_NAME' in Millennium settings." \
-		             "Não foi possível editar o config.json; ative '$PLUGIN_NAME' nas configurações do Millennium.")"
 	fi
 }
 
@@ -1136,7 +1116,7 @@ print_complete() {
 	echo ""
 	echo -e "  $(L "Everything is installed:" "Tudo instalado:")"
 	echo -e "    ${GREEN}•${NC} slsteam-moon"
-	echo -e "    ${GREEN}•${NC} Millennium"
+	echo -e "    ${GREEN}•${NC} Lumen"
 	echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
 	if [ -f "$CR_SO_PATH" ]; then
 		echo -e "    ${GREEN}•${NC} CloudRedirect ($(L "cloud saves" "cloud saves"))"
@@ -1198,8 +1178,8 @@ main() {
 	print_section "$(L "Installing slsteam-moon" "Instalando slsteam-moon")"
 	install_slsteam_moon
 
-	print_section "$(L "Installing Millennium" "Instalando Millennium")"
-	install_millennium
+	print_section "$(L "Installing Lumen" "Instalando Lumen")"
+	install_lumen
 
 	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
 	install_plugin

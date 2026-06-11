@@ -1,13 +1,13 @@
 # 🌕 slsteammoon-ltsteamplugin
 
-Set up slsteam-moon, Millennium and the LuaTools plugin automatically with a single command:
+Set up slsteam-moon, Lumen and the LuaTools plugin automatically with a single command:
 
 ```bash
-curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/install.sh | bash
+curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/lumen-beta/install.sh | bash
 ```
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
-> manager. Flatpak and Snap Steam are not supported — Millennium does not work with them.
+> manager. Flatpak and Snap Steam are not supported.
 
 ---
 
@@ -39,5 +39,5 @@ Open an issue: https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/issues
 Want to remove everything? Run:
 
 ```bash
-curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/uninstall.sh | bash
+curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/lumen-beta/uninstall.sh | bash
 ```
