@@ -654,7 +654,48 @@ cleanup_previous_install() {
 		fi
 	fi
 
+	# --- Lumen ------------------------------------------------------------
+	# Millennium (installed by this line) and Lumen are mutually exclusive:
+	# both drive Steam's single CEF DevTools endpoint, and Lumen also forces
+	# the webhelper onto remote-debugging while Millennium expects to own the
+	# injection path. A pre-existing Lumen install (from the main/Lumen line)
+	# would fight Millennium, so remove it here before installing Millennium.
+	remove_lumen
+
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
+}
+
+# Remove a Lumen install (the millennium-less bridge from the main line). Lumen
+# and Millennium cannot coexist, so installing the Millennium stack requires
+# Lumen to be gone. Mirrors uninstall.sh::uninstall_lumen on the main branch.
+# Best-effort: every removal is guarded and never aborts the install.
+remove_lumen() {
+	local lumen_dir="$HOME/.local/share/Lumen"
+
+	# Nothing to do if neither the install dir nor the CEF flag is present.
+	if [ ! -d "$lumen_dir" ] \
+	   && [ ! -f "$HOME/.steam/steam/.cef-enable-remote-debugging" ] \
+	   && [ ! -f "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" ]; then
+		return 0
+	fi
+
+	log_step "$(L "Removing existing Lumen (cannot coexist with Millennium)" \
+	             "Removendo Lumen existente (não pode coexistir com o Millennium)")"
+
+	# Lumen's install dir: the static binary, its lua/, and the plugin under
+	# luatools/. (Our Millennium plugin lives in Millennium's plugins dir, not
+	# here, so removing this whole tree is safe.)
+	if [ -d "$lumen_dir" ]; then
+		rm -rf "$lumen_dir" 2>/dev/null || true
+	fi
+
+	# The CEF remote-debugging flag Lumen drops so it can attach via port 8080.
+	# Millennium uses --remote-debugging-pipe instead, so this flag is stale;
+	# clean it up (layout-independent: Debian/Mint vs Fedora/Arch data dir).
+	rm -f "$HOME/.steam/steam/.cef-enable-remote-debugging" \
+	      "$HOME/.steam/debian-installation/.cef-enable-remote-debugging" 2>/dev/null || true
+
+	log_success "$(L "Lumen removed" "Lumen removido")"
 }
 
 # ============================================================================
