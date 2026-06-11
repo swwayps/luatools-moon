@@ -25,14 +25,23 @@ each had a blocking problem on our stack:
   gives up permanently. On slower-bootstrapping distros (Arch/CachyOS)
   steamclient.so maps after that window, so the hook never attaches.
 
-This build takes 2.1.5 (correct save restore) and:
+This build takes 2.1.8 (correct save restore, plus upstream's own
+`QuotaValueLooksValid` guard that hardens the `ReadAppQuota` path against the
+Steam 1781041600 client update) and adds the fixes that upstream still does not
+ship:
 
 1. Extends the steamclient.so wait from 10s to 120s so the LD_PRELOAD load
-   path attaches on slow-bootstrap distros too (no LD_AUDIT — loading 2.1.5 as
+   path attaches on slow-bootstrap distros too (no LD_AUDIT — loading it as
    an auditor corrupts the client heap with `realloc(): invalid pointer`).
+   Upstream HEAD still uses a hard-coded 10s window, so this remains required
+   for Arch/CachyOS attachment.
 2. Strips the CAS SHA leaf in the legacy-manifest migration path as well, so
    saves already stored on the cloud by an older (2.0.x) build are healed on
    first sync instead of restoring to the broken `<file>/<sha>` layout.
+3. Contains worker-thread exceptions (the HTTP connection handler, the async
+   blob-restore path, and the directory/size-0 cache-read guard) so a single
+   bad/corrupt blob degrades to "blob unavailable" instead of escaping the
+   thread and aborting the whole Steam client via `std::terminate`.
 
 The Steam wrapper (slsteam-moon `setup.sh`) injects this `.so` via
 **LD_PRELOAD**, after which the library self-removes from `LD_PRELOAD` so child
@@ -53,7 +62,7 @@ processes (the game, steamwebhelper) don't inherit it.
 ```
 
 Requires podman or docker. Pinned upstream base commit:
-`4dd8a655567bcde62a17c3a3505deb6f20530847` (ReleaseVersion 2.1.5).
+`0251ed93e4223a89b5d1eebea80615eabba78f81` (ReleaseVersion 2.1.8).
 
 The build must stay 32-bit and must not require glibc newer than the Steam
 runtime ships (no `GLIBC_ABI_GNU_TLS`, nothing `>= GLIBC_2.36`); `build.sh`
