@@ -12,7 +12,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 UPSTREAM="https://github.com/Selectively11/CloudRedirect.git"
-BASE_COMMIT="4dd8a655567bcde62a17c3a3505deb6f20530847"  # pinned upstream HEAD
+BASE_COMMIT="0251ed93e4223a89b5d1eebea80615eabba78f81"  # pinned upstream HEAD (v2.1.8)
 IMAGE="slsteammoon-cloudredirect-builder"
 WORK="$HERE/.build-src"
 
