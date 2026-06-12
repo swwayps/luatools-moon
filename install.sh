@@ -4,7 +4,7 @@
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/install.sh | bash
+#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/millennium/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -51,7 +51,7 @@ MILLENNIUM_INSTALL_URL="https://steambrew.app/install.sh"
 # legacy-migration path. Built for an old-enough glibc to load in the Steam
 # runtime. See cloudredirect/README.md. The companion flatpak app is still
 # fetched from upstream releases.
-PLUGIN_RAW_BASE="https://codeberg.org/${PLUGIN_REPO}/raw/branch/main"
+PLUGIN_RAW_BASE="https://codeberg.org/${PLUGIN_REPO}/raw/branch/millennium"
 CR_SO_BUNDLED_URL="${PLUGIN_RAW_BASE}/cloudredirect/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
 CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
