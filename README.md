@@ -3,7 +3,7 @@
 Set up slsteam-moon, Millennium and the LuaTools plugin automatically with a single command:
 
 ```bash
-curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/install.sh | bash
+curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/millennium/install.sh | bash
 ```
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
