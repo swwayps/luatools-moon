@@ -1,5 +1,7 @@
 # 🌕 slsteammoon-ltsteamplugin
 
+## Install
+
 Set up slsteam-moon, Millennium and the LuaTools plugin automatically with a single command:
 
 ```bash
