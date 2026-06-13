@@ -1,5 +1,7 @@
 # 🌕 slsteammoon-ltsteamplugin
 
+## Install
+
 Set up slsteam-moon, Lumen and the LuaTools plugin automatically with a single command:
 
 ```bash
