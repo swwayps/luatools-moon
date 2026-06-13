@@ -1149,6 +1149,10 @@ print_complete() {
 
 	echo -e "  $(L "Start Steam to begin using LuaTools." \
 	               "Inicie a Steam para começar a usar o LuaTools.")"
+	echo -e "  $(L "The first launch can take longer than usual while Steam loads" \
+	               "A primeira abertura pode demorar mais que o normal enquanto a Steam carrega")"
+	echo -e "  $(L "everything. This is normal — just give it a moment." \
+	               "tudo. Isso é normal — é só aguardar um pouco.")"
 	echo ""
 }
 
