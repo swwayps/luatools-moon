@@ -125,6 +125,41 @@ print_section() {
 	echo -e "${NIGHT}─────────────────────────────────────────────────────────${NC}"
 }
 
+# Ask a yes/no question and return 0 for yes, 1 for no. Works even when the
+# installer runs as `curl ... | bash`: stdin is the pipe, so the prompt is
+# written to and read from the controlling terminal (/dev/tty), same trick as
+# flatpak_tty. $1 = English prompt, $2 = Português prompt, $3 = default answer
+# ("y" or "n", defaults to "y"). With no controlling terminal (CI / truly
+# non-interactive) it returns the default instead of blocking forever.
+prompt_yes_no() {
+	local q_en="$1" q_pt="$2" def="${3:-y}" prompt hint ans
+	prompt="$(L "$q_en" "$q_pt")"
+	if [ "$def" = "y" ]; then
+		hint="$(L "[Y/n]" "[S/n]")"
+	else
+		hint="$(L "[y/N]" "[s/N]")"
+	fi
+
+	# No usable terminal → don't hang; honour the default.
+	if ! { [ -e /dev/tty ] && { : >/dev/tty; } 2>/dev/null; }; then
+		[ "$def" = "y" ]
+		return
+	fi
+
+	while true; do
+		printf '%s %s ' "$prompt" "$hint" >/dev/tty
+		IFS= read -r ans </dev/tty || ans=""
+		ans="$(printf '%s' "$ans" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+		case "$ans" in
+			"")       [ "$def" = "y" ]; return ;;
+			y*|s*)    return 0 ;;
+			n*)       return 1 ;;
+			*) echo "$(L "Please answer y (yes) or n (no)." \
+			            "Responda s (sim) ou n (não).")" >/dev/tty ;;
+		esac
+	done
+}
+
 # ============================================================================
 # Distro detection
 # ============================================================================
@@ -1141,6 +1176,18 @@ install_cloudredirect_flatpak() {
 }
 
 install_cloudredirect() {
+	# Cloud saves are optional, so ask first. CloudRedirect (the .so hook plus
+	# the flatpak login app) only matters to people who want Steam Cloud saves
+	# to work for these games; skip the whole step if they say no.
+	if ! prompt_yes_no \
+		"Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves." \
+		"Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves." \
+		"y"; then
+		log_info "$(L "Skipping cloud saves (CloudRedirect)." \
+		             "Pulando os cloud saves (CloudRedirect).")"
+		return 0
+	fi
+
 	# The .so is the core piece — always install it (and enable cloud in the
 	# SLSsteam config) regardless of flatpak.
 	if ! install_cloudredirect_so; then
