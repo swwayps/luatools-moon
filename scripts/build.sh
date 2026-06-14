@@ -230,6 +230,55 @@ patch_replace "$OUT/backend/main.lua" \
     end
     return json_ok({ success = true, deleted = deleted, count = #deleted })'
 
+# 3b-bis. main.lua — expose GetProtonDBStatus so the store-page ProtonDB
+#     badge can resolve a title's Linux/Proton compatibility tier server-side.
+#     Fetching from the Lua backend avoids a cross-origin fetch from the store
+#     page (protondb.com has no CORS headers for store.steampowered.com).
+#     Mirrors CheckForFixes' shape: returns { success, data = { tier, ... } }.
+patch_replace "$OUT/backend/main.lua" \
+'function CheckForFixes(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.check_for_fixes, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end' \
+'function CheckForFixes(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.check_for_fixes, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+-- slsteammoon: ProtonDB compatibility tier for the store-page badge.
+function GetProtonDBStatus(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, res = pcall(function()
+        local url = "https://www.protondb.com/api/v1/reports/summaries/" .. tostring(appid) .. ".json"
+        local resp = http_client.get(url, { timeout = 10 })
+        if resp and resp.status == 200 and resp.body then
+            local data = utils.decode_json(resp.body)
+            if type(data) == "table" and data.tier then
+                return {
+                    success = true,
+                    data = {
+                        tier = data.tier,
+                        trendingTier = data.trendingTier,
+                        bestReportedTier = data.bestReportedTier,
+                        confidence = data.confidence,
+                        score = data.score,
+                        total = data.total,
+                    },
+                }
+            end
+        end
+        return { success = false, error = "no protondb data" }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end'
+
 # 3c. auto_update.lua — Linux restart must go through the slsteam-moon
 #     wrapper (LD_AUDIT injection), not bare `steam`. Replace the
 #     non-Windows branch with our detached restart worker.
