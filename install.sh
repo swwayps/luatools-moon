@@ -847,6 +847,11 @@ install_slsteam_moon() {
 		|| fail "$(L "slsteam-moon setup failed" "Falha no setup do slsteam-moon")"
 
 	log_success "$(L "slsteam-moon installed" "slsteam-moon instalado")"
+
+	# Seed the full default config now, while the release tree (with its
+	# res/config.yaml template) is still extracted, so the cloud step can set
+	# DisableCloud authoritatively without writing a partial config.
+	seed_slsteam_config "$extract_root/res/config.yaml"
 }
 
 # ============================================================================
@@ -1043,27 +1048,75 @@ install_cloudredirect_so() {
 	return 0
 }
 
-# Make sure cloud saves are enabled in the SLSsteam config so cloud RPCs reach
-# CloudRedirect. Fresh installs already get DisableCloud: no from slsteam-moon's
-# default config (created on Steam's first launch), so this only needs to act
-# when an OLDER config already exists on disk with DisableCloud: yes (upgrade
-# from a build that defaulted to yes). If the config doesn't exist yet, the
-# default handles it — nothing to do.
-enable_cloud_in_slsteam_config() {
+# Ensure SLSsteam's DisableCloud matches whether cloud saves will actually
+# work. With the CloudRedirect hook present, cloud RPCs must flow
+# (DisableCloud: no) so CloudRedirect can intercept them; without it, disable
+# cloud (DisableCloud: yes) so SLSsteam doesn't attempt the ownership-rejected
+# Steam Cloud sync for the added games, which surfaces a "Steam Cloud Error".
+#
+# slsteam-moon writes config.yaml lazily on Steam's first launch (after this
+# installer runs) and never clobbers an existing file. To be authoritative on
+# a fresh install we pre-seed a minimal config with just this key — slsteam-
+# moon's per-key defaults fill in the rest on load.
+set_disable_cloud() {
+	local want="$1"                                # "yes" or "no"
 	local cfg="$HOME/.config/SLSsteam/config.yaml"
+
+	# The config is seeded from slsteam-moon's full template at install time
+	# (seed_slsteam_config); if it somehow isn't there yet, do nothing rather
+	# than write a partial config — a config missing keys makes slsteam-moon
+	# raise a "missing key(s)" popup on every load.
 	[ -f "$cfg" ] || return 0
 
-	if grep -qE "^DisableCloud:[[:space:]]*no\b" "$cfg"; then
+	# Already the wanted value: nothing to do.
+	if grep -qE "^DisableCloud:[[:space:]]*${want}\b" "$cfg"; then
 		return 0
 	fi
-
 	if grep -qE "^DisableCloud:" "$cfg"; then
-		sed -i "s/^DisableCloud:.*/DisableCloud: no/" "$cfg"
+		sed -i "s/^DisableCloud:.*/DisableCloud: ${want}/" "$cfg"
 	else
-		printf '\nDisableCloud: no\n' >> "$cfg"
+		printf '\nDisableCloud: %s\n' "$want" >> "$cfg"
 	fi
-	log_success "$(L "Enabled cloud saves in existing SLSsteam config (DisableCloud: no)" \
-	             "Cloud saves ativado na config existente do SLSsteam (DisableCloud: no)")"
+
+	if [ "$want" = "no" ]; then
+		log_success "$(L "Enabled cloud saves in SLSsteam config (DisableCloud: no)" \
+		             "Cloud saves ativado na config do SLSsteam (DisableCloud: no)")"
+	else
+		log_success "$(L "Disabled Steam Cloud for added games in SLSsteam config (DisableCloud: yes)" \
+		             "Steam Cloud desativado para os jogos adicionados na config do SLSsteam (DisableCloud: yes)")"
+	fi
+	return 0
+}
+
+# Seed SLSsteam's config from the shipped full template ($1) so it exists with
+# ALL keys before Steam's first launch. slsteam-moon would otherwise create it
+# lazily on first launch; pre-seeding lets the installer set DisableCloud
+# authoritatively (set_disable_cloud) without ever writing a partial config —
+# a config missing keys makes slsteam-moon raise a "missing key(s)" popup on
+# every load. Never clobbers an existing config.
+seed_slsteam_config() {
+	local src="$1"
+	local cfg="$HOME/.config/SLSsteam/config.yaml"
+
+	[ -f "$cfg" ] && return 0
+	[ -f "$src" ] || return 0
+	mkdir -p "$(dirname "$cfg")" 2>/dev/null || return 0
+	cp -f "$src" "$cfg" 2>/dev/null || return 0
+	log_info "$(L "Seeded default SLSsteam config" \
+	             "Config padrão do SLSsteam criada")"
+	return 0
+}
+
+# Point DisableCloud at the real state of the hook on disk — the same condition
+# the Steam wrapper (slsteam-moon setup.sh) uses to decide whether to
+# LD_PRELOAD cloud_redirect.so. Called on the cloud-save opt-out / hook-missing
+# paths so the config reflects what will actually load.
+sync_cloud_config_with_hook() {
+	if [ -f "$CR_SO_PATH" ]; then
+		set_disable_cloud no
+	else
+		set_disable_cloud yes
+	fi
 }
 
 # Repair the CAS-corrupt save layout left by older CloudRedirect builds
@@ -1208,17 +1261,23 @@ install_cloudredirect() {
 		"y"; then
 		log_info "$(L "Skipping cloud saves (CloudRedirect)." \
 		             "Pulando os cloud saves (CloudRedirect).")"
+		# Match the config to the hook's real state: if no hook is present,
+		# disable Steam Cloud for the added games so they don't trigger a
+		# rejected sync / "Steam Cloud Error". (A hook left over from a
+		# previous run keeps cloud enabled.)
+		sync_cloud_config_with_hook
 		return 0
 	fi
 
 	# The .so is the core piece — always install it (and enable cloud in the
 	# SLSsteam config) regardless of flatpak.
 	if ! install_cloudredirect_so; then
-		# No hook → no cloud saves; nothing else to do.
+		# No hook → no cloud saves; align the config with what's on disk.
+		sync_cloud_config_with_hook
 		return 0
 	fi
 
-	enable_cloud_in_slsteam_config
+	set_disable_cloud no
 
 	# Heal any saves left in the legacy CAS-corrupt directory layout so Steam
 	# stops reporting "Steam Cloud Error" for them.
@@ -1325,4 +1384,8 @@ main() {
 	print_complete
 }
 
-main "$@"
+# Run the installer unless sourced for unit tests (SLSPLUGIN_LIB_ONLY=1).
+# Plain `curl ... | bash` leaves SLSPLUGIN_LIB_ONLY unset, so main still runs.
+if [ -z "${SLSPLUGIN_LIB_ONLY:-}" ]; then
+	main "$@"
+fi
