@@ -108,3 +108,79 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(s)
 print("[patch-frontend] Restart Steam button injected into Game Added modal")
 PY
+
+# ---------------------------------------------------------------------------
+# Route fast download through the smart source selector.
+#
+# Upstream's fast download picks available[0] (first by list order) and falls
+# back serially. This fork replaces that with the backend smart race
+# (StartAddViaLuaToolsSmart): parallel download of all available sources,
+# pick the most complete of the fast ones. The backend handles fallback
+# internally, so the JS onFailed callback becomes a no-op. The manual
+# (fast-download-off) branch is left untouched.
+#
+# Anchored: aborts loudly if the upstream fast-download block moved.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = (
+'                    if (isFastDownload) {\n'
+'                      // Fast download enabled, proceed automatically with the first available\n'
+'                      const source = available[0];\n'
+'                      backendLog(\n'
+'                        "LuaTools: Auto-selecting source via fast download: " + source.name,\n'
+'                      );\n'
+'                      startDirectDownload(appid, available, 0);\n'
+'                    } else {\n'
+)
+
+replacement = (
+'                    if (isFastDownload) {\n'
+'                      // slsteammoon: fast download runs the backend smart\n'
+'                      // source selector (parallel race -> most complete of\n'
+'                      // the fastest) instead of picking available[0] by order.\n'
+'                      backendLog(\n'
+'                        "LuaTools: fast download -> smart selection (" +\n'
+'                          available.length + " available)",\n'
+'                      );\n'
+'                      runState.inProgress = true;\n'
+'                      runState.appid = appid;\n'
+'                      const smartOverlay = document.querySelector(".luatools-overlay");\n'
+'                      if (smartOverlay) {\n'
+'                        const st = smartOverlay.querySelector(".luatools-status");\n'
+'                        if (st) st.textContent = lt("Initializing download...");\n'
+'                        const pw = smartOverlay.querySelector(".luatools-progress-wrap");\n'
+'                        if (pw) pw.style.display = "block";\n'
+'                        const pi = smartOverlay.querySelector(".luatools-progress-info");\n'
+'                        if (pi) pi.style.display = "block";\n'
+'                        const cb = smartOverlay.querySelector(".luatools-cancel-btn");\n'
+'                        if (cb) cb.style.display = "flex";\n'
+'                      } else {\n'
+'                        showTestPopup();\n'
+'                      }\n'
+'                      Millennium.callServerMethod("luatools", "StartAddViaLuaToolsSmart", {\n'
+'                        appid,\n'
+'                        contentScriptQuery: "",\n'
+'                      });\n'
+'                      startPolling(appid, function () {});\n'
+'                    } else {\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] FAST-DOWNLOAD ANCHOR FAILED: found %d matches "
+        "(need 1). The fast-download block moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % n)
+    sys.exit(3)
+
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] fast download routed through smart source selector")
+PY

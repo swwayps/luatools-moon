@@ -109,8 +109,12 @@ cp "$OVERLAY/backend/scripts/restart_steam.sh" "$OUT/backend/scripts/restart_ste
 # Override upstream downloader.sh with our env-resetting version (the
 # upstream one fails under Steam's runtime LD_LIBRARY_PATH on Linux).
 cp "$OVERLAY/backend/scripts/downloader.sh" "$OUT/backend/scripts/downloader.sh"
+# Smart source selector (speed-first, completeness-aware race) used by the
+# fast-download path.
+cp "$OVERLAY/backend/scripts/smart_download.sh" "$OUT/backend/scripts/smart_download.sh"
 chmod +x "$OUT/backend/scripts/restart_steam.sh" \
-         "$OUT/backend/scripts/downloader.sh" 2>/dev/null || true
+         "$OUT/backend/scripts/downloader.sh" \
+         "$OUT/backend/scripts/smart_download.sh" 2>/dev/null || true
 cp "$OVERLAY/backend/api.json" "$OUT/backend/api.json"
 
 # 3a. downloads.lua — register the appid into SLSsteam's AdditionalApps
@@ -133,6 +137,73 @@ end' \
     end
     _set_download_state(appid, { status = "done", success = true, api = api_name })
 end'
+
+# 3a-bis. downloads.lua — inline the smart source selector functions
+#     (start_add_via_luatools_smart + _launch_smart_download) just before the
+#     module `return`. Kept in a separate .inc.lua to avoid shell-escaping a
+#     large Lua block; inserted here so it can see downloads.lua's locals
+#     (_set_download_state, the module requires, etc.).
+SMART_INC="$OVERLAY/backend/smart_downloads.inc.lua"
+if [[ ! -f "$SMART_INC" ]]; then
+  echo "[build] missing smart selector include at $SMART_INC" >&2
+  exit 2
+fi
+INC_FILE="$SMART_INC" "$PYBIN" - "$OUT/backend/downloads.lua" <<'PY'
+import os, sys
+path = sys.argv[1]
+with open(os.environ["INC_FILE"], "r", encoding="utf-8") as f:
+    inc = f.read()
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+needle = "return downloads"
+if s.count(needle) != 1:
+    sys.stderr.write("[build] SMART INSERT ANCHOR FAILED: 'return downloads' "
+                     "count != 1 in %s\n" % path)
+    sys.exit(3)
+s = s.replace(needle, inc.rstrip() + "\n\n" + needle, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+PY
+
+# 3a-ter. main.lua — expose StartAddViaLuaToolsSmart so the frontend fast
+#     path can request the smart race. Mirrors StartAddViaLuaTools(appid)
+#     (Millennium passes { appid, contentScriptQuery } -> appid is first).
+patch_replace "$OUT/backend/main.lua" \
+'function StartAddViaLuaTools(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.start_add_via_luatools, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end' \
+'function StartAddViaLuaTools(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.start_add_via_luatools, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function StartAddViaLuaToolsSmart(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.start_add_via_luatools_smart, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end'
+
+# 3a-quater. downloads.lua — get_add_status only forwarded {status,error}
+#     from the worker's state file, dropping the progress fields, so the
+#     frontend progress bar (which reads state.bytesRead/totalBytes) was
+#     always stuck at 0%. Forward bytesRead/totalBytes/currentApi too. nil
+#     fields are skipped by _set_download_state's pairs() merge, so this is
+#     safe for workers that don't emit them.
+patch_replace "$OUT/backend/downloads.lua" \
+'                _set_download_state(appid, { status = data.status, error = data.error })' \
+'                _set_download_state(appid, {
+                    status = data.status,
+                    error = data.error,
+                    bytesRead = data.bytesRead,
+                    totalBytes = data.totalBytes,
+                    currentApi = data.currentApi,
+                })'
 
 # 3b. main.lua — unregister the appid from AdditionalApps when the user
 #     deletes the .lua via the UI.
