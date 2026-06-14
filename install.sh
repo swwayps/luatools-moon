@@ -717,6 +717,21 @@ remove_lumen() {
 	log_step "$(L "Removing existing Lumen (cannot coexist with Millennium)" \
 	             "Removendo Lumen existente (não pode coexistir com o Millennium)")"
 
+	# Kill a running Lumen sidecar first. It only self-exits ~45s after Steam's
+	# CEF endpoint disappears, so without this a live process would keep its
+	# files mmap'd and keep fighting Millennium over the CEF endpoint until it
+	# times out (and could re-touch the debug flag we clear below).
+	local lumen_bin="$lumen_dir/lumen"
+	if pgrep -f "$lumen_bin" >/dev/null 2>&1; then
+		pkill -TERM -f "$lumen_bin" 2>/dev/null || true
+		local i
+		for i in 1 2 3 4 5; do
+			pgrep -f "$lumen_bin" >/dev/null 2>&1 || break
+			sleep 1
+		done
+		pkill -KILL -f "$lumen_bin" 2>/dev/null || true
+	fi
+
 	# Lumen's install dir: the static binary, its lua/, and the plugin under
 	# luatools/. (Our Millennium plugin lives in Millennium's plugins dir, not
 	# here, so removing this whole tree is safe.)
