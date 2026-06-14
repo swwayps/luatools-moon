@@ -1,6 +1,9 @@
 #!/bin/bash
 # downloader.sh — Linux download/extract worker for slsteammoon.
 #
+# Used by the MANUAL source-selection path (fast download off). The fast
+# path uses smart_download.sh instead.
+#
 # Overrides upstream's backend/scripts/downloader.sh. Upstream's version
 # works on Windows but, on Linux, the plugin spawns this from inside the
 # Steam process, which exports a Steam Runtime LD_LIBRARY_PATH (its
@@ -11,8 +14,10 @@
 # surfacing in the UI as "Failed: curl failed".
 #
 # Fix: strip the Steam-injected loader env vars so the system binaries
-# load their own (system) libraries. Everything else mirrors upstream's
-# protocol (the *_state.json status file the frontend polls).
+# load their own (system) libraries. This fork also adds connect/transfer
+# timeouts + a speed floor (so a stalled or crawling source aborts instead
+# of hanging the dialog) and emits bytesRead/totalBytes into the state file
+# so the frontend progress bar actually moves.
 #
 # Args: <URL> <DEST_PATH> <EXTRACT_DIR> <STATE_FILE> [<USER_AGENT>]
 
@@ -25,33 +30,62 @@ EXTRACT_DIR="$3"
 STATE_FILE="$4"
 USER_AGENT="${5:-discord(dot)gg/luatools}"
 
-update_state() {
-    if [ -n "$STATE_FILE" ]; then
-        echo "{\"status\": \"$1\"}" > "$STATE_FILE"
-    fi
+CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
+MAX_TIME="${MAX_TIME:-25}"
+SPEED_LIMIT="${SPEED_LIMIT:-20000}"
+SPEED_TIME="${SPEED_TIME:-5}"
+
+write_state() {
+  # write_state <status> [bytesRead] [totalBytes]
+  [ -n "$STATE_FILE" ] || return 0
+  local status="$1" br="${2:-0}" tb="${3:-0}"
+  printf '{"status": "%s", "bytesRead": %s, "totalBytes": %s}\n' \
+    "$status" "$br" "$tb" > "$STATE_FILE"
 }
 
 write_failed() {
-    if [ -n "$STATE_FILE" ]; then
-        echo "{\"status\": \"failed\", \"error\": \"$1\"}" > "$STATE_FILE"
-    fi
+  [ -n "$STATE_FILE" ] || return 0
+  printf '{"status": "failed", "error": "%s"}\n' "$1" > "$STATE_FILE"
 }
 
-update_state "downloading"
-curl -L -A "$USER_AGENT" -o "$DEST_PATH" "$URL"
-if [ $? -ne 0 ]; then
-    write_failed "curl failed"
-    exit 1
+write_state "downloading" 0 0
+
+# Best-effort total size for a real progress bar.
+TOTAL="$(curl -sIL -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
+  --max-time 6 "$URL" 2>/dev/null | tr -d '\r' \
+  | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
+[ -z "$TOTAL" ] && TOTAL=0
+
+# Download in the background so we can poll progress from the partial file.
+curl -L -A "$USER_AGENT" \
+  --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
+  --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+  -o "$DEST_PATH" "$URL" &
+CURL_PID=$!
+
+while kill -0 "$CURL_PID" 2>/dev/null; do
+  if [ -f "$DEST_PATH" ]; then
+    sz="$(stat -c %s "$DEST_PATH" 2>/dev/null || echo 0)"
+    write_state "downloading" "$sz" "$TOTAL"
+  fi
+  sleep 0.3
+done
+wait "$CURL_PID"
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+  write_failed "curl failed"
+  exit 1
 fi
 
 if [ -n "$EXTRACT_DIR" ]; then
-    update_state "extracting"
-    unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
-    if [ $? -ne 0 ]; then
-        write_failed "unzip failed"
-        exit 1
-    fi
-    update_state "extracted"
+  write_state "extracting" "$TOTAL" "$TOTAL"
+  unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
+  if [ $? -ne 0 ]; then
+    write_failed "unzip failed"
+    exit 1
+  fi
+  write_state "extracted" "$TOTAL" "$TOTAL"
 else
-    update_state "done"
+  write_state "done" "$TOTAL" "$TOTAL"
 fi
