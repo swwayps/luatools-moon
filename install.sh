@@ -551,6 +551,38 @@ stop_steam() {
 	log_success "$(L "Steam stopped" "Steam parada")"
 }
 
+# Stop a running Lumen sidecar. Lumen loads its Lua modules once at boot and
+# keeps them cached for the life of the process, and it only exits on its own
+# ~45s after Steam's CEF endpoint disappears. So after stopping Steam we must
+# kill any lingering Lumen: otherwise the freshly installed code never loads
+# (the old process keeps the old modules in memory) and its single-instance
+# guard would stop the next launch from starting a fresh sidecar.
+stop_lumen() {
+	local lumen_bin="$HOME/.local/share/Lumen/lumen"
+
+	if ! pgrep -f "$lumen_bin" >/dev/null 2>&1; then
+		log_success "$(L "No running Lumen process detected" "Nenhum processo do Lumen em execução")"
+		return 0
+	fi
+
+	log_info "$(L "Stopping running Lumen" "Parando o Lumen em execução")"
+	pkill -TERM -f "$lumen_bin" 2>/dev/null || true
+
+	local i
+	for i in 1 2 3 4 5; do
+		if ! pgrep -f "$lumen_bin" >/dev/null 2>&1; then
+			log_success "$(L "Lumen stopped" "Lumen parado")"
+			return 0
+		fi
+		sleep 1
+	done
+
+	# Last resort: SIGKILL.
+	pkill -KILL -f "$lumen_bin" 2>/dev/null || true
+	sleep 1
+	log_success "$(L "Lumen stopped" "Lumen parado")"
+}
+
 cleanup_previous_install() {
 	local steam_root="$HOME/.steam/steam"
 
@@ -1219,6 +1251,7 @@ main() {
 
 	print_section "$(L "Stopping Steam" "Parando a Steam")"
 	stop_steam
+	stop_lumen
 
 	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
 	cleanup_previous_install
