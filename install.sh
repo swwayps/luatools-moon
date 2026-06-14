@@ -516,9 +516,17 @@ stop_steam() {
 
 	log_info "$(L "Stopping running Steam" "Parando a Steam em execução")"
 
-	# Graceful: ask Steam to shut itself down.
+	# Graceful: ask Steam to shut itself down — but bound it. On Debian/Mint
+	# `steam -shutdown` re-enters the steam-runtime container to deliver the
+	# request, which can block for a long time (or stall) while that runtime
+	# bootstraps, hanging the installer at this step. Cap it with `timeout`;
+	# the SIGTERM/SIGKILL escalation below stops Steam regardless.
 	if command -v steam >/dev/null 2>&1; then
-		steam -shutdown >/dev/null 2>&1 || true
+		if command -v timeout >/dev/null 2>&1; then
+			timeout -k 5 20 steam -shutdown >/dev/null 2>&1 || true
+		else
+			steam -shutdown >/dev/null 2>&1 || true
+		fi
 	fi
 
 	local i
