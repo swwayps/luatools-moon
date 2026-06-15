@@ -248,6 +248,24 @@ assert_eq "window: comma-decimal elapsed parsed numerically -> wait (not string-
 assert_eq "window: comma-decimal since-grace parsed numerically -> stop" \
   "stop" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 "12,000" "10,500")"
 
+# --- progress: monotonic, capped percentage (no backward jumps) -----------
+# mono_pct <prev_pct> <raw_pct> -> the percentage to display: never below the
+# previously shown value (so switching the progress anchor between racers of
+# different sizes can't drop the bar), and capped at 99 during the race (100%
+# is reserved for the extract/finalize phase).
+assert_eq "mono_pct: first sample passes through" \
+  "50" "$("$SCRIPT" mono_pct 0 50)"
+assert_eq "mono_pct: never decreases when a smaller-fraction anchor takes over" \
+  "50" "$("$SCRIPT" mono_pct 50 30)"
+assert_eq "mono_pct: a finished small source cannot show 100 mid-race (cap 99)" \
+  "99" "$("$SCRIPT" mono_pct 50 100)"
+assert_eq "mono_pct: stays capped at 99" \
+  "99" "$("$SCRIPT" mono_pct 99 100)"
+assert_eq "mono_pct: zero stays zero" \
+  "0" "$("$SCRIPT" mono_pct 0 0)"
+assert_eq "mono_pct: advances when raw exceeds prev" \
+  "73" "$("$SCRIPT" mono_pct 40 73)"
+
 # --- integration: full race over a local HTTP server (no real network) ----
 # Serves fixture zips from a temp dir and runs the worker end-to-end.
 # Asserts the final state is "extracted", the installed lua carries the

@@ -161,6 +161,19 @@ window_decide() {
   echo "wait"
 }
 
+# mono_pct <prev_pct> <raw_pct>
+# Progress-bar smoothing: the displayed percentage must never go backwards
+# (the bar is a single 0..100 number but several differently-sized sources
+# race in parallel, so the raw fraction can drop when the anchor switches),
+# and must stay below 100 until the winner is committed (the extract phase
+# reports 100). Returns max(prev, min(raw, 99)).
+mono_pct() {
+  local prev="${1:-0}" raw="${2:-0}"
+  [[ "$raw" -gt 99 ]] && raw=99
+  [[ "$raw" -lt 0 ]] && raw=0
+  if [[ "$raw" -gt "$prev" ]]; then echo "$raw"; else echo "$prev"; fi
+}
+
 # ==========================================================================
 # Subcommand dispatch
 # ==========================================================================
@@ -179,6 +192,10 @@ case "${1:-}" in
     ;;
   window)
     window_decide "$2" "$3" "$4" "$5"
+    exit 0
+    ;;
+  mono_pct)
+    mono_pct "$2" "$3"
     exit 0
     ;;
 esac
@@ -228,7 +245,7 @@ write_state() {
 now() { date +%s.%N; }
 
 # --- load candidates ------------------------------------------------------
-declare -a C_NAME C_URL C_ZIP C_STAT C_PID C_TOTAL C_STATE
+declare -a C_NAME C_URL C_ZIP C_STAT C_HDR C_PID C_TOTAL C_STATE
 n=0
 while IFS=$'\t' read -r name url; do
   [[ -z "${name:-}" || -z "${url:-}" ]] && continue
@@ -236,6 +253,7 @@ while IFS=$'\t' read -r name url; do
   C_URL[n]="$url"
   C_ZIP[n]="$WORK/cand_${n}.zip"
   C_STAT[n]="$WORK/cand_${n}.stat"
+  C_HDR[n]="$WORK/cand_${n}.hdr"
   C_TOTAL[n]=0
   C_STATE[n]="pending"
   n=$((n + 1))
@@ -271,6 +289,7 @@ for ((i = 0; i < n; i++)); do
     code="$(curl -sL -A "$UA" \
       --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
       --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+      -D "${C_HDR[i]}" \
       -o "${C_ZIP[i]}" -w '%{http_code} %{size_download} %{time_total}' \
       "${C_URL[i]}" 2>/dev/null)"
     rc=$?
@@ -283,21 +302,25 @@ done
 t0="$(now)"
 first_satisfied=""   # time the first COMPLETE (app-key) candidate finished
 satisfied=0          # 1 once any completed candidate carries the app-key
+disp_pct=0           # monotonic progress percentage shown to the frontend
 zip_has_lua() { unzip -Z1 "$1" 2>/dev/null | grep -Eq "(^|/)${APPID}\.lua$"; }
+
+# read_total <idx> : best-known total bytes for a racer. Prefer the HEAD
+# length; if missing (some hosts don't answer HEAD), parse Content-Length from
+# the live GET response headers dumped by curl -D.
+read_total() {
+  local i="$1" t="${C_TOTAL[$1]}"
+  if [[ "${t:-0}" -le 0 && -f "${C_HDR[i]}" ]]; then
+    t="$(tr -d '\r' < "${C_HDR[i]}" | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
+    [[ "${t:-0}" -gt 0 ]] && C_TOTAL[i]="$t"
+  fi
+  echo "${C_TOTAL[$1]:-0}"
+}
 
 while :; do
   running=0
-  leader_name=""
-  leader_bytes=-1
-  leader_idx=-1
 
   for ((i = 0; i < n; i++)); do
-    # track the leading (furthest-along) transfer for a single-file style bar
-    if [[ -f "${C_ZIP[i]}" ]]; then
-      sz="$(stat -c %s "${C_ZIP[i]}" 2>/dev/null || echo 0)"
-      if [[ $sz -gt $leader_bytes ]]; then leader_bytes=$sz; leader_name="${C_NAME[i]}"; leader_idx=$i; fi
-    fi
-
     [[ "${C_STATE[i]}" != "pending" ]] && continue
     if kill -0 "${C_PID[i]}" 2>/dev/null; then
       running=$((running + 1))
@@ -328,19 +351,28 @@ while :; do
     fi
   done
 
-  # progress: report the leading transfer (a single source, 0..100%) rather
-  # than the sum across all racers (which never nears 100% since losers are
-  # cancelled mid-download). totalBytes from that source's HEAD length.
-  # currentApi is left EMPTY during the race: the frontend locks the first
-  # named source it sees as "Found", and the leader is often NOT the winner
-  # (a fast but incomplete source can lead on bytes). Only the winner is
-  # named, at the extracting/extracted phase below.
-  br="$leader_bytes"; [[ "$br" -lt 0 ]] && br=0
-  lead_total=0
-  [[ "$leader_idx" -ge 0 ]] && lead_total="${C_TOTAL[leader_idx]}"
-  tb="$lead_total"
-  [[ "$tb" -le 0 ]] && tb="$br"
-  [[ "$br" -gt "$tb" && "$tb" -gt 0 ]] && br="$tb"
+  # progress: anchor the bar to the racer with the LARGEST known total — the
+  # most representative of the real install (the biggest archive is usually
+  # the most complete one we end up picking). totalBytes is learned from HEAD
+  # or, for hosts that don't answer HEAD, from the live GET response headers.
+  # mono_pct keeps the displayed percentage monotonic and < 100, so a small
+  # source finishing first can't slam the bar to 100% and a later anchor
+  # switch can't make it jump backwards. currentApi stays EMPTY during the
+  # race; only the winner is named at the extract phase below.
+  anchor_idx=-1; anchor_total=0
+  for ((i = 0; i < n; i++)); do
+    [[ "${C_STATE[i]}" == "failed" || "${C_STATE[i]}" == "cancelled" ]] && continue
+    it="$(read_total "$i")"
+    if [[ "${it:-0}" -gt "$anchor_total" ]]; then anchor_total="$it"; anchor_idx=$i; fi
+  done
+  raw_pct=0
+  if [[ "$anchor_idx" -ge 0 && "$anchor_total" -gt 0 ]]; then
+    ab="$(stat -c %s "${C_ZIP[anchor_idx]}" 2>/dev/null || echo 0)"
+    raw_pct=$(( ab * 100 / anchor_total ))
+  fi
+  disp_pct="$(mono_pct "$disp_pct" "$raw_pct")"
+  tb="$anchor_total"
+  br=$(( disp_pct * tb / 100 ))
   write_state "downloading" "" "$br" "$tb"
 
   # window: completeness-aware decision (see window_decide). Stop when all
