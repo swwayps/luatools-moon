@@ -174,6 +174,80 @@ LUA
 assert_eq "select completeness tie -> faster wins" \
   "fastcomplete" "$("$SCRIPT" select 1134710 "$WD3")"
 
+# --- app-key detection inside a zip (peek without full extraction) --------
+# appkey <appid> <zipfile> -> "yes" if the in-zip <appid>.lua carries a real
+# addappid(<appid>, N, "<64hex>") depot key (comments stripped), else "no".
+# This is what lets the race know, mid-flight, whether a completed candidate
+# is already "complete enough" (has the app/Workshop depot key) to stop early.
+if command -v zip >/dev/null 2>&1; then
+  mk_zip() {
+    # mk_zip <zipfile> <<lua  (writes a 1134710.lua zip)
+    local zf="$1" d
+    d="$(mktemp -d)"
+    cat > "$d/1134710.lua"
+    ( cd "$d" && zip -qr "$zf" . )
+    rm -rf "$d"
+  }
+  mk_zip "$TMP/ak_yes.zip" <<'LUA'
+addappid(1134710)
+addappid(1134710,0,"1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")
+LUA
+  mk_zip "$TMP/ak_no.zip" <<'LUA'
+addappid(1134710)
+addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
+LUA
+  mk_zip "$TMP/ak_comment.zip" <<'LUA'
+addappid(1134710)
+-- addappid(1134710,0,"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+LUA
+  assert_eq "appkey: zip with app-depot key -> yes" \
+    "yes" "$("$SCRIPT" appkey 1134710 "$TMP/ak_yes.zip")"
+  assert_eq "appkey: zip without app-depot key -> no" \
+    "no" "$("$SCRIPT" appkey 1134710 "$TMP/ak_no.zip")"
+  assert_eq "appkey: commented-out app-depot key -> no" \
+    "no" "$("$SCRIPT" appkey 1134710 "$TMP/ak_comment.zip")"
+else
+  echo "skip - zip not available for appkey tests"
+fi
+
+# --- window decision (pure, deterministic; no network/timing flakiness) ---
+# window <satisfied> <running> <elapsed> <since_satisfied> -> "wait" | "stop"
+#   satisfied        = 1 if a completed candidate already has the app-key
+#   running          = number of candidates whose download is still in flight
+#   elapsed          = seconds since the race (GET) started
+#   since_satisfied  = seconds since the first app-key completion (-1 if none)
+# Honours GRACE_SECS (speed-first grace once a complete source exists) and
+# CAP_SECS (absolute backstop while still hunting for a complete source).
+assert_eq "window: all candidates finished -> stop" \
+  "stop" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 0 1 -1)"
+
+assert_eq "window: no complete source yet, still running, before cap -> wait" \
+  "wait" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 1 5 -1)"
+
+# the BoI/Ryuu fix: a slow source still downloading at 13s must be AWAITED,
+# not cancelled, while no completed source has the app-key.
+assert_eq "window: slow source still in flight near cap, none complete -> wait" \
+  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 0 1 13 -1)"
+
+assert_eq "window: no complete source, reached cap -> stop (backstop)" \
+  "stop" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 1 20 -1)"
+
+assert_eq "window: complete source found, within grace -> wait" \
+  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 5 1)"
+
+assert_eq "window: complete source found, past grace -> stop (speed-first)" \
+  "stop" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 8 4)"
+
+# locale robustness: a comma-decimal elapsed (pt_BR/de_DE etc. format awk
+# printf output) must still be compared NUMERICALLY, not as a string. The
+# original bug: "3,050" >= "25" string-compares '3' > '2' -> stop, closing
+# the window at ~3s regardless of CAP and cancelling slow-but-complete sources.
+assert_eq "window: comma-decimal elapsed parsed numerically -> wait (not string-compare)" \
+  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 0 1 "3,050" -1)"
+
+assert_eq "window: comma-decimal since-grace parsed numerically -> stop" \
+  "stop" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 "12,000" "10,500")"
+
 # --- integration: full race over a local HTTP server (no real network) ----
 # Serves fixture zips from a temp dir and runs the worker end-to-end.
 # Asserts the final state is "extracted", the installed lua carries the
@@ -259,15 +333,23 @@ PY
   fi
   kill "$SRV_PID" 2>/dev/null
 
-  # --- slow-source cancellation: a slow (more complete) source must not
-  #     hang the race; a fast valid source wins and the slow one is flagged.
+  # --- completeness-aware window over a throttling HTTP server -------------
+  # The Binding-of-Isaac bug: a fast source that lacks the app/Workshop depot
+  # key must NOT win over a slower source that has it. The race must wait for
+  # the slow-but-complete source while no completed source carries the key,
+  # yet still preserve speed-first when a complete source arrives fast, and
+  # never hang on a truly dead source.
   SRV2="$TMP/srv2"; mkdir -p "$SRV2"
-  # fast.zip: valid, incomplete, tiny. slow.zip: complete but padded big.
-  rm -rf "$TMP/zf" "$TMP/zs"; mkdir -p "$TMP/zf" "$TMP/zs"
+  rm -rf "$TMP/zf" "$TMP/zfc" "$TMP/zs"; mkdir -p "$TMP/zf" "$TMP/zfc" "$TMP/zs"
+  # fast-incomplete: instant, NO app-depot key
   printf 'addappid(1134710)\naddappid(1134711,0,"e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")\n' > "$TMP/zf/1134710.lua"
   ( cd "$TMP/zf" && zip -qr "$SRV2/fast.zip" . )
-  printf 'addappid(1134710, 1, "1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")\n' > "$TMP/zs/1134710.lua"
-  head -c 40000 /dev/zero | tr '\0' 'x' > "$TMP/zs/big.manifest"
+  # fast-complete: instant, HAS app-depot key
+  printf 'addappid(1134710)\naddappid(1134710,0,"1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")\n' > "$TMP/zfc/1134710.lua"
+  ( cd "$TMP/zfc" && zip -qr "$SRV2/fastcomplete.zip" . )
+  # slow-complete: throttled, HAS app-depot key
+  printf 'addappid(1134710)\naddappid(1134710,0,"1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")\n' > "$TMP/zs/1134710.lua"
+  head -c 20000 /dev/zero | tr '\0' 'x' > "$TMP/zs/big.manifest"
   ( cd "$TMP/zs" && zip -qr0 "$SRV2/slow.zip" . )
 
   cat > "$TMP/slow_server.py" <<PY
@@ -283,17 +365,28 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(n)); self.end_headers()
         return n
     def do_HEAD(self):
+        # a "dead" host accepts the connection but never answers HEAD in time
+        if "dead" in self.path:
+            time.sleep(30); return
         self._hdr(self.path.lstrip("/"))
     def do_GET(self):
         name = self.path.lstrip("/")
+        if "dead" in name:
+            # send headers then hang forever -> curl --max-time must cancel it
+            try:
+                self.send_response(200); self.send_header("Content-Length", "100000"); self.end_headers()
+            except Exception: return
+            time.sleep(60); return
         n = self._hdr(name)
         if n is None: return
         data = open(os.path.join(DIR, name), "rb").read()
         if name == "slow.zip":
-            for i in range(0, len(data), 512):
-                try: self.wfile.write(data[i:i+512]); self.wfile.flush()
+            # ~0.8s TTFB then ~2KB/s: finishes in a few seconds, well under MAX_TIME
+            time.sleep(0.8)
+            for i in range(0, len(data), 1024):
+                try: self.wfile.write(data[i:i+1024]); self.wfile.flush()
                 except Exception: return
-                time.sleep(0.5)
+                time.sleep(0.25)
         else:
             try: self.wfile.write(data)
             except Exception: pass
@@ -311,29 +404,66 @@ PY
     sleep 0.1
   done
 
+  has_app_key_lua() {
+    # has_app_key_lua <extract_dir> -> "yes"/"no"
+    local lua
+    lua="$(find "$1" -name '1134710.lua' -print -quit 2>/dev/null)"
+    if [[ -n "$lua" ]] && grep -Eq 'addappid\s*\(\s*1134710\s*,\s*[0-9]+\s*,\s*"[0-9A-Fa-f]{64}"' "$lua"; then
+      echo "yes"; else echo "no"; fi
+  }
+
   if [[ -n "$PORT2" ]]; then
-    CAND2="$TMP/cands2.txt"
-    printf 'slow\thttp://127.0.0.1:%s/slow.zip\n' "$PORT2" >  "$CAND2"
-    printf 'fast\thttp://127.0.0.1:%s/fast.zip\n' "$PORT2" >> "$CAND2"
-    DEST2="$TMP/dl2"; mkdir -p "$DEST2"
-    STATE2="$DEST2/1134710_state.json"
-    start_s="$(date +%s)"
-    SPEED_LIMIT=100000 SPEED_TIME=1 MAX_TIME=4 GRACE_SECS=1 CAP_SECS=5 \
-      "$SCRIPT" 1134710 "$STATE2" "$DEST2" "$CAND2" >/dev/null 2>&1
-    end_s="$(date +%s)"
-    elapsed=$((end_s - start_s))
+    # Scenario A (the fix): slow-but-complete must beat fast-but-incomplete.
+    CANDA="$TMP/candsA.txt"
+    printf 'fastincomplete\thttp://127.0.0.1:%s/fast.zip\n' "$PORT2" >  "$CANDA"
+    printf 'slowcomplete\thttp://127.0.0.1:%s/slow.zip\n'   "$PORT2" >> "$CANDA"
+    DESTA="$TMP/dlA"; mkdir -p "$DESTA"
+    STATEA="$DESTA/1134710_state.json"
+    SPEED_LIMIT=1 SPEED_TIME=99 MAX_TIME=15 GRACE_SECS=2 CAP_SECS=20 \
+      "$SCRIPT" 1134710 "$STATEA" "$DESTA" "$CANDA" >/dev/null 2>&1
+    finA="$(grep -oE '"status"[: ]*"[a-z]+"' "$STATEA" 2>/dev/null | tail -1 | grep -oE '[a-z]+"$' | tr -d '"')"
+    assert_eq "window: slow-complete vs fast-incomplete -> completes (extracted)" "extracted" "$finA"
+    assert_eq "window: slow-complete source won (app-depot key present)" \
+      "yes" "$(has_app_key_lua "$DESTA/extracted_1134710")"
+    apiA="$(grep -oE '"currentApi"[: ]*"[^"]*"' "$STATEA" 2>/dev/null | tail -1 | sed -E 's/.*"currentApi"[: ]*"([^"]*)"/\1/')"
+    assert_eq "window: winner reported is slowcomplete, not the fast leader" "slowcomplete" "$apiA"
+    # the candidates file must be cleaned up after the run (no leftovers)
+    if [[ -f "$CANDA" ]]; then leftA="present"; else leftA="gone"; fi
+    assert_eq "cleanup: candidates file removed after run" "gone" "$leftA"
 
-    final2="$(grep -oE '"status"[: ]*"[a-z]+"' "$STATE2" 2>/dev/null | tail -1 | grep -oE '[a-z]+"$' | tr -d '"')"
-    assert_eq "slow-source: race still completes (extracted)" "extracted" "$final2"
+    # Scenario B (speed-first preserved): fast-complete wins promptly and the
+    # slow (also complete) source is NOT awaited.
+    CANDB="$TMP/candsB.txt"
+    printf 'fastcomplete\thttp://127.0.0.1:%s/fastcomplete.zip\n' "$PORT2" >  "$CANDB"
+    printf 'slowcomplete\thttp://127.0.0.1:%s/slow.zip\n'         "$PORT2" >> "$CANDB"
+    DESTB="$TMP/dlB"; mkdir -p "$DESTB"
+    STATEB="$DESTB/1134710_state.json"
+    startB="$(date +%s)"
+    SPEED_LIMIT=1 SPEED_TIME=99 MAX_TIME=15 GRACE_SECS=2 CAP_SECS=20 \
+      "$SCRIPT" 1134710 "$STATEB" "$DESTB" "$CANDB" >/dev/null 2>&1
+    endB="$(date +%s)"; elapB=$((endB - startB))
+    apiB="$(grep -oE '"currentApi"[: ]*"[^"]*"' "$STATEB" 2>/dev/null | tail -1 | sed -E 's/.*"currentApi"[: ]*"([^"]*)"/\1/')"
+    assert_eq "speed-first: fast-complete wins when it arrives first" "fastcomplete" "$apiB"
+    if [[ "$elapB" -le 8 ]]; then promptB="yes"; else promptB="no"; fi
+    assert_eq "speed-first: did not await the slow source (${elapB}s)" "yes" "$promptB"
 
-    win_lua="$(find "$DEST2/extracted_1134710" -name '1134710.lua' -print -quit 2>/dev/null)"
-    # fast.zip is the incomplete one -> winner has NO app-depot key (slow was cancelled)
-    if [[ -n "$win_lua" ]] && ! grep -Eq 'addappid\s*\(\s*1134710\s*,\s*[0-9]+\s*,\s*"[0-9A-Fa-f]{64}"' "$win_lua"; then
-      fast_won="yes"; else fast_won="no"; fi
-    assert_eq "slow-source: fast source won (slow one cancelled, not awaited)" "yes" "$fast_won"
-
-    if [[ "$elapsed" -le 5 ]]; then within="yes"; else within="no"; fi
-    assert_eq "slow-source: did not hang (finished within cap, ${elapsed}s)" "yes" "$within"
+    # Scenario C (no-hang backstop): a dead source must be cancelled by
+    # curl --max-time; the only completer (fast-incomplete) wins, no hang.
+    CANDC="$TMP/candsC.txt"
+    printf 'deadslow\thttp://127.0.0.1:%s/dead.zip\n'      "$PORT2" >  "$CANDC"
+    printf 'fastincomplete\thttp://127.0.0.1:%s/fast.zip\n' "$PORT2" >> "$CANDC"
+    DESTC="$TMP/dlC"; mkdir -p "$DESTC"
+    STATEC="$DESTC/1134710_state.json"
+    startC="$(date +%s)"
+    SPEED_LIMIT=1 SPEED_TIME=99 MAX_TIME=3 GRACE_SECS=2 CAP_SECS=12 \
+      "$SCRIPT" 1134710 "$STATEC" "$DESTC" "$CANDC" >/dev/null 2>&1
+    endC="$(date +%s)"; elapC=$((endC - startC))
+    finC="$(grep -oE '"status"[: ]*"[a-z]+"' "$STATEC" 2>/dev/null | tail -1 | grep -oE '[a-z]+"$' | tr -d '"')"
+    assert_eq "no-hang: dead source does not block completion (extracted)" "extracted" "$finC"
+    assert_eq "no-hang: the live (incomplete) source won" \
+      "no" "$(has_app_key_lua "$DESTC/extracted_1134710")"
+    if [[ "$elapC" -le 12 ]]; then withinC="yes"; else withinC="no"; fi
+    assert_eq "no-hang: bounded by max-time, did not hang (${elapC}s)" "yes" "$withinC"
   else
     echo "skip - could not start slow http server"
   fi
