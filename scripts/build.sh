@@ -205,6 +205,29 @@ patch_replace "$OUT/backend/downloads.lua" \
                     currentApi = data.currentApi,
                 })'
 
+# 3a-quinquies. downloads.lua — the smart path leaves a <appid>_candidates.tsv
+#     in temp_dl. The worker removes it via its EXIT trap, but if the worker is
+#     killed before the trap runs the file leaks. Clean it defensively here too,
+#     on both terminal transitions (extracted and failed), alongside the other
+#     background-script artefacts.
+patch_replace "$OUT/backend/downloads.lua" \
+'                    -- Cleanup background script files
+                    pcall(fs.remove, state_file)
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.ps1"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.sh"))
+                elseif data.status == "failed" then
+                    pcall(fs.remove, state_file)
+                end' \
+'                    -- Cleanup background script files
+                    pcall(fs.remove, state_file)
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.ps1"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.sh"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.tsv"))
+                elseif data.status == "failed" then
+                    pcall(fs.remove, state_file)
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.tsv"))
+                end'
+
 # 3b. main.lua — unregister the appid from AdditionalApps when the user
 #     deletes the .lua via the UI.
 patch_replace "$OUT/backend/main.lua" \

@@ -24,13 +24,30 @@
 
 set -uo pipefail
 
+# Force a dot decimal separator everywhere. Under comma-decimal locales
+# (pt_BR, de_DE, ...) awk's printf emits "3,050"; downstream numeric awk
+# comparisons then fail (a comma-bearing token isn't a clean number, so awk
+# silently falls back to STRING comparison: "3,050" >= "25" tests '3' > '2'
+# = true, slamming the race window shut at ~3s regardless of CAP). Pinning
+# LC_ALL=C makes date/awk/curl all use dots and compare numerically.
+export LC_ALL=C
+
 # --- tunables (env-overridable for tests) ---------------------------------
-: "${GRACE_SECS:=3}"        # after first completion, wait this long for better ones
-: "${CAP_SECS:=8}"          # absolute deadline from t0 to stop collecting
-: "${CONNECT_TIMEOUT:=8}"   # curl --connect-timeout
-: "${MAX_TIME:=25}"         # curl --max-time per source
-: "${SPEED_LIMIT:=20000}"   # curl --speed-limit (bytes/s) ...
-: "${SPEED_TIME:=5}"        # ... sustained below for this many seconds -> abort
+: "${GRACE_SECS:=3}"        # speed-first grace once a COMPLETE source exists
+: "${CAP_SECS:=45}"         # absolute backstop while still hunting for a complete source
+: "${CONNECT_TIMEOUT:=10}"  # curl --connect-timeout
+: "${MAX_TIME:=40}"         # curl --max-time per source (must be < CAP_SECS).
+                            # Generous on purpose: some key-bearing sources are
+                            # on-demand zip builders (e.g. Ryuu) with wildly
+                            # variable latency (observed 3-23s+). Too tight a cap
+                            # cancels the ONLY source carrying the Workshop depot
+                            # key, silently falling back to an incomplete source.
+: "${SPEED_LIMIT:=1000}"    # curl --speed-limit (bytes/s) ...
+: "${SPEED_TIME:=20}"       # ... sustained below for this many seconds -> abort.
+                            # Lenient so a slow-to-generate (but alive) source is
+                            # not killed mid-build; only a genuinely dead host
+                            # (<1 KB/s for 20s) is dropped. CAP_SECS/MAX_TIME bound
+                            # the total wait regardless.
 
 # ==========================================================================
 # Pure logic
@@ -99,6 +116,51 @@ select_winner() {
   echo "$best_name"
 }
 
+# zip_has_app_key <appid> <zipfile>
+# Peek inside a downloaded zip (without full extraction) and report whether
+# its <appid>.lua carries a real app-depot key: addappid(<appid>, N, "<64hex>")
+# with Lua comments stripped. Prints "yes"/"no". This is the mid-race signal
+# that a completed candidate is already "complete enough" (has the app/Workshop
+# depot key) so the race can stop early instead of waiting out the cap.
+zip_has_app_key() {
+  local appid="$1" zip="$2"
+  [[ -f "$zip" ]] || { echo "no"; return; }
+  local entry
+  entry="$(unzip -Z1 "$zip" 2>/dev/null | grep -E "(^|/)${appid}\.lua$" | head -1)"
+  [[ -n "$entry" ]] || { echo "no"; return; }
+  if unzip -p "$zip" "$entry" 2>/dev/null | strip_lua_comments \
+       | grep -Eq "addappid\s*\(\s*${appid}\s*,\s*[0-9]+\s*,\s*\"[0-9A-Fa-f]{64}\""; then
+    echo "yes"
+  else
+    echo "no"
+  fi
+}
+
+# window_decide <satisfied> <running> <elapsed> <since_satisfied>
+# Decide whether to keep waiting for more racers ("wait") or close the
+# collection window ("stop"). Completeness-aware, not purely speed-based:
+#   - all racers finished              -> stop
+#   - absolute backstop (CAP_SECS) hit -> stop
+#   - a complete source already exists -> speed-first: stop GRACE_SECS after it
+#   - otherwise (no complete source yet, racers still in flight) -> WAIT,
+#     so a slower-but-more-complete source (e.g. a host that builds the zip
+#     on the fly, high TTFB) is not cancelled before it can be considered.
+# Honours GRACE_SECS and CAP_SECS from the environment.
+window_decide() {
+  local satisfied="$1" running="$2" elapsed="$3" since_sat="$4"
+  # Defensive: normalise a comma decimal separator to a dot so the numeric
+  # awk comparisons below never degrade into string comparison, even if a
+  # caller (or a comma-decimal locale) hands us "3,050" instead of "3.050".
+  elapsed="${elapsed//,/.}"
+  since_sat="${since_sat//,/.}"
+  if [[ "${running:-0}" -eq 0 ]]; then echo "stop"; return; fi
+  if awk -v e="$elapsed" -v c="$CAP_SECS" 'BEGIN{exit !(e>=c)}'; then echo "stop"; return; fi
+  if [[ "${satisfied:-0}" -eq 1 ]]; then
+    if awk -v s="$since_sat" -v g="$GRACE_SECS" 'BEGIN{exit !(s>=g)}'; then echo "stop"; return; fi
+  fi
+  echo "wait"
+}
+
 # ==========================================================================
 # Subcommand dispatch
 # ==========================================================================
@@ -109,6 +171,14 @@ case "${1:-}" in
     ;;
   select)
     select_winner "$2" "$3"
+    exit 0
+    ;;
+  appkey)
+    zip_has_app_key "$2" "$3"
+    exit 0
+    ;;
+  window)
+    window_decide "$2" "$3" "$4" "$5"
     exit 0
     ;;
 esac
@@ -130,10 +200,11 @@ UA="discord(dot)gg/luatools"
 WORK="$DEST_ROOT/race_${APPID}"
 rm -rf "$WORK"; mkdir -p "$WORK"
 # Always remove the race scratch dir (all candidate downloads, winner and
-# losers alike) on any exit — success or failure — so unused source zips
-# never linger on the user's disk. The winning zip is copied out to
-# DEST_ROOT/<appid>.zip before exit, so this is safe.
-trap 'rm -rf "$WORK" 2>/dev/null' EXIT
+# losers alike) AND the candidates manifest on any exit — success or failure —
+# so unused source zips and the candidates list never linger on the user's
+# disk. The winning zip is copied out to DEST_ROOT/<appid>.zip before exit,
+# so this is safe.
+trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" 2>/dev/null' EXIT
 
 declare -A API_ERR_TYPE
 declare -A API_ERR_CODE
@@ -155,7 +226,6 @@ write_state() {
 }
 
 now() { date +%s.%N; }
-elapsed_ge() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a>=b)}'; }
 
 # --- load candidates ------------------------------------------------------
 declare -a C_NAME C_URL C_ZIP C_STAT C_PID C_TOTAL C_STATE
@@ -181,7 +251,7 @@ write_state "downloading" "" 0 0
 # --- best-effort HEAD burst for content lengths (for a real progress bar) -
 for ((i = 0; i < n; i++)); do
   (
-    len="$(curl -sIL -A "$UA" --connect-timeout 5 --max-time 6 "${C_URL[i]}" 2>/dev/null \
+    len="$(curl -sIL -A "$UA" --connect-timeout 3 --max-time 3 "${C_URL[i]}" 2>/dev/null \
            | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
     echo "${len:-0}" > "$WORK/cand_${i}.len"
   ) &
@@ -209,9 +279,10 @@ for ((i = 0; i < n; i++)); do
   C_PID[i]=$!
 done
 
-# --- poll loop with hybrid window -----------------------------------------
+# --- poll loop with completeness-aware window -----------------------------
 t0="$(now)"
-first_done=""
+first_satisfied=""   # time the first COMPLETE (app-key) candidate finished
+satisfied=0          # 1 once any completed candidate carries the app-key
 zip_has_lua() { unzip -Z1 "$1" 2>/dev/null | grep -Eq "(^|/)${APPID}\.lua$"; }
 
 while :; do
@@ -238,7 +309,15 @@ while :; do
     rc="$(awk '{print $4}' <<<"$local_line")"
     if [[ "${rc:-1}" == "0" && "${http:-0}" == "200" ]] && zip_has_lua "${C_ZIP[i]}"; then
       C_STATE[i]="ok"
-      [[ -z "$first_done" ]] && first_done="$(now)"
+      # A completed candidate that already carries the app/Workshop depot key
+      # makes the window "satisfied": from here, speed-first grace applies. A
+      # completed candidate WITHOUT the key does NOT satisfy the window, so the
+      # race keeps waiting (up to CAP_SECS) for a slower source that might have
+      # it — this is what stops a fast-but-incomplete source winning by default.
+      if [[ "$(zip_has_app_key "$APPID" "${C_ZIP[i]}")" == "yes" ]]; then
+        satisfied=1
+        [[ -z "$first_satisfied" ]] && first_satisfied="$(now)"
+      fi
     else
       C_STATE[i]="failed"
       if [[ "${rc:-1}" == "28" ]]; then
@@ -264,15 +343,15 @@ while :; do
   [[ "$br" -gt "$tb" && "$tb" -gt 0 ]] && br="$tb"
   write_state "downloading" "" "$br" "$tb"
 
-  # window: stop once grace after first completion, or absolute cap, elapsed
+  # window: completeness-aware decision (see window_decide). Stop when all
+  # racers are done, when the absolute cap is hit, or — once a COMPLETE source
+  # exists — GRACE_SECS after it. Keep waiting while no complete source has
+  # arrived yet and a racer is still in flight.
   t="$(now)"
-  if [[ -n "$first_done" ]]; then
-    grace_deadline="$(awk -v a="$first_done" -v g="$GRACE_SECS" 'BEGIN{printf "%.6f", a+g}')"
-    elapsed_ge "$t" "$grace_deadline" && break
-  fi
-  cap_deadline="$(awk -v a="$t0" -v c="$CAP_SECS" 'BEGIN{printf "%.6f", a+c}')"
-  elapsed_ge "$t" "$cap_deadline" && break
-  [[ $running -eq 0 ]] && break
+  elapsed="$(awk -v a="$t0" -v b="$t" 'BEGIN{printf "%.3f", b-a}')"
+  since_sat="-1"
+  [[ -n "$first_satisfied" ]] && since_sat="$(awk -v a="$first_satisfied" -v b="$t" 'BEGIN{printf "%.3f", b-a}')"
+  [[ "$(window_decide "$satisfied" "$running" "$elapsed" "$since_sat")" == "stop" ]] && break
   sleep 0.2
 done
 
