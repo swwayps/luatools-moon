@@ -164,9 +164,14 @@ prompt_yes_no() {
 # ============================================================================
 # Distro detection
 # ============================================================================
+# Path to the os-release file. Overridable so the detection helpers can be
+# unit-tested against synthetic fixtures (scripts/test-distro-detect.sh).
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+
 get_distro_family() {
-	if [ -f /etc/os-release ]; then
-		. /etc/os-release
+	if [ -f "$OS_RELEASE_FILE" ]; then
+		# shellcheck disable=SC1090
+		. "$OS_RELEASE_FILE"
 		if [ "${ID:-}" = "ubuntu" ] || [ "${ID:-}" = "debian" ] || [[ "${ID_LIKE:-}" =~ (debian|ubuntu) ]]; then
 			echo "debian"
 		elif [ "${ID:-}" = "fedora" ] || [ "${ID:-}" = "rhel" ] || [ "${ID:-}" = "centos" ] || [[ "${ID_LIKE:-}" =~ (fedora|rhel) ]]; then
@@ -181,6 +186,65 @@ get_distro_family() {
 	else
 		echo "unknown"
 	fi
+}
+
+# Echo the lowercased distro ID (e.g. bazzite, steamos, ubuntu) for messaging
+# and immutable-OS detection. "unknown" when os-release is unavailable.
+get_distro_id() {
+	if [ -f "$OS_RELEASE_FILE" ]; then
+		# Read in a subshell so the sourced vars don't leak to the caller.
+		(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${ID:-unknown}"
+		) | tr '[:upper:]' '[:lower:]'
+	else
+		printf 'unknown'
+	fi
+}
+
+# True on immutable / atomic systems (Bazzite, SteamOS, Fedora Atomic, ublue,
+# ...) where the root (/usr) is read-only and the package manager must NOT be
+# used to install dependencies: rpm-ostree needs a reboot, and SteamOS's
+# `steamos-readonly disable` + keyring re-init is fragile and wiped on update.
+# We never probe /usr writability — the installer runs non-root, so /usr is
+# unwritable on EVERY distro and that would false-positive everywhere.
+is_immutable_distro() {
+	local id like
+	id="$(get_distro_id)"
+	case "$id" in
+		bazzite|steamos|steamdeck|holoiso|\
+		silverblue|kinoite|sericea|onyx|\
+		bluefin|aurora|ucore)
+			return 0 ;;
+	esac
+
+	# Fedora Atomic variants advertise themselves via VARIANT_ID even when ID
+	# is plain "fedora" (e.g. ID=fedora VARIANT_ID=silverblue).
+	if [ -f "$OS_RELEASE_FILE" ]; then
+		like="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${VARIANT_ID:-}"
+		)"
+		case "$like" in
+			silverblue|kinoite|sericea|onyx|*atomic*) return 0 ;;
+		esac
+	fi
+
+	# Image-based / atomic tooling present -> treat as immutable.
+	if command -v rpm-ostree >/dev/null 2>&1 || command -v steamos-readonly >/dev/null 2>&1; then
+		return 0
+	fi
+
+	# Last resort: a read-only root mount (ostree deployments mount / ro).
+	if command -v findmnt >/dev/null 2>&1; then
+		case ",$(findmnt -no OPTIONS / 2>/dev/null)," in
+			*,ro,*) return 0 ;;
+		esac
+	fi
+
+	return 1
 }
 
 # Privilege-escalation prefix for system package operations.
@@ -240,6 +304,11 @@ detect_steam_type() {
 }
 
 suggest_native_steam_install() {
+	if is_immutable_distro; then
+		echo "$(L "Steam ships with this system — if it's missing, repair/reinstall the OS image" \
+		          "A Steam vem com este sistema — se estiver faltando, repare/reinstale a imagem do SO")"
+		return
+	fi
 	case "$(get_distro_family)" in
 		debian)   echo "sudo apt update && sudo apt install steam-installer" ;;
 		fedora)   echo "sudo dnf install steam" ;;
@@ -401,6 +470,24 @@ pm_install() {
 	esac
 }
 
+# Tell the user how to install packages by hand on an immutable / atomic OS,
+# where we deliberately don't run the package manager for them. $* = packages.
+immutable_install_hint() {
+	local pkgs="$*" id; id="$(get_distro_id)"
+	case "$id" in
+		steamos|steamdeck|holoiso)
+			# SteamOS: unlock the read-only root, re-init the pacman keyring,
+			# then install. This is reset on every OS update.
+			echo "sudo steamos-readonly disable && sudo pacman-key --init && sudo pacman-key --populate && sudo pacman -S ${pkgs}"
+			;;
+		*)
+			# Bazzite / Fedora Atomic / ublue: layer the packages (needs a
+			# reboot to take effect), or use a distrobox/brew if you prefer.
+			echo "rpm-ostree install ${pkgs}   ($(L "then reboot" "depois reinicie"))"
+			;;
+	esac
+}
+
 # Ensure the generic CLI tools this installer + the stack need are present.
 install_dependencies() {
 	local family; family="$(get_distro_family)"
@@ -408,24 +495,59 @@ install_dependencies() {
 	log_info "$(L "Checking required tools (jq, curl, tar, unzip, notify-send)" \
 	             "Verificando ferramentas necessárias (jq, curl, tar, unzip, notify-send)")"
 
-	local missing_pkgs=() tool
+	local missing_tools=() missing_pkgs=() tool
 	for tool in jq curl tar unzip notify-send; do
 		if ! command -v "$tool" >/dev/null 2>&1; then
+			missing_tools+=("$tool")
 			missing_pkgs+=("$(pkg_for "$tool" "$family")")
 		fi
 	done
 
-	if [ "${#missing_pkgs[@]}" -gt 0 ]; then
-		log_warn "$(L "Installing missing tools: ${missing_pkgs[*]}" \
-		             "Instalando ferramentas ausentes: ${missing_pkgs[*]}")"
-		if [ "$family" = "unknown" ]; then
-			fail "$(L "Unknown distro — please install manually: ${missing_pkgs[*]}" \
-			          "Distro desconhecida — instale manualmente: ${missing_pkgs[*]}")"
+	# Everything present (the common case on Bazzite/SteamOS, which ship these
+	# tools) — nothing to do.
+	if [ "${#missing_tools[@]}" -eq 0 ]; then
+		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+		return 0
+	fi
+
+	# Immutable / atomic OS: never invoke the package manager (rpm-ostree needs
+	# a reboot; SteamOS's read-only unlock is fragile and wiped on update).
+	# notify-send only powers optional in-Steam popups, so if that's the ONLY
+	# gap we degrade gracefully; anything essential missing aborts with
+	# distro-correct manual instructions.
+	if is_immutable_distro; then
+		local essential=()
+		for tool in "${missing_tools[@]}"; do
+			[ "$tool" = "notify-send" ] || essential+=("$tool")
+		done
+		if [ "${#essential[@]}" -eq 0 ]; then
+			log_warn "$(L "notify-send not found; in-Steam popups will be disabled (everything else works)." \
+			             "notify-send não encontrado; os popups dentro da Steam ficarão desativados (o resto funciona).")"
+			log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+			return 0
 		fi
-		if ! pm_install "$family" "${missing_pkgs[@]}"; then
-			fail "$(L "Failed to install: ${missing_pkgs[*]}. Install them manually and re-run." \
-			          "Falha ao instalar: ${missing_pkgs[*]}. Instale manualmente e rode de novo.")"
-		fi
+		echo ""
+		log_error "$(L "Missing required tools on an immutable system: ${essential[*]}" \
+		              "Ferramentas necessárias ausentes num sistema imutável: ${essential[*]}")"
+		echo ""
+		echo -e "  $(L "This system's root is read-only, so install them yourself:" \
+		               "A raiz deste sistema é somente-leitura, então instale-as você mesmo:")"
+		echo -e "       ${GREEN}$(immutable_install_hint "${missing_pkgs[*]}")${NC}"
+		echo ""
+		fail "$(L "Aborted. Install the tools above, then re-run this installer." \
+		          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
+	fi
+
+	# Mutable distro: install via the package manager as before.
+	log_warn "$(L "Installing missing tools: ${missing_pkgs[*]}" \
+	             "Instalando ferramentas ausentes: ${missing_pkgs[*]}")"
+	if [ "$family" = "unknown" ]; then
+		fail "$(L "Unknown distro — please install manually: ${missing_pkgs[*]}" \
+		          "Distro desconhecida — instale manualmente: ${missing_pkgs[*]}")"
+	fi
+	if ! pm_install "$family" "${missing_pkgs[@]}"; then
+		fail "$(L "Failed to install: ${missing_pkgs[*]}. Install them manually and re-run." \
+		          "Falha ao instalar: ${missing_pkgs[*]}. Instale manualmente e rode de novo.")"
 	fi
 	log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
 }
