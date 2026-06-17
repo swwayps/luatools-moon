@@ -1012,7 +1012,77 @@ install_slsteam_moon() {
 # ============================================================================
 # Step: Millennium (Steam client modding framework)
 # ============================================================================
+# 32-bit OpenSSL dev package that Millennium needs, per distro family.
+# Millennium's loader is a 32-bit .so and its own installer hard-requires the
+# 32-bit OpenSSL dev package on apt distros (it aborts otherwise). The package
+# name differs per family; "" for unknown families (let Millennium decide).
+millennium_ssl_pkg() {
+	case "$1" in
+		debian)   echo "libssl-dev:i386" ;;       # needs `dpkg --add-architecture i386`
+		fedora)   echo "openssl-devel.i686" ;;    # 32-bit multilib dev
+		arch)     echo "lib32-openssl" ;;         # multilib repo (dev headers bundled)
+		opensuse) echo "libopenssl-devel-32bit" ;;
+		*)        echo "" ;;
+	esac
+}
+
+# Ensure Millennium's 32-bit OpenSSL dependency is present before running its
+# installer. REQUIRED on apt/Debian (Millennium's installer `exit 1`s without
+# it); best-effort on other families (its installer doesn't enforce it there,
+# but the 32-bit loader still wants it at runtime). Never runs the package
+# manager on immutable systems.
+install_millennium_deps() {
+	local family pkg sudo_cmd
+	family="$(get_distro_family)"
+	pkg="$(millennium_ssl_pkg "$family")"
+	[ -n "$pkg" ] || return 0
+
+	# Debian: mirror Millennium's own check — already satisfied?
+	if [ "$family" = "debian" ] && dpkg -s libssl-dev:i386 >/dev/null 2>&1; then
+		log_success "$(L "32-bit OpenSSL already present" "OpenSSL 32-bit já presente")"
+		return 0
+	fi
+
+	if is_immutable_distro; then
+		log_warn "$(L "Millennium needs 32-bit OpenSSL ($pkg); install it yourself on this immutable system." \
+		             "O Millennium precisa do OpenSSL 32-bit ($pkg); instale-o você mesmo neste sistema imutável.")"
+		echo -e "       ${GREEN}$(immutable_install_hint "$pkg")${NC}"
+		return 0
+	fi
+
+	sudo_cmd="$(sudo_prefix)"
+	log_info "$(L "Installing Millennium's 32-bit OpenSSL dependency ($pkg)" \
+	             "Instalando a dependência OpenSSL 32-bit do Millennium ($pkg)")"
+
+	case "$family" in
+		debian)
+			# Millennium REQUIRES this on apt distros — enable i386 multiarch,
+			# refresh, install, and abort with a clear message if it fails.
+			$sudo_cmd dpkg --add-architecture i386 >/dev/null 2>&1 || true
+			$sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+			if ! $sudo_cmd env DEBIAN_FRONTEND=noninteractive apt-get install -y "$pkg"; then
+				fail "$(L "Couldn't install $pkg (Millennium needs it). Install it manually: sudo dpkg --add-architecture i386 && sudo apt-get update && sudo apt-get install $pkg" \
+				          "Não foi possível instalar $pkg (o Millennium precisa dele). Instale manualmente: sudo dpkg --add-architecture i386 && sudo apt-get update && sudo apt-get install $pkg")"
+			fi
+			log_success "$(L "32-bit OpenSSL installed" "OpenSSL 32-bit instalado")"
+			;;
+		fedora|arch|opensuse)
+			# Not enforced by Millennium's installer here, but its 32-bit loader
+			# needs it at runtime. Best-effort — a missing multilib repo just
+			# warns instead of aborting the whole install.
+			if pm_install "$family" "$pkg"; then
+				log_success "$(L "32-bit OpenSSL installed" "OpenSSL 32-bit instalado")"
+			else
+				log_warn "$(L "Couldn't install $pkg; if Millennium misbehaves, install the 32-bit OpenSSL manually." \
+				             "Não foi possível instalar $pkg; se o Millennium der problema, instale o OpenSSL 32-bit manualmente.")"
+			fi
+			;;
+	esac
+}
+
 install_millennium() {
+	install_millennium_deps
+
 	log_info "$(L "Installing Millennium from steambrew.app" \
 	             "Instalando Millennium via steambrew.app")"
 
