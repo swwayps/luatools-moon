@@ -887,18 +887,40 @@ remove_millennium_framework() {
 # ============================================================================
 # Release helpers (Codeberg / Forgejo + GitHub)
 # ============================================================================
+# Fetch a JSON API URL, tolerating a slow / flaky forge (Codeberg has busy
+# spells). Retries transient failures (timeouts, 5xx, refused connections) with
+# a short backoff. Echoes the validated JSON body and returns 0 on success;
+# returns non-zero ONLY when the endpoint is genuinely unreachable / returns
+# junk — i.e. a connectivity problem, NOT "the release has no such asset". This
+# lets callers tell a network error apart from a missing asset.
+api_get() {
+	local url="$1" body
+	body="$(curl -fsSL \
+	             --connect-timeout 15 --max-time 60 \
+	             --retry 3 --retry-delay 2 --retry-connrefused \
+	             -H 'Accept: application/json' "$url" 2>/dev/null)" || return 1
+	# A reachable forge always returns non-empty, valid JSON. Anything else
+	# (empty body, HTML error/placeholder page) means the fetch didn't really
+	# succeed — treat it as a connectivity failure, not a missing asset.
+	[ -n "$body" ] || return 1
+	printf '%s' "$body" | jq -e . >/dev/null 2>&1 || return 1
+	printf '%s' "$body"
+}
+
 # Echo the browser_download_url of the first asset whose name matches the glob
 # $2 in the latest release of repo $1. Optional $3 selects the forge:
 # "codeberg" (default) or "github". Codeberg's Forgejo API mirrors GitHub's
 # release JSON shape (.tag_name, .assets[].browser_download_url), so the same
-# jq query works for both. Empty string if not found.
+# jq query works for both.
+# Returns: 0 + the URL on stdout (empty if the release carries no matching
+# asset); 2 if the forge could not be reached (network / forge down).
 latest_release_asset_url() {
 	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
 	case "$forge" in
 		github) api="https://api.github.com/repos/${repo}/releases/latest" ;;
 		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases/latest" ;;
 	esac
-	meta="$(curl -fsSL -H 'Accept: application/json' "$api" 2>/dev/null)" || return 1
+	meta="$(api_get "$api")" || return 2
 	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
 		'.assets[] | select(.name | test($glob)) | .browser_download_url' 2>/dev/null | head -n1
 }
@@ -907,16 +929,25 @@ latest_release_asset_url() {
 # first asset matching the glob. Needed when the latest release does not carry
 # the asset we want — e.g. CloudRedirect's most recent tag ships no flatpak, so
 # the newest flatpak lives in an older release under a versioned filename.
+# Same return convention as latest_release_asset_url (2 = forge unreachable).
 any_release_asset_url() {
 	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
 	case "$forge" in
 		github) api="https://api.github.com/repos/${repo}/releases?per_page=50" ;;
 		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50" ;;
 	esac
-	meta="$(curl -fsSL -H 'Accept: application/json' "$api" 2>/dev/null)" || return 1
+	meta="$(api_get "$api")" || return 2
 	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
 		'[.[].assets[]? | select(.name | test($glob)) | .browser_download_url][0] // empty' \
 		2>/dev/null | head -n1
+}
+
+# Shared message for when the release host (Codeberg) can't be reached — slow,
+# flaky, or temporarily down. Distinct from "asset not found" so the user knows
+# it's a connectivity issue to retry, not a broken install.
+forge_unreachable_msg() {
+	L "Couldn't reach Codeberg to fetch the download. It may be slow or temporarily down — check your connection and try again in a few minutes." \
+	  "Não foi possível acessar o Codeberg para baixar. Ele pode estar lento ou fora do ar no momento — verifique sua conexão e tente de novo em alguns minutos."
 }
 
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
@@ -947,7 +978,8 @@ install_slsteam_moon() {
 
 	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
 	             "Buscando a última release do slsteam-moon (Lumen)")"
-	url="$(any_release_asset_url "$SLS_REPO" "$SLS_ASSET_GLOB")"
+	url="$(any_release_asset_url "$SLS_REPO" "$SLS_ASSET_GLOB")" \
+		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
 	                          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
 
@@ -955,7 +987,8 @@ install_slsteam_moon() {
 	zip="$tmp/slsteam-moon.zip"
 
 	log_info "$(L "Downloading slsteam-moon" "Baixando slsteam-moon")"
-	curl -fL "$url" -o "$zip" || fail "$(L "Download failed" "Falha no download")"
+	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+		|| fail "$(forge_unreachable_msg)"
 
 	log_info "$(L "Extracting" "Extraindo")"
 	extract_zip "$zip" "$tmp/extracted" || fail "$(L "Extraction failed" "Falha na extração")"
@@ -992,13 +1025,15 @@ install_lumen() {
 	local url tmp zip dest
 	dest="$LUMEN_DIR"
 	log_info "$(L "Resolving latest Lumen release" "Buscando a última release do Lumen")"
-	url="$(latest_release_asset_url "$LUMEN_REPO" "^${LUMEN_ASSET}$")"
+	url="$(latest_release_asset_url "$LUMEN_REPO" "^${LUMEN_ASSET}$")" \
+		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find the Lumen release asset." \
 	                          "Não foi possível encontrar o asset da release do Lumen.")"
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$LUMEN_ASSET"
 	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
-	curl -fL "$url" -o "$zip" || fail "$(L "Download failed" "Falha no download")"
+	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+		|| fail "$(forge_unreachable_msg)"
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
 	chmod +x "$dest/lumen" 2>/dev/null || true
@@ -1017,7 +1052,8 @@ install_plugin() {
 
 	log_info "$(L "Resolving latest LuaTools plugin release" \
 	             "Buscando a última release do plugin LuaTools")"
-	url="$(latest_release_asset_url "$PLUGIN_REPO" "^${PLUGIN_ASSET}$")"
+	url="$(latest_release_asset_url "$PLUGIN_REPO" "^${PLUGIN_ASSET}$")" \
+		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find the plugin release asset." \
 	                          "Não foi possível encontrar o asset da release do plugin.")"
 
@@ -1025,7 +1061,8 @@ install_plugin() {
 	zip="$tmp/$PLUGIN_ASSET"
 
 	log_info "$(L "Downloading plugin" "Baixando o plugin")"
-	curl -fL "$url" -o "$zip" || fail "$(L "Download failed" "Falha no download")"
+	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+		|| fail "$(forge_unreachable_msg)"
 
 	# Lumen hosts the plugin under ~/.local/share/Lumen/luatools (the wrapper
 	# points LUMEN_BACKEND_DIR at .../luatools/backend, and the injector reads
