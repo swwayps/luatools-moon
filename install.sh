@@ -246,6 +246,43 @@ is_immutable_distro() {
 	return 1
 }
 
+# ----------------------------------------------------------------------------
+# Game Mode (gamescope session) detection — distro-agnostic
+# ----------------------------------------------------------------------------
+# Deck/handheld images boot a gamescope "Game Mode" where Steam is launched by a
+# session wrapper (NOT a .desktop), so our LD_AUDIT + Lumen never run unless we
+# re-point that wrapper. The wrapper layer comes from ChimeraOS's session repos;
+# Bazzite/ChimeraOS ship it as "gamescope-session-plus", older setups as
+# "gamescope-session". We NEVER hardcode a name: we discover whichever flavour
+# is installed so the same logic adapts across Bazzite / SteamOS / similars.
+#
+# Overridable so the logic can be unit-tested against synthetic fixtures.
+GAMESCOPE_SHARE_DIRS="${GAMESCOPE_SHARE_DIRS:-/usr/share /etc}"
+
+# Echo the installed gamescope-session config base name (the dir under
+# /usr/share or /etc that holds sessions.d/steam), or "" when none is present.
+gamescope_session_base() {
+	local root base
+	for root in $GAMESCOPE_SHARE_DIRS; do
+		for base in gamescope-session-plus gamescope-session; do
+			if [ -f "$root/$base/sessions.d/steam" ] \
+			   || [ -d "$root/$base/sessions.d" ]; then
+				printf '%s' "$base"
+				return 0
+			fi
+		done
+	done
+	printf ''
+}
+
+# True when this host can launch Steam in a gamescope Game Mode session.
+has_gamescope_session() {
+	[ -n "$(gamescope_session_base)" ] && return 0
+	command -v gamescope-session-plus >/dev/null 2>&1 && return 0
+	command -v gamescope-session >/dev/null 2>&1 && return 0
+	return 1
+}
+
 # Privilege-escalation prefix for system package operations.
 sudo_prefix() {
 	if [ "$(id -u)" -eq 0 ]; then
@@ -1219,6 +1256,88 @@ EOF
 }
 
 # ============================================================================
+# Step: Game Mode (gamescope session) — OPT-IN, no-op off gamescope
+# ============================================================================
+# On Deck/handheld images, "Game Mode" launches Steam through a gamescope
+# session wrapper instead of the .desktop we patch for Desktop Mode, so our
+# LD_AUDIT + Lumen never run there. The session sources a user-writable
+# sessions.d/<client> file LAST and honours a $STEAMCMD override, so we drop a
+# tiny snippet that re-points the launcher at the slsteam-moon wrapper while
+# PRESERVING the distro's own client flags (-gamepadui -steamos3 ...).
+#
+# This is invasive (it changes how the whole Game-Mode session starts Steam),
+# so it is strictly OPT-IN and a complete NO-OP on:
+#   * any host without a gamescope session (every normal desktop distro), and
+#   * gamescope hosts where the user declines or runs non-interactively.
+# Desktop Mode installs are entirely unaffected — this step returns before it
+# touches anything when there is no gamescope session.
+GAMEMODE_HOOK_SENTINEL="# managed-by: slsteammoon (game-mode launcher hook)"
+
+# Echo the body of the sessions.d/steam override. Kept as its own function so
+# the flag-preservation logic can be unit-tested (scripts/test-gamemode-hook.sh)
+# without driving the full installer. $HOME / $CLIENTCMD are intentionally left
+# UNEXPANDED here so they resolve when the gamescope session sources the file
+# (CLIENTCMD is set by the system sessions.d/steam, sourced before this user
+# override).
+gamemode_hook_content() {
+	cat <<EOF
+$GAMEMODE_HOOK_SENTINEL
+# Re-point the Game Mode launcher at the slsteam-moon wrapper, preserving the
+# distro's own client flags. Sourced after the system config, so CLIENTCMD is
+# already set. Remove this file (or run the uninstaller) to revert.
+_lt_args="\${CLIENTCMD#* }"; [ "\$_lt_args" = "\${CLIENTCMD:-}" ] && _lt_args=""
+export STEAMCMD="\$HOME/.local/share/SLSsteam/path/steam\${_lt_args:+ \$_lt_args}"
+EOF
+}
+
+install_gamemode_hook() {
+	# Hard gate: do nothing unless this host actually has a gamescope session.
+	has_gamescope_session || return 0
+
+	print_section "$(L "Game Mode (gamescope) support" "Suporte ao Game Mode (gamescope)")"
+
+	local base; base="$(gamescope_session_base)"
+	# has_gamescope_session may have matched via the on-PATH binary only;
+	# fall back to the canonical current name for the config dir.
+	[ -n "$base" ] || base="gamescope-session-plus"
+
+	local dir="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d"
+	local hook="$dir/steam"
+
+	log_info "$(L "Game Mode (gamescope) session detected on this system." \
+	             "Sessão Game Mode (gamescope) detectada neste sistema.")"
+
+	# Opt-in. Default NO; non-interactive (curl|bash with no tty) => NO.
+	if ! prompt_yes_no \
+		"Enable the plugin in Game Mode too? This changes how Steam is launched in Gaming Mode (reversible by the uninstaller)." \
+		"Ativar o plugin também no Game Mode? Isso altera como a Steam é iniciada no modo Gaming (reversível pelo desinstalador)." \
+		"n"; then
+		log_step "$(L "Skipping Game Mode setup. You can re-run the installer to enable it later." \
+		             "Pulando a configuração do Game Mode. Rode o instalador de novo para ativar depois.")"
+		return 0
+	fi
+
+	mkdir -p "$dir" || {
+		log_warn "$(L "Could not create $dir; skipping Game Mode setup." \
+		             "Não foi possível criar $dir; pulando a configuração do Game Mode.")"
+		return 0
+	}
+
+	# Preserve a pre-existing FOREIGN file (not ours) before overwriting.
+	if [ -f "$hook" ] && ! grep -qF "$GAMEMODE_HOOK_SENTINEL" "$hook" 2>/dev/null; then
+		local bak="$hook.bak.$(date +%s)"
+		log_step "$(L "Backing up existing $hook -> $bak" \
+		             "Fazendo backup de $hook -> $bak")"
+		mv -- "$hook" "$bak" 2>/dev/null || true
+	fi
+
+	gamemode_hook_content > "$hook"
+
+	log_success "$(L "Game Mode enabled (hook: $hook)" \
+	             "Game Mode ativado (hook: $hook)")"
+}
+
+# ============================================================================
 # Step: CloudRedirect (optional) — Steam Cloud saves for unowned games
 # ============================================================================
 # CloudRedirect (https://github.com/Selectively11/CloudRedirect) redirects
@@ -1604,6 +1723,11 @@ main() {
 
 	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
 	install_plugin
+
+	# Game Mode is opt-in and gamescope-only. It prints its own section header
+	# (and prompts) ONLY when a gamescope session exists, so normal desktop
+	# installs see nothing here.
+	install_gamemode_hook
 
 	print_section "$(L "Setting up cloud saves (CloudRedirect)" "Configurando cloud saves (CloudRedirect)")"
 	install_cloudredirect

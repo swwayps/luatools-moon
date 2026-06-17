@@ -271,6 +271,20 @@ uninstall_slsteam_moon() {
 		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 	fi
 
+	# Autostart override (SteamOS/Bazzite desktop auto-launch). Only ours.
+	local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
+	if [ -f "$autostart" ] && grep -qE 'X-SLSteamMoon-Patched=true|SLSsteam/path' "$autostart" 2>/dev/null; then
+		if [ -f "$autostart.slssteam-backup" ]; then
+			log_step "$(L "Restoring Steam autostart from backup" \
+			             "Restaurando autostart da Steam a partir do backup")"
+			mv -- "$autostart.slssteam-backup" "$autostart" 2>/dev/null || true
+		else
+			log_step "$(L "Removing Steam autostart override" \
+			             "Removendo override de autostart da Steam")"
+			rm -f "$autostart" 2>/dev/null || true
+		fi
+	fi
+
 	# System-wide .desktop (only if we actually patched it).
 	if [ -f "$SYS_DESKTOP" ] && grep -q "SLSsteam" "$SYS_DESKTOP" 2>/dev/null; then
 		if command -v sudo >/dev/null 2>&1; then
@@ -433,6 +447,36 @@ uninstall_millennium() {
 }
 
 # ============================================================================
+# Step: Game Mode (gamescope session) launcher hook
+# ============================================================================
+# Remove the sessions.d/steam override the installer drops in Game Mode, but
+# ONLY when it is ours (sentinel-guarded) so we never delete a user's own
+# session config. Distro-agnostic: checks both known config base names. A
+# complete no-op on hosts that never had the hook.
+remove_gamemode_hook() {
+	local base hook removed=0
+	for base in gamescope-session-plus gamescope-session; do
+		hook="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d/steam"
+		if [ -f "$hook" ] && grep -qF "managed-by: slsteammoon" "$hook" 2>/dev/null; then
+			log_step "$(L "Removing Game Mode launcher hook: $hook" \
+			             "Removendo hook do Game Mode: $hook")"
+			rm -f "$hook" 2>/dev/null || true
+			removed=1
+			# Restore a foreign backup we may have stashed on install.
+			local bak
+			bak="$(ls -1t "$hook".bak.* 2>/dev/null | head -n1)"
+			if [ -n "$bak" ] && [ -f "$bak" ]; then
+				log_step "$(L "Restoring previous $hook from $bak" \
+				             "Restaurando $hook a partir de $bak")"
+				mv -- "$bak" "$hook" 2>/dev/null || true
+			fi
+		fi
+	done
+	[ "$removed" = 1 ] && log_success "$(L "Game Mode hook removed" "Hook do Game Mode removido")"
+	return 0
+}
+
+# ============================================================================
 # Step: old-port leftovers (headcrab + friends)
 # ============================================================================
 cleanup_old_port_leftovers() {
@@ -514,6 +558,9 @@ main() {
 
 	print_section "$(L "Removing slsteam-moon" "Removendo slsteam-moon")"
 	uninstall_slsteam_moon
+
+	print_section "$(L "Removing Game Mode launcher hook" "Removendo hook do Game Mode")"
+	remove_gamemode_hook
 
 	print_section "$(L "Cleaning up leftover files" "Limpando arquivos residuais")"
 	cleanup_old_port_leftovers
