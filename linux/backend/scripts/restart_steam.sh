@@ -25,6 +25,32 @@ set -u
 # them so our relaunch and any child binaries use system libraries.
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
 
+# --- Game Mode (gamescope session) fast path --------------------------------
+# On a handheld/Deck-class session Steam is NOT launched from a .desktop; it is
+# supervised by a gamescope-session systemd *user* unit (Bazzite/ChimeraOS:
+# gamescope-session-plus@steam.service). A plain kill+relaunch fights that
+# supervisor, so when such a unit is active we just restart it — the session
+# re-sources its config (incl. our STEAMCMD override) and brings Steam back
+# through the slsteam-moon wrapper, so injection is preserved.
+#
+# Discovered generically (NOT hardcoded to "-plus") so it adapts to any distro
+# that exposes a "gamescope-session*" user unit. If none is active we fall
+# through to the desktop kill+relaunch path below.
+if command -v systemctl >/dev/null 2>&1; then
+  : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
+  export XDG_RUNTIME_DIR
+  gs_unit="$(
+    systemctl --user list-units --type=service --state=active \
+      --plain --no-legend 'gamescope-session*' 2>/dev/null \
+      | awk '{print $1}' | head -n1
+  )"
+  if [ -n "${gs_unit:-}" ]; then
+    setsid nohup systemctl --user restart "$gs_unit" </dev/null >/dev/null 2>&1 &
+    exit 0
+  fi
+fi
+# --- end Game Mode fast path ------------------------------------------------
+
 # Resolve a launcher, preferring the slsteam-moon wrapper so injection
 # is honoured. Fall back to the distro launcher only if the wrapper is
 # absent (degraded: no injection, but at least Steam restarts).
