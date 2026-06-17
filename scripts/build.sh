@@ -239,7 +239,17 @@ patch_replace "$OUT/backend/main.lua" \
         end
     end
     return json_ok({ success = true, deleted = deleted, count = #deleted })' \
-'    local deleted = {}
+'    -- slsteammoon: purge this game'"'"'s archived manifests from SLSsteam'"'"'s
+    -- store first -- the .lua (which lists the depots) is about to be removed.
+    do
+        local ok_sls, sls = pcall(require, "slsteam")
+        if ok_sls and sls and sls.purge_store_for_lua then
+            for _, p in ipairs(candidates) do
+                pcall(sls.purge_store_for_lua, p)
+            end
+        end
+    end
+    local deleted = {}
     for _, p in ipairs(candidates) do
         if fs.exists(p) then
             pcall(fs.remove, p)

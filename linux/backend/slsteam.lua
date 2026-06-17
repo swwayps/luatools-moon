@@ -179,4 +179,40 @@ function slsteam.unregister_app(appid)
   return true, "removed"
 end
 
+-- Shell-single-quote a string so a path with spaces/quotes survives
+-- os.execute (Linux overlay only).
+local function shsq(s)
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
+-- Purge archived manifests for every depot referenced by a .lua, BEFORE the
+-- .lua is deleted (it's what tells us which depots belong to the game).
+-- Reads `addappid(<id> ...)` ids and deletes
+-- ~/.config/SLSsteam/manifests/<id>_*.manifest for each (no-op when absent).
+-- The persistent store (ManifestStore in slsteam-moon) keeps every manifest
+-- version a game ever staged; when the user removes the game via LuaTools its
+-- archived manifests would otherwise linger forever, so drop them here.
+-- Returns true,count | false,error.
+function slsteam.purge_store_for_lua(lua_path)
+  local home = os.getenv("HOME") or ""
+  if home == "" then return false, "HOME not set" end
+  local f = io.open(lua_path, "rb")
+  if not f then return true, 0 end
+  local data = f:read("*a") or ""
+  f:close()
+
+  local store = home .. "/.config/SLSsteam/manifests"
+  local seen, count = {}, 0
+  for id in data:gmatch("addappid%s*%(%s*(%d+)") do
+    if not seen[id] then
+      seen[id] = true
+      -- prefix single-quoted; the glob stays unquoted so the shell expands it.
+      os.execute("rm -f -- " .. shsq(store .. "/" .. id .. "_") ..
+                 "*.manifest 2>/dev/null")
+      count = count + 1
+    end
+  end
+  return true, count
+end
+
 return slsteam
