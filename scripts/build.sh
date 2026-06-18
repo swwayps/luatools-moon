@@ -107,6 +107,33 @@ cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
 # Pure helpers: perondepot online-fix matcher + WINEDLLOVERRIDES builder.
 cp "$OVERLAY/backend/onlinefix.lua" "$OUT/backend/onlinefix.lua"
 cp "$OVERLAY/backend/fix_overlays.lua" "$OUT/backend/fix_overlays.lua"
+# Steam client language detection (Use Steam Language).
+cp "$OVERLAY/backend/steamlang.lua" "$OUT/backend/steamlang.lua"
+
+# Merge extra locale strings (new SpaceFix / Online Fix UI keys) into the
+# shipped locale files. The locale manager only surfaces keys present in
+# en.json, so every key is added to en + its translations. Rebase-safe:
+# strings live in the overlay, not in the vendored upstream locale files.
+if [[ -f "$OVERLAY/backend/locale_extra.json" ]]; then
+  EXTRA="$OVERLAY/backend/locale_extra.json" "$PYBIN" - "$OUT/backend/locales" <<'PY'
+import json, os, sys
+locdir = sys.argv[1]
+with open(os.environ["EXTRA"], "r", encoding="utf-8") as f:
+    extra = json.load(f)
+for code, kv in extra.items():
+    path = os.path.join(locdir, code + ".json")
+    if not os.path.isfile(path):
+        sys.stderr.write("[build] locale_extra: %s.json not found, skipping\n" % code)
+        continue
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    data.update(kv)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4, sort_keys=True)
+        f.write("\n")
+print("[build] merged locale_extra into %d locale file(s)" % len(extra))
+PY
+fi
 mkdir -p "$OUT/backend/scripts"
 cp "$OVERLAY/backend/scripts/restart_steam.sh" "$OUT/backend/scripts/restart_steam.sh"
 # Override upstream downloader.sh with our env-resetting version (the
@@ -667,6 +694,27 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
     return json_ok(res)
 end'
 
+# 3m. settings/manager.lua — implement Use Steam Language. Upstream's
+#     _detect_steam_language() is a stub that always returns "en" (Millennium
+#     couldn't read the registry), so the toggle never followed Steam. Read the
+#     Steam language from ~/.steam/registry.vdf and map it to a LuaTools locale
+#     via the unit-tested steamlang module.
+patch_replace "$OUT/backend/settings/manager.lua" \
+'-- Simple placeholder since we can'"'"'t easily read registry in Millennium Lua securely
+local function _detect_steam_language()
+    return "en"
+end' \
+'-- slsteammoon: read the Steam client language (~/.steam/registry.vdf) and map
+-- it to a LuaTools locale code. Logic lives in the unit-tested steamlang module.
+local function _detect_steam_language()
+    local ok, steamlang = pcall(require, "steamlang")
+    if ok and steamlang and steamlang.detect then
+        local code = steamlang.detect()
+        if code and code ~= "" then return code end
+    end
+    return "en"
+end'
+
 # 4. update.json -> this fork (Codeberg). auto_update.lua reads the
 #    "codeberg" key and queries the Forgejo releases API (same JSON shape
 #    as GitHub: .tag_name + .assets[].browser_download_url).
@@ -732,7 +780,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays; do
+  for t in test-onlinefix test-fix-overlays test-steamlang; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
