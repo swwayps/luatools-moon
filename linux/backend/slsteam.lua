@@ -185,6 +185,125 @@ local function shsq(s)
   return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
 end
 
+-- ---------------------------------------------------------------------------
+-- FakeAppIds map editor.
+--
+-- slsteam-moon's FakeAppIds: config map (realAppId -> fakeAppId) makes a game
+-- report itself under a different appid on the real Steam client layer
+-- (games-played presence, matchmaking, server lists, ticket -- see
+-- SLSsteam-fork src/feats/fakeappid.cpp). Mapping a game to 480 (Spacewar) is
+-- the native equivalent of the Windows "Unsteam" emulator the AIO fix ships.
+--
+-- Unlike AdditionalApps (a block LIST), FakeAppIds is a block MAP:
+--   FakeAppIds:
+--     <appid>: <fake>
+-- Same careful, byte-preserving, atomic editing as register_app.
+-- ---------------------------------------------------------------------------
+
+local function fakeappids_header(lines)
+  for i, line in ipairs(lines) do
+    if line:match("^FakeAppIds%s*:") then return i end
+  end
+  return nil
+end
+
+local function fakeappids_is_inline(lines, header_idx)
+  local after = lines[header_idx]:match("^FakeAppIds%s*:%s*(.-)%s*$") or ""
+  local code_only = after:gsub("#.*$", ""):gsub("%s+$", "")
+  return code_only ~= ""
+end
+
+-- Walk the map block under the header. Returns (entries, last_entry_idx,
+-- indent) where entries[key] = { idx = line_index, value = "<stripped value>" }.
+local function scan_map_block(lines, header_idx)
+  local entries = {}
+  local last_entry_idx = header_idx
+  local indent = "  "
+  for i = header_idx + 1, #lines do
+    local line = lines[i]
+    local stripped = line:gsub("^%s+", "")
+    if stripped == "" or stripped:match("^#") then
+      -- comment/blank: belongs to whatever section follows; skip.
+    else
+      local entry_indent, key, val = line:match("^(%s+)(%d+)%s*:%s*(.-)%s*$")
+      if not entry_indent then break end  -- next top-level key / non-entry
+      indent = entry_indent
+      last_entry_idx = i
+      local keynum = tonumber(key)
+      if keynum then
+        entries[keynum] = { idx = i, value = (val:gsub("#.*$", ""):gsub("%s+$", "")) }
+      end
+    end
+  end
+  return entries, last_entry_idx, indent
+end
+
+-- Map appid -> fake (default 480 / Spacewar). Returns true,"added" |
+-- true,"updated" | true,"already_present" | false,error.
+function slsteam.set_fake_appid(appid, fake)
+  appid = tonumber(appid)
+  if not appid then return false, "invalid appid" end
+  fake = tonumber(fake) or 480
+
+  local path = config_path()
+  if not path then return false, "HOME not set" end
+  local lines, has_trailing_nl = read_lines(path)
+  if not lines then return false, "SLSsteam config.yaml not found" end
+
+  local header_idx = fakeappids_header(lines)
+  if not header_idx then
+    if #lines > 0 and lines[#lines] ~= "" then lines[#lines + 1] = "" end
+    lines[#lines + 1] = "FakeAppIds:"
+    header_idx = #lines
+  elseif fakeappids_is_inline(lines, header_idx) then
+    return false, "FakeAppIds: has an inline value, refusing to rewrite"
+  end
+
+  local entries, last_entry_idx, indent = scan_map_block(lines, header_idx)
+  local existing = entries[appid]
+  if existing then
+    if existing.value == tostring(fake) then return true, "already_present" end
+    lines[existing.idx] = indent .. tostring(appid) .. ": " .. tostring(fake)
+    local ok, werr = write_lines_atomic(path, lines, has_trailing_nl)
+    if not ok then return false, werr end
+    return true, "updated"
+  end
+
+  local entry = indent .. tostring(appid) .. ": " .. tostring(fake)
+  table.insert(lines, last_entry_idx + 1, entry)
+  local ok, werr = write_lines_atomic(path, lines, has_trailing_nl)
+  if not ok then return false, werr end
+  return true, "added"
+end
+
+-- Remove appid from FakeAppIds. Returns true,"removed" |
+-- true,"not_present" | false,error.
+function slsteam.unset_fake_appid(appid)
+  appid = tonumber(appid)
+  if not appid then return false, "invalid appid" end
+
+  local path = config_path()
+  if not path then return false, "HOME not set" end
+  local lines, has_trailing_nl = read_lines(path)
+  if not lines then return false, "SLSsteam config.yaml not found" end
+
+  local header_idx = fakeappids_header(lines)
+  if not header_idx then return true, "not_present" end
+  if fakeappids_is_inline(lines, header_idx) then
+    return false, "FakeAppIds: has an inline value"
+  end
+
+  local entries = scan_map_block(lines, header_idx)
+  local existing = entries[appid]
+  if not existing then return true, "not_present" end
+
+  table.remove(lines, existing.idx)
+  local ok, werr = write_lines_atomic(path, lines, has_trailing_nl)
+  if not ok then return false, werr end
+  return true, "removed"
+end
+
+
 -- Purge archived manifests for every depot referenced by a .lua, BEFORE the
 -- .lua is deleted (it's what tells us which depots belong to the game).
 -- Reads `addappid(<id> ...)` ids and deletes

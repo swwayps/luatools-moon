@@ -75,6 +75,70 @@ check("C6 kept 620", c:find("%- 620") ~= nil)
 ok, msg = slsteam.unregister_app(99999)
 check("C6 absent -> not_present", msg == "not_present")
 
+-- ---------------------------------------------------------------------------
+-- FakeAppIds map editor: set_fake_appid / unset_fake_appid.
+-- FakeAppIds is a MAP block ("FakeAppIds:" then "  <appid>: <fake>" lines),
+-- unlike AdditionalApps which is a LIST. Default fake = 480 (Spacewar).
+-- ---------------------------------------------------------------------------
+
+-- F1: insert into an empty FakeAppIds block (default config shape), preserving
+-- the following top-level key.
+w("DisableFamilyShareLock: yes\nFakeAppIds:\nIdleStatus:\n  AppId: 0\n")
+ok, msg = slsteam.set_fake_appid(285900)
+check("F1 added", ok == true and msg == "added")
+c = r()
+check("F1 mapping written", c:find("285900:%s*480") ~= nil)
+check("F1 IdleStatus preserved", c:find("IdleStatus:") ~= nil)
+check("F1 AppId line preserved", c:find("  AppId: 0") ~= nil)
+
+-- F1 idempotent: same appid+value already present.
+ok, msg = slsteam.set_fake_appid(285900, 480)
+check("F1 idempotent", ok == true and msg == "already_present")
+
+-- F2: update an existing mapping's value in place (no duplicate line).
+ok, msg = slsteam.set_fake_appid(285900, 481)
+check("F2 updated", ok == true and msg == "updated")
+c = r()
+check("F2 new value", c:find("285900:%s*481") ~= nil)
+check("F2 old value gone", c:find("285900:%s*480") == nil)
+local _, n285 = c:gsub("285900%s*:", "")
+check("F2 single mapping line", n285 == 1)
+
+-- F3: header absent -> created with the entry.
+w("PlayNotOwnedGames: yes\n")
+ok, msg = slsteam.set_fake_appid(620)
+c = r()
+check("F3 header created", c:find("FakeAppIds:") ~= nil)
+check("F3 entry created", c:find("620:%s*480") ~= nil)
+
+-- F4: inline form refused (don't risk corrupting it).
+w("FakeAppIds: {1: 2}\n")
+ok, msg = slsteam.set_fake_appid(9)
+check("F4 inline refused", ok == false)
+
+-- F5: preserve comments + a sibling mapping while adding another.
+w("FakeAppIds:\n  730: 480   # existing\nSafeMode: no\n")
+ok, msg = slsteam.set_fake_appid(440)
+c = r()
+check("F5 730 kept", c:find("730:%s*480") ~= nil)
+check("F5 comment kept", c:find("# existing") ~= nil)
+check("F5 440 added", c:find("440:%s*480") ~= nil)
+check("F5 SafeMode kept", c:find("SafeMode: no") ~= nil)
+
+-- F6: wide indent preserved on insert.
+w("FakeAppIds:\n    111: 480\n")
+slsteam.set_fake_appid(222)
+check("F6 indent preserved", r():find("    222:%s*480") ~= nil)
+
+-- F7: unset removes the mapping; absent -> not_present.
+w("FakeAppIds:\n  285900: 480\n  620: 480\n")
+ok, msg = slsteam.unset_fake_appid(285900)
+c = r()
+check("F7 removed 285900", ok == true and msg == "removed" and c:find("285900") == nil)
+check("F7 kept 620", c:find("620:%s*480") ~= nil)
+ok, msg = slsteam.unset_fake_appid(99999)
+check("F7 absent -> not_present", ok == true and msg == "not_present")
+
 os.getenv = orig_getenv
 os.execute("rm -rf '" .. sandbox .. "'")
 

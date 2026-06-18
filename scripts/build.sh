@@ -104,6 +104,9 @@ rm -f  "$OUT/backend/lua_runtime.log" \
 
 # 2. Linux overlay files.
 cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
+# Pure helpers: perondepot online-fix matcher + WINEDLLOVERRIDES builder.
+cp "$OVERLAY/backend/onlinefix.lua" "$OUT/backend/onlinefix.lua"
+cp "$OVERLAY/backend/fix_overlays.lua" "$OUT/backend/fix_overlays.lua"
 mkdir -p "$OUT/backend/scripts"
 cp "$OVERLAY/backend/scripts/restart_steam.sh" "$OUT/backend/scripts/restart_steam.sh"
 # Override upstream downloader.sh with our env-resetting version (the
@@ -116,6 +119,16 @@ chmod +x "$OUT/backend/scripts/restart_steam.sh" \
          "$OUT/backend/scripts/downloader.sh" \
          "$OUT/backend/scripts/smart_download.sh" 2>/dev/null || true
 cp "$OVERLAY/backend/api.json" "$OUT/backend/api.json"
+
+# Bundled static 7zz (fully static, multi-distro x86_64) for extracting fix
+# archives — online fixes ship as .rar, which unzip can't handle. Shipping a
+# static binary keeps the user dependency-free (the 25s manifest path still
+# uses system unzip; the fix path prefers 7zz, see downloader.sh).
+if [[ -f "$ROOT/linux/bin/7zz" ]]; then
+  mkdir -p "$OUT/backend/bin"
+  cp "$ROOT/linux/bin/7zz" "$OUT/backend/bin/7zz"
+  chmod +x "$OUT/backend/bin/7zz" 2>/dev/null || true
+fi
 
 # 3a. downloads.lua — register the appid into SLSsteam's AdditionalApps
 #     immediately after the .lua is installed (the "done" transition).
@@ -484,6 +497,176 @@ end' \
     return true
 end'
 
+# 3h. main.lua — SpaceFix (AIO button). On Linux the "All-In-One Fixes"
+#     fix is not the Windows Unsteam emulator (Proton ignores the dropped
+#     DLLs); instead we enable slsteam-moon's native FakeAppIds map so the
+#     game reports as Spacewar (480) on the real Steam client layer
+#     (matchmaking/presence/tickets — SLSsteam-fork src/feats/fakeappid.cpp).
+#     Insert ApplySpaceFix just before GetApplyFixStatus.
+patch_replace "$OUT/backend/main.lua" \
+'function GetApplyFixStatus(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.get_apply_status, tonumber(appid))' \
+'function ApplySpaceFix(appid, contentScriptQuery)
+    -- AIO fix on Linux: enable slsteam-moon FakeAppIds { appid: 480 } so the
+    -- game runs as Spacewar on the real client layer. No download/extract.
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, res = pcall(function()
+        local ok_sls, sls = pcall(require, "slsteam")
+        if not (ok_sls and sls and sls.set_fake_appid) then
+            error("slsteam helper unavailable")
+        end
+        local ok2, msg = sls.set_fake_appid(appid, 480)
+        if not ok2 then error(tostring(msg)) end
+        return { success = true, status = msg }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetApplyFixStatus(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(fixes.get_apply_status, tonumber(appid))'
+
+# 3i. main.lua — UnFixGame (Manage Game / Un-Fix). Upstream is a stub. On
+#     Linux "un-fix" undoes SpaceFix: drop the FakeAppIds mapping. Also
+#     defensively remove orphan Unsteam files an older file-based apply may
+#     have left in the install dir. No steam://validate (we never touched
+#     game files — see the frontend patch).
+patch_replace "$OUT/backend/main.lua" \
+'function UnFixGame(appid, installPath, fixDate)
+    if type(appid) == "table" then
+        installPath = appid.installPath; fixDate = appid.fixDate; appid = appid.appid
+    end
+    -- Stub - unfix logic not yet ported
+    return json_ok({ success = false, error = "Not yet implemented" })
+end' \
+'function UnFixGame(appid, installPath, fixDate)
+    if type(appid) == "table" then
+        installPath = appid.installPath; fixDate = appid.fixDate; appid = appid.appid
+    end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, res = pcall(function()
+        local ok_sls, sls = pcall(require, "slsteam")
+        if ok_sls and sls and sls.unset_fake_appid then
+            pcall(sls.unset_fake_appid, appid)
+        end
+        -- Defensive: remove orphan Unsteam files from an older file-based apply.
+        local path = tostring(installPath or "")
+        if path ~= "" then
+            for _, name in ipairs({ "unsteam.dll", "unsteam.ini", "winmm.dll" }) do
+                pcall(fs.remove, fs.join(path, name))
+            end
+        end
+        return { success = true }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end'
+
+# 3j. fixes.lua — lift the 25s hard download cap for the fix-apply path.
+#     downloader.sh defaults MAX_TIME=25 (right for small manifest zips, the
+#     manual-add path it was written for). Game fixes are large (e.g. a Denuvo
+#     bypass is hundreds of MB), so 25s aborts the download as "curl failed"
+#     before it can extract. Pass MAX_TIME=0 (no total-time cap) for fix
+#     downloads; the speed floor (--speed-limit/--speed-time in downloader.sh)
+#     still aborts a genuinely stalled transfer. Linux branch only.
+patch_replace "$OUT/backend/fixes.lua" \
+'nohup bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &' \
+'nohup env MAX_TIME=0 bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &'
+
+# 3k. main.lua — GetFixLaunchOptions RPC. After an online/generic fix is
+#     applied, the frontend reads the app's live launch options + compat tool
+#     from Steam and asks us to scan the install dir for the fix's Windows
+#     DLLs and merge a WINEDLLOVERRIDES into the options (so Proton loads the
+#     native fix DLLs instead of its builtins). Native Linux apps -> apply=false.
+#     All string logic lives in the unit-tested fix_overlays module. Inserted
+#     before GetGameInstallPath.
+patch_replace "$OUT/backend/main.lua" \
+'function GetGameInstallPath(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(steam_utils.get_game_install_path_response, tonumber(appid))' \
+'function GetFixLaunchOptions(appid, compatToolName, contentScriptQuery, currentLaunchOptions, installPath)
+    -- Millennium sorts JS object keys alphabetically and passes values
+    -- positionally: { appid, compatToolName, contentScriptQuery,
+    -- currentLaunchOptions, installPath }.
+    if type(appid) == "table" then
+        compatToolName       = appid.compatToolName
+        currentLaunchOptions = appid.currentLaunchOptions
+        installPath          = appid.installPath
+        appid                = appid.appid
+    end
+    local ok, res = pcall(function()
+        local fix_overlays = require("fix_overlays")
+        -- Gate on the fix DLLs actually being present in the install dir, NOT
+        -- on the frontend compat-tool name: slsteam-moon injects the Proton
+        -- CompatToolMapping into appinfo.vdf, so Steam'"'"'s AppDetails reports an
+        -- empty compat tool and is_proton_tool would wrongly skip. The
+        -- WINEDLLOVERRIDES is consumed only by Proton/Wine anyway (harmless if
+        -- the title somehow runs native).
+        local overrides = fix_overlays.overrides_for_install_dir(fs, tostring(installPath or ""))
+        logger.log("GetFixLaunchOptions: appid=" .. tostring(appid)
+            .. " compat=" .. tostring(compatToolName)
+            .. " installPath=" .. tostring(installPath)
+            .. " overrides=" .. tostring(overrides))
+        if not overrides then
+            return { success = true, apply = false }
+        end
+        local merged = fix_overlays.merge_launch_options(
+            tostring(currentLaunchOptions or ""), overrides)
+        return { success = true, apply = true, launchOptions = merged, overrides = overrides }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetGameInstallPath(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(steam_utils.get_game_install_path_response, tonumber(appid))'
+
+# 3l. main.lua — ResolveOnlineFix RPC. The "Online Fix" button now sources
+#     fixes from the perondepot online-fix mirror (the upstream luatools index
+#     is rate-limited). We fetch the /all/ autoindex, match the store-page
+#     game name to a .rar via the unit-tested onlinefix matcher, and return
+#     its URL for the normal download/extract/apply flow (downloader.sh's
+#     bundled 7zz handles .rar). Anchored on CancelApplyFix.
+patch_replace "$OUT/backend/main.lua" \
+'function CancelApplyFix(appid)
+    return json_ok({ success = true })
+end' \
+'function CancelApplyFix(appid)
+    return json_ok({ success = true })
+end
+
+function ResolveOnlineFix(appid, contentScriptQuery, gameName)
+    -- Millennium sorts JS keys: { appid, contentScriptQuery, gameName }.
+    if type(appid) == "table" then
+        gameName = appid.gameName; appid = appid.appid
+    end
+    local ok, res = pcall(function()
+        local onlinefix = require("onlinefix")
+        local resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
+        if not (resp and resp.status == 200 and resp.body) then
+            error("online-fix index unavailable")
+        end
+        local entry = onlinefix.find_fix(resp.body, tostring(gameName or ""))
+        if not entry then
+            return { success = true, found = false }
+        end
+        return {
+            success = true,
+            found = true,
+            url = "http://api.perondepot.xyz/all/" .. entry.href,
+            name = entry.name,
+        }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end'
+
 # 4. update.json -> this fork (Codeberg). auto_update.lua reads the
 #    "codeberg" key and queries the Forgejo releases API (same JSON shape
 #    as GitHub: .tag_name + .assets[].browser_download_url).
@@ -537,6 +720,27 @@ if command -v luajit >/dev/null 2>&1; then
     fi
   done < <(find "$OUT/backend" -name '*.lua' -print0)
   echo "[build] lua syntax OK"
+
+  # Unit tests for the slsteam.lua overlay (AdditionalApps + FakeAppIds
+  # config editors). Rebase-safe guard for the SpaceFix / Un-Fix flow.
+  if [[ -f "$ROOT/scripts/test-slsteam.lua" ]]; then
+    if ! ( cd "$ROOT" && luajit scripts/test-slsteam.lua >/dev/null 2>&1 ); then
+      echo "[build] slsteam.lua unit tests FAILED" >&2
+      exit 4
+    fi
+    echo "[build] slsteam.lua unit tests OK"
+  fi
+
+  # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
+  for t in test-onlinefix test-fix-overlays; do
+    if [[ -f "$ROOT/scripts/$t.lua" ]]; then
+      if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
+        echo "[build] $t unit tests FAILED" >&2
+        exit 4
+      fi
+      echo "[build] $t unit tests OK"
+    fi
+  done
 fi
 
 # 6. Optional zip. The archive must contain the plugin contents at its
