@@ -80,9 +80,18 @@ fi
 
 if [ -n "$EXTRACT_DIR" ]; then
   write_state "extracting" "$TOTAL" "$TOTAL"
-  unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
+  # Prefer the bundled static 7zz: it extracts BOTH .zip and .rar (online
+  # fixes ship as .rar, which unzip can't handle). Fall back to system unzip
+  # only when 7zz is absent (zip-only).
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  SEVENZ="$SCRIPT_DIR/../bin/7zz"
+  if [ -x "$SEVENZ" ]; then
+    "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$DEST_PATH" >/dev/null 2>&1
+  else
+    unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
+  fi
   if [ $? -ne 0 ]; then
-    write_failed "unzip failed"
+    write_failed "extract failed"
     exit 1
   fi
   write_state "extracted" "$TOTAL" "$TOTAL"
