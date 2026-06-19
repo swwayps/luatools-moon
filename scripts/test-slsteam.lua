@@ -139,6 +139,65 @@ check("F7 kept 620", c:find("620:%s*480") ~= nil)
 ok, msg = slsteam.unset_fake_appid(99999)
 check("F7 absent -> not_present", ok == true and msg == "not_present")
 
+-- ---------------------------------------------------------------------------
+-- ManifestPins purge: purge_pins_for_app removes one app's nested pin block
+-- (game-updates-pinning design §1 Cleanup / §4.4). ManifestPins is a nested
+-- map: "ManifestPins:" -> "  <appid>:" -> { locked:, depots: { <depot>: gid } }.
+-- ---------------------------------------------------------------------------
+
+-- P1: two pinned apps; purge one keeps the other + the header + sibling keys.
+w(table.concat({
+  "AdditionalApps:",
+  "  - 1054490",
+  "ManifestPins:",
+  "  1054490:",
+  "    locked: true",
+  "    depots:",
+  '      1054491: "111"',
+  "  285900:",
+  "    locked: false",
+  "    depots:",
+  '      285904: "222"',
+  "LogLevel: 2",
+  "",
+}, "\n"))
+ok, msg = slsteam.purge_pins_for_app(1054490)
+c = r()
+check("P1 removed", ok == true and msg == "removed")
+check("P1 target block gone", c:find("1054490:") == nil and c:find('1054491: "111"') == nil)
+check("P1 other app kept", c:find("285900:") ~= nil and c:find('285904: "222"') ~= nil)
+check("P1 header kept", c:find("ManifestPins:") ~= nil)
+check("P1 AdditionalApps kept", c:find("  %- 1054490") ~= nil)
+check("P1 LogLevel kept", c:find("LogLevel: 2") ~= nil)
+
+-- P2: purging the last pinned app removes the ManifestPins header too.
+w(table.concat({
+  "ManifestPins:",
+  "  285900:",
+  "    locked: false",
+  "    depots:",
+  '      285904: "222"',
+  "LogLevel: 2",
+  "",
+}, "\n"))
+ok, msg = slsteam.purge_pins_for_app(285900)
+c = r()
+check("P2 removed", ok == true and msg == "removed")
+check("P2 header gone when empty", c:find("ManifestPins:") == nil)
+check("P2 sibling key kept", c:find("LogLevel: 2") ~= nil)
+
+-- P3: appid not pinned -> not_present, file unchanged.
+w("ManifestPins:\n  111:\n    locked: true\n    depots:\n      112: \"9\"\n")
+ok, msg = slsteam.purge_pins_for_app(999)
+c = r()
+check("P3 not_present", ok == true and msg == "not_present")
+check("P3 unchanged", c:find("111:") ~= nil and c:find('112: "9"') ~= nil)
+
+-- P4: no ManifestPins block at all -> not_present.
+w("AdditionalApps:\n  - 1\n")
+ok, msg = slsteam.purge_pins_for_app(1)
+check("P4 no block -> not_present", ok == true and msg == "not_present")
+
 os.getenv = orig_getenv
 os.execute("rm -rf '" .. sandbox .. "'")
 

@@ -334,4 +334,74 @@ function slsteam.purge_store_for_lua(lua_path)
   return true, count
 end
 
+
+-- Purge this app's pins from slsteam-moon's ManifestPins map in config.yaml
+-- (game-updates-pinning design §1 Cleanup / §4.4). ManifestPins is a nested
+-- block map:
+--   ManifestPins:
+--     <appid>:
+--       locked: <bool>
+--       depots:
+--         <depot>: "<gid>"
+-- Removes the whole "  <appid>:" sub-block (header + locked + depots + entries)
+-- and, if that leaves ManifestPins with no app entries, the "ManifestPins:"
+-- header too. Byte-preserving + atomic, like the other editors here.
+-- Returns true,"removed" | true,"not_present" | false,error.
+function slsteam.purge_pins_for_app(appid)
+  appid = tonumber(appid)
+  if not appid then return false, "invalid appid" end
+
+  local path = config_path()
+  if not path then return false, "HOME not set" end
+  local lines, has_trailing_nl = read_lines(path)
+  if not lines then return false, "SLSsteam config.yaml not found" end
+
+  -- locate the ManifestPins block [header_idx .. block_end]
+  local header_idx
+  for i, line in ipairs(lines) do
+    if line:match("^ManifestPins%s*:") then header_idx = i break end
+  end
+  if not header_idx then return true, "not_present" end
+
+  local block_end = #lines
+  for i = header_idx + 1, #lines do
+    if lines[i]:match("^%S") then block_end = i - 1 break end
+  end
+
+  -- find the target app's sub-block: "  <appid>:" until the next "  <id>:"
+  -- (2-space-indented key) or the end of the block.
+  local app_start, app_end
+  for i = header_idx + 1, block_end do
+    local id = lines[i]:match("^  (%d+)%s*:%s*$")
+    if id then
+      if tonumber(id) == appid then
+        app_start = i
+        app_end = block_end
+        for j = i + 1, block_end do
+          if lines[j]:match("^  %S") then app_end = j - 1 break end
+        end
+        break
+      end
+    end
+  end
+  if not app_start then return true, "not_present" end
+
+  for i = app_end, app_start, -1 do table.remove(lines, i) end
+
+  -- if no app entries remain under the header, drop the header line as well.
+  local new_end = #lines
+  for i = header_idx + 1, #lines do
+    if lines[i]:match("^%S") then new_end = i - 1 break end
+  end
+  local any_app = false
+  for i = header_idx + 1, new_end do
+    if lines[i]:match("^  (%d+)%s*:") then any_app = true break end
+  end
+  if not any_app then table.remove(lines, header_idx) end
+
+  local ok, werr = write_lines_atomic(path, lines, has_trailing_nl)
+  if not ok then return false, werr end
+  return true, "removed"
+end
+
 return slsteam
