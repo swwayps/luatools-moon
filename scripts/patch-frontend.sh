@@ -600,6 +600,40 @@ replacement = r'''    // slsteammoon: source Online Fix from the perondepot mirr
           ShowLuaToolsAlert("LuaTools", lt("Game install path not found"));
           return;
         }
+        // slsteammoon: an online fix is a bundle of Windows DLLs that only
+        // loads under Proton/Wine. A title that ships a native Linux build runs
+        // WITHOUT Proton by default, so the fix would do nothing. Allow it only
+        // when the user has forced a Proton compatibility tool; otherwise
+        // explain how to turn that on. Windows-only titles (no native build)
+        // always run under Proton, so they skip the check.
+        function __ofLooksNativeLinux() {
+          try {
+            if (
+              document.querySelector(
+                ".platform_img.linux, .platform_img.steamos, .sysreq_tab[data-os='linux']",
+              )
+            )
+              return true;
+            var tabs = document.querySelectorAll(
+              ".sysreq_tabs .sysreq_tab, .game_area_sys_req_full",
+            );
+            for (var i = 0; i < tabs.length; i++) {
+              var txt = (tabs[i].textContent || "").toLowerCase();
+              if (txt.indexOf("linux") !== -1 || txt.indexOf("steamos") !== -1)
+                return true;
+            }
+          } catch (_) {}
+          return false;
+        }
+        function __ofBlockNative() {
+          ShowLuaToolsAlert(
+            "LuaTools",
+            lt(
+              "This game has a native Linux version, so Steam runs it without Proton. Online fixes are Windows files that only work under Proton. To use one, open the game's Properties → Compatibility, turn on “Force the use of a specific Steam Play compatibility tool”, pick a Proton version, then try Online Fix again.",
+            ),
+          );
+        }
+        function __ofProceed() {
         try {
           overlay.remove();
         } catch (_) {}
@@ -646,6 +680,30 @@ replacement = r'''    // slsteammoon: source Online Fix from the perondepot mirr
             backendLog("LuaTools: ResolveOnlineFix error: " + err);
             ShowLuaToolsAlert("LuaTools", lt("Error starting Online Fix"));
           });
+        }
+        if (__ofLooksNativeLinux()) {
+          // Native build present: only allow the fix when a Proton/compat tool
+          // is forced for this game; otherwise guide the user to enable one.
+          Millennium.callServerMethod("luatools", "IsCompatToolForced", {
+            appid: data.appid,
+            contentScriptQuery: "",
+          })
+            .then(function (res) {
+              var p = typeof res === "string" ? JSON.parse(res) : res;
+              if (p && p.success && p.forced) {
+                __ofProceed();
+              } else {
+                __ofBlockNative();
+              }
+            })
+            .catch(function (err) {
+              backendLog("LuaTools: IsCompatToolForced error: " + err);
+              __ofBlockNative();
+            });
+        } else {
+          // No native build -> the title runs under Proton anyway, fix applies.
+          __ofProceed();
+        }
       },
     );
     columnsContainer.appendChild(onlineSection);
@@ -747,7 +805,23 @@ helper = (
 '              backendLog("LuaTools: auto-set WINEDLLOVERRIDES for " + appid);\n'
 '            }\n'
 '          } catch (_) {}\n'
-'          // Always show the line to paste.\n'
+'          // slsteammoon: reliable auto-set via the Lumen SharedJSContext relay\n'
+'          // (SteamClient is absent in this store-page web view, so the\n'
+'          // best-effort call above no-ops here; the relay runs it where\n'
+'          // SteamClient lives).\n'
+'          try {\n'
+'            Millennium.callServerMethod("luatools", "__lumenSetLaunchOptions", {\n'
+'              appid: Number(appid),\n'
+'              options: opts,\n'
+'            })\n'
+'              .then(function (r) {\n'
+'                var ok = false;\n'
+'                try { ok = (typeof r === "string" ? JSON.parse(r) : r).ok; } catch (_) {}\n'
+'                backendLog("LuaTools: launch-option relay ok=" + ok);\n'
+'              })\n'
+'              .catch(function (e) { backendLog("LuaTools: launch-option relay error: " + e); });\n'
+'          } catch (e) { backendLog("LuaTools: launch-option relay throw: " + e); }\n'
+'          // Always show the line to paste (fallback + confirmation).\n'
 '          try { showLuaToolsLaunchOptionHint(overlayEl, opts); } catch (e) {\n'
 '            backendLog("LuaTools: launch-option hint error: " + e);\n'
 '          }\n'

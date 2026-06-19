@@ -107,6 +107,18 @@ function fix_overlays.merge_launch_options(current, overrides)
   current = current or ""
   local rest = strip_existing_override(current)
 
+  -- Self-heal: a corrupted prior value can carry more than one %command%
+  -- (e.g. an earlier buggy merge). Keep only the FIRST; drop the rest, so the
+  -- result always has exactly one.
+  do
+    local first = rest:find("%%command%%")
+    if first then
+      local head = rest:sub(1, first - 1)
+      local tail = rest:sub(first + 9):gsub("%%command%%", "")  -- 9 = #"%command%"
+      rest = (head .. "%command%" .. tail):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+    end
+  end
+
   if rest == "" then
     return overrides .. " %command%"
   end

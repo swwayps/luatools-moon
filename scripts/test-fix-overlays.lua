@@ -138,6 +138,19 @@ do
   check("C10 keeps mangohud", r:find("mangohud") ~= nil)
 end
 
+-- C12: self-heal a corrupted current that already has a DUPLICATE %command%
+-- (a prior buggy apply). The result must contain EXACTLY ONE %command%.
+do
+  local r = fo.merge_launch_options("mangohud %command% %command%", OV)
+  check("C12 single %command%", select(2, r:gsub("%%command%%", "")) == 1)
+  check("C12 keeps mangohud", r:find("mangohud") ~= nil)
+  check("C12 has override", r:find("WINEDLLOVERRIDES=") ~= nil)
+  -- also when the dupe sits next to a stale override
+  local r2 = fo.merge_launch_options('WINEDLLOVERRIDES="old=n" mangohud %command% %command%', OV)
+  check("C12b single %command%", select(2, r2:gsub("%%command%%", "")) == 1)
+  check("C12b single override", select(2, r2:gsub("WINEDLLOVERRIDES=", "")) == 1)
+end
+
 -- ---------------------------------------------------------------------------
 -- is_proton_tool(name): only Proton/compat tools warrant DLL overrides.
 -- ---------------------------------------------------------------------------

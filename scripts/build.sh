@@ -107,6 +107,11 @@ cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
 # Pure helpers: perondepot online-fix matcher + WINEDLLOVERRIDES builder.
 cp "$OVERLAY/backend/onlinefix.lua" "$OUT/backend/onlinefix.lua"
 cp "$OVERLAY/backend/fix_overlays.lua" "$OUT/backend/fix_overlays.lua"
+# Forced-compat-tool (Proton) reader: gates Online Fix on a native title.
+cp "$OVERLAY/backend/protoncompat.lua" "$OUT/backend/protoncompat.lua"
+# Reads current launch options from localconfig.vdf so the online fix merges
+# (not clobbers) the user's existing options (mangohud/gamemoderun/...).
+cp "$OVERLAY/backend/launchopts.lua" "$OUT/backend/launchopts.lua"
 # Steam client language detection (Use Steam Language).
 cp "$OVERLAY/backend/steamlang.lua" "$OUT/backend/steamlang.lua"
 
@@ -642,8 +647,16 @@ patch_replace "$OUT/backend/main.lua" \
         if not overrides then
             return { success = true, apply = false }
         end
-        local merged = fix_overlays.merge_launch_options(
-            tostring(currentLaunchOptions or ""), overrides)
+        -- Merge into the user'"'"'s EXISTING launch options so wrappers like
+        -- mangohud/gamemoderun survive. The frontend can'"'"'t read them (no
+        -- SteamClient on the store page; appDetailsStore reads back empty), so
+        -- pull the reliable on-disk value from localconfig.vdf when not given.
+        local current = tostring(currentLaunchOptions or "")
+        if current == "" then
+            local ok_lo, lo = pcall(require, "launchopts")
+            if ok_lo and lo and lo.read then current = lo.read(tonumber(appid)) or "" end
+        end
+        local merged = fix_overlays.merge_launch_options(current, overrides)
         return { success = true, apply = true, launchOptions = merged, overrides = overrides }
     end)
     if not ok then return json_err(res) end
@@ -675,8 +688,17 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
     end
     local ok, res = pcall(function()
         local onlinefix = require("onlinefix")
-        local resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
-        if not (resp and resp.status == 200 and resp.body) then
+        -- Retry a few times: the mirror is behind Cloudflare and the index
+        -- fetch occasionally times out transiently (e.g. right after a Steam
+        -- restart). A couple of immediate retries avoids a spurious
+        -- "unavailable" on an otherwise-reachable mirror.
+        local resp
+        for _ = 1, 3 do
+            resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
+            if resp and resp.status == 200 and resp.body then break end
+            resp = nil
+        end
+        if not resp then
             error("online-fix index unavailable")
         end
         local entry = onlinefix.find_fix(resp.body, tostring(gameName or ""))
@@ -689,6 +711,22 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
             url = "http://api.perondepot.xyz/all/" .. entry.href,
             name = entry.name,
         }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function IsCompatToolForced(appid, contentScriptQuery)
+    -- Millennium sorts JS keys: { appid, contentScriptQuery }.
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    -- An online fix is a Windows DLL bundle that only loads under Proton. For
+    -- a title that ships a native Linux build the frontend gates Online Fix on
+    -- this: true only when the user forced a Proton/compat tool for the game.
+    local ok, res = pcall(function()
+        local protoncompat = require("protoncompat")
+        return { success = true, forced = protoncompat.is_forced(nil, appid) and true or false }
     end)
     if not ok then return json_err(res) end
     return json_ok(res)
@@ -780,7 +818,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
