@@ -677,8 +677,17 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
     end
     local ok, res = pcall(function()
         local onlinefix = require("onlinefix")
-        local resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
-        if not (resp and resp.status == 200 and resp.body) then
+        -- Retry a few times: the mirror is behind Cloudflare and the index
+        -- fetch occasionally times out transiently (e.g. right after a Steam
+        -- restart). A couple of immediate retries avoids a spurious
+        -- "unavailable" on an otherwise-reachable mirror.
+        local resp
+        for _ = 1, 3 do
+            resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
+            if resp and resp.status == 200 and resp.body then break end
+            resp = nil
+        end
+        if not resp then
             error("online-fix index unavailable")
         end
         local entry = onlinefix.find_fix(resp.body, tostring(gameName or ""))
