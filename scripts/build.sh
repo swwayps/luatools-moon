@@ -107,6 +107,8 @@ cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
 # Pure helpers: perondepot online-fix matcher + WINEDLLOVERRIDES builder.
 cp "$OVERLAY/backend/onlinefix.lua" "$OUT/backend/onlinefix.lua"
 cp "$OVERLAY/backend/fix_overlays.lua" "$OUT/backend/fix_overlays.lua"
+# Forced-compat-tool (Proton) reader: gates Online Fix on a native title.
+cp "$OVERLAY/backend/protoncompat.lua" "$OUT/backend/protoncompat.lua"
 # Steam client language detection (Use Steam Language).
 cp "$OVERLAY/backend/steamlang.lua" "$OUT/backend/steamlang.lua"
 
@@ -692,6 +694,22 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
     end)
     if not ok then return json_err(res) end
     return json_ok(res)
+end
+
+function IsCompatToolForced(appid, contentScriptQuery)
+    -- Millennium sorts JS keys: { appid, contentScriptQuery }.
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    -- An online fix is a Windows DLL bundle that only loads under Proton. For
+    -- a title that ships a native Linux build the frontend gates Online Fix on
+    -- this: true only when the user forced a Proton/compat tool for the game.
+    local ok, res = pcall(function()
+        local protoncompat = require("protoncompat")
+        return { success = true, forced = protoncompat.is_forced(nil, appid) and true or false }
+    end)
+    if not ok then return json_err(res) end
+    return json_ok(res)
 end'
 
 # 3m. settings/manager.lua — implement Use Steam Language. Upstream's
@@ -780,7 +798,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
