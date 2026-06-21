@@ -5,7 +5,7 @@
 #
 # On Linux a freshly added game only shows up in the library after a
 # Steam restart (slsteam-moon provisions it on the next launch via the
-# PICS recv path — see SLSsteam-fork HANDOFF.md). The upstream modal
+# PICS recv path). The upstream modal
 # only offers "Close", so users don't know they must restart. We add a
 # FILLED (primary) "Restart Steam" button next to an UNFILLED "Close"
 # so the restart reads as the intended next step, while Close stays
