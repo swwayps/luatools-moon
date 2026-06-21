@@ -94,6 +94,46 @@ if [ -n "$EXTRACT_DIR" ]; then
     write_failed "extract failed"
     exit 1
   fi
+
+  # Nested-archive pass (fix-apply path only; EXTRACT_NESTED=1). Some fixes
+  # ship the actual crack as a .rar / multi-part .rar INSIDE the zip (the
+  # parts ARE the crack, not a full-game repack). Unpack those one level into
+  # the same dir, then delete the residual archives so they don't litter the
+  # game folder. Requires 7zz (handles .rar v5 + multi-volume from the first
+  # volume). Best-effort: a nested failure still leaves any loose crack files.
+  if [ "${EXTRACT_NESTED:-0}" = "1" ] && [ -x "$SEVENZ" ]; then
+    # Is $1 a SECONDARY volume we should not invoke 7zz on directly?
+    #   name.partN.rar (N>1), name.rNN, name.zNN  -> secondary
+    is_secondary() {
+      local b; b="$(basename "$1")"
+      shopt -s nocasematch
+      local rc=1
+      if [[ "$b" =~ \.part0*([0-9]+)\.rar$ ]]; then
+        [ "$((10#${BASH_REMATCH[1]}))" -ne 1 ] && rc=0
+      elif [[ "$b" =~ \.r[0-9]+$ ]] || [[ "$b" =~ \.z[0-9]+$ ]]; then
+        rc=0
+      fi
+      shopt -u nocasematch
+      return $rc
+    }
+
+    found_archive=0
+    while IFS= read -r -d '' arc; do
+      found_archive=1
+      if ! is_secondary "$arc"; then
+        "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$arc" >/dev/null 2>&1 || true
+      fi
+    done < <(find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
+              -o -iname '*.7z' -o -iname '*.r[0-9][0-9]' -o -iname '*.z[0-9][0-9]' \) -print0 2>/dev/null)
+
+    if [ "$found_archive" = "1" ]; then
+      # Remove every archive volume now that their contents are extracted.
+      find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
+        -o -iname '*.7z' -o -iname '*.r[0-9][0-9]' -o -iname '*.z[0-9][0-9]' \) \
+        -delete 2>/dev/null || true
+    fi
+  fi
+
   write_state "extracted" "$TOTAL" "$TOTAL"
 else
   write_state "done" "$TOTAL" "$TOTAL"
