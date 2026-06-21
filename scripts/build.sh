@@ -198,6 +198,34 @@ end' \
     _set_download_state(appid, { status = "done", success = true, api = api_name })
 end'
 
+# 3a-ter. downloads.lua — also seed slsteam-moon's persistent manifest store
+#     when a game is ADDED, so the bundled (LuaTools) build is archived right
+#     away (before any install or Steam restart). Without this the store only
+#     gets populated by slsteam-moon at install/redirect time, so a just-added
+#     game showed nothing in the Game Updates tab (and the store dir didn't
+#     even exist on a fresh install). Anchored on the upstream manifest-copy
+#     loop; aborts if it moves.
+patch_replace "$OUT/backend/downloads.lua" \
+'            if entry.name:match("%.manifest$") then
+                local dest_man = fs.join(depot_cache, entry.name)
+                local content = m_utils.read_file(entry.path)
+                if content then m_utils.write_file(dest_man, content) end
+            end' \
+'            if entry.name:match("%.manifest$") then
+                local content = m_utils.read_file(entry.path)
+                if content then
+                    m_utils.write_file(fs.join(depot_cache, entry.name), content)
+                    -- slsteammoon: also seed slsteam-moon'"'"'s persistent
+                    -- manifest store so the bundled (LuaTools) build is archived
+                    -- as soon as the game is added -- before any install or
+                    -- Steam restart -- so it shows in the Game Updates tab and
+                    -- survives Steam'"'"'s depotcache purges. Non-fatal.
+                    local sls_store = fs.join(os.getenv("HOME") or "", ".config", "SLSsteam", "manifests")
+                    pcall(fs.create_directories, sls_store)
+                    pcall(m_utils.write_file, fs.join(sls_store, entry.name), content)
+                end
+            end'
+
 # 3a-bis. downloads.lua — inline the smart source selector functions
 #     (start_add_via_luatools_smart + _launch_smart_download) just before the
 #     module `return`. Kept in a separate .inc.lua to avoid shell-escaping a
