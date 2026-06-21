@@ -3,11 +3,13 @@
 #
 # Replaces the fast-download "first available source" auto-select with a
 # speed-first, completeness-aware race:
-#   - download every candidate source in parallel (bounded by a connect
-#     timeout, a max time, and a speed floor that cancels a stalled/slow
-#     source like a 25 KB/s host);
-#   - apply a hybrid window: once the first source completes, wait a short
-#     grace, capped by an absolute deadline, then take everyone who finished;
+#   - download every candidate source in parallel; a source is dropped only by
+#     its own curl guards (a connect timeout, and a speed floor that cancels a
+#     stalled/dead host like a 25 KB/s one), never by a shared wall clock;
+#   - apply a relative window: once the first COMPLETE source finishes, wait a
+#     short grace for an even-more-complete peer, then take everyone done and
+#     cancel the rest. While no complete source exists, keep awaiting whoever is
+#     still actively downloading — the leading source is never cut for being slow;
 #   - score each finished candidate for completeness (presence of the
 #     app-depot key that enables Workshop, then total depot keys, then
 #     bundled manifests) and pick the most complete, tie-broken by speed;
@@ -33,21 +35,27 @@ set -uo pipefail
 export LC_ALL=C
 
 # --- tunables (env-overridable for tests) ---------------------------------
-: "${GRACE_SECS:=3}"        # speed-first grace once a COMPLETE source exists
-: "${CAP_SECS:=45}"         # absolute backstop while still hunting for a complete source
-: "${CONNECT_TIMEOUT:=10}"  # curl --connect-timeout
-: "${MAX_TIME:=40}"         # curl --max-time per source (must be < CAP_SECS).
-                            # Generous on purpose: some key-bearing sources are
-                            # on-demand zip builders (e.g. Ryuu) with wildly
-                            # variable latency (observed 3-23s+). Too tight a cap
-                            # cancels the ONLY source carrying the Workshop depot
-                            # key, silently falling back to an incomplete source.
-: "${SPEED_LIMIT:=1000}"    # curl --speed-limit (bytes/s) ...
-: "${SPEED_TIME:=20}"       # ... sustained below for this many seconds -> abort.
-                            # Lenient so a slow-to-generate (but alive) source is
-                            # not killed mid-build; only a genuinely dead host
-                            # (<1 KB/s for 20s) is dropped. CAP_SECS/MAX_TIME bound
-                            # the total wait regardless.
+# The race is cut RELATIVELY, never by a wall clock: a source is only dropped
+# when (a) a faster, COMPLETE peer already won (speed-first GRACE), or (b) the
+# source itself goes dead / extremely slow (the curl speed floor below). The
+# leading source is never cancelled just for taking a while.
+: "${GRACE_SECS:=3}"        # speed-first grace once a COMPLETE source exists:
+                            # how long to await an even-more-complete peer before
+                            # committing the winner and cancelling the rest.
+: "${CONNECT_TIMEOUT:=10}"  # curl --connect-timeout: a source that can't even
+                            # establish a connection fails fast.
+: "${SPEED_LIMIT:=1000}"    # curl --speed-limit (bytes/s): THE limiter. A source
+: "${SPEED_TIME:=20}"       # transferring below SPEED_LIMIT for SPEED_TIME
+                            # sustained seconds is "dead/extremely slow" -> abort.
+                            # A momentary dip recovers (the window is sustained),
+                            # so the leading-but-temporarily-slow source survives.
+                            # On-demand zip builders (e.g. Ryuu) with high TTFB are
+                            # tolerated as long as bytes eventually flow.
+: "${MAX_TIME:=600}"        # curl --max-time per source: anti-runaway ceiling
+                            # ONLY (a misbehaving host streaming forever). It is
+                            # deliberately huge — normal healthy downloads finish
+                            # well before it; the speed floor, not this, is what
+                            # drops dead sources.
 
 # ==========================================================================
 # Pure logic
@@ -138,23 +146,27 @@ zip_has_app_key() {
 
 # window_decide <satisfied> <running> <elapsed> <since_satisfied>
 # Decide whether to keep waiting for more racers ("wait") or close the
-# collection window ("stop"). Completeness-aware, not purely speed-based:
-#   - all racers finished              -> stop
-#   - absolute backstop (CAP_SECS) hit -> stop
-#   - a complete source already exists -> speed-first: stop GRACE_SECS after it
-#   - otherwise (no complete source yet, racers still in flight) -> WAIT,
-#     so a slower-but-more-complete source (e.g. a host that builds the zip
-#     on the fly, high TTFB) is not cancelled before it can be considered.
-# Honours GRACE_SECS and CAP_SECS from the environment.
+# collection window ("stop"). Relative-cut, completeness-aware — NEVER a
+# wall-clock cap:
+#   - all racers finished/died             -> stop
+#   - a complete source already won        -> speed-first: stop GRACE_SECS after it
+#                                             (its slower/still-running peers are
+#                                              then cancelled — a faster, complete
+#                                              source beat them)
+#   - otherwise (no complete source yet, a racer still in flight) -> WAIT,
+#     no matter how long it takes. A healthy source is never cut by time; only
+#     its OWN curl (connect-timeout + speed floor) drops it when it goes dead or
+#     extremely slow. This is what lets a slow-but-more-complete source (e.g. a
+#     host that builds the zip on the fly, high TTFB) run to completion.
+# `elapsed` is accepted for diagnostics/back-compat but no longer caps the wait.
+# Honours GRACE_SECS from the environment.
 window_decide() {
   local satisfied="$1" running="$2" elapsed="$3" since_sat="$4"
   # Defensive: normalise a comma decimal separator to a dot so the numeric
-  # awk comparisons below never degrade into string comparison, even if a
+  # awk comparison below never degrades into string comparison, even if a
   # caller (or a comma-decimal locale) hands us "3,050" instead of "3.050".
-  elapsed="${elapsed//,/.}"
   since_sat="${since_sat//,/.}"
   if [[ "${running:-0}" -eq 0 ]]; then echo "stop"; return; fi
-  if awk -v e="$elapsed" -v c="$CAP_SECS" 'BEGIN{exit !(e>=c)}'; then echo "stop"; return; fi
   if [[ "${satisfied:-0}" -eq 1 ]]; then
     if awk -v s="$since_sat" -v g="$GRACE_SECS" 'BEGIN{exit !(s>=g)}'; then echo "stop"; return; fi
   fi
@@ -335,7 +347,7 @@ while :; do
       # A completed candidate that already carries the app/Workshop depot key
       # makes the window "satisfied": from here, speed-first grace applies. A
       # completed candidate WITHOUT the key does NOT satisfy the window, so the
-      # race keeps waiting (up to CAP_SECS) for a slower source that might have
+      # race keeps waiting for a slower source that might have
       # it — this is what stops a fast-but-incomplete source winning by default.
       if [[ "$(zip_has_app_key "$APPID" "${C_ZIP[i]}")" == "yes" ]]; then
         satisfied=1
@@ -376,9 +388,10 @@ while :; do
   write_state "downloading" "" "$br" "$tb"
 
   # window: completeness-aware decision (see window_decide). Stop when all
-  # racers are done, when the absolute cap is hit, or — once a COMPLETE source
-  # exists — GRACE_SECS after it. Keep waiting while no complete source has
-  # arrived yet and a racer is still in flight.
+  # racers are done, or — once a COMPLETE source exists — GRACE_SECS after it.
+  # Keep waiting while no complete source has arrived yet and a racer is still
+  # in flight; the still-running racer is never cut here by elapsed time, only
+  # by its own curl speed floor (which marks it failed -> running drops).
   t="$(now)"
   elapsed="$(awk -v a="$t0" -v b="$t" 'BEGIN{printf "%.3f", b-a}')"
   since_sat="-1"

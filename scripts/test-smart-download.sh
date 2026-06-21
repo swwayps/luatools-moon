@@ -214,39 +214,52 @@ fi
 # window <satisfied> <running> <elapsed> <since_satisfied> -> "wait" | "stop"
 #   satisfied        = 1 if a completed candidate already has the app-key
 #   running          = number of candidates whose download is still in flight
-#   elapsed          = seconds since the race (GET) started
+#   elapsed          = seconds since the race (GET) started (diagnostic only)
 #   since_satisfied  = seconds since the first app-key completion (-1 if none)
-# Honours GRACE_SECS (speed-first grace once a complete source exists) and
-# CAP_SECS (absolute backstop while still hunting for a complete source).
+#
+# Relative-cut model: the window NEVER closes on a wall-clock deadline. A
+# healthy source still in flight is awaited no matter how long it takes; only
+# its OWN curl (connect-timeout + speed floor) can drop it when it goes dead or
+# extremely slow. The window closes only when:
+#   - every source has finished/died (running==0), or
+#   - a COMPLETE source has won and the speed-first GRACE_SECS has elapsed
+#     (then the slower/still-running peers are cancelled — a faster, complete
+#     source beat them).
+# `elapsed` is passed for diagnostics but no longer caps the wait.
 assert_eq "window: all candidates finished -> stop" \
-  "stop" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 0 1 -1)"
+  "stop" "$(GRACE_SECS=3 "$SCRIPT" window 0 0 1 -1)"
 
-assert_eq "window: no complete source yet, still running, before cap -> wait" \
-  "wait" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 1 5 -1)"
+assert_eq "window: no complete source yet, still running -> wait" \
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 0 1 5 -1)"
 
-# the BoI/Ryuu fix: a slow source still downloading at 13s must be AWAITED,
-# not cancelled, while no completed source has the app-key.
-assert_eq "window: slow source still in flight near cap, none complete -> wait" \
-  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 0 1 13 -1)"
+# a slow source still downloading must be AWAITED, not cancelled, while no
+# completed source has the app-key.
+assert_eq "window: slow source still in flight, none complete -> wait" \
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 0 1 13 -1)"
 
-assert_eq "window: no complete source, reached cap -> stop (backstop)" \
-  "stop" "$(GRACE_SECS=3 CAP_SECS=20 "$SCRIPT" window 0 1 20 -1)"
+# the core change: a long-running but healthy source with NO complete peer is
+# NOT cut by any wall-clock cap. It is awaited until it finishes or its own
+# curl speed floor drops it. (Previously a CAP_SECS backstop forced "stop".)
+assert_eq "window: long-running source, none complete -> wait (no wall-clock cut)" \
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 0 1 120 -1)"
+
+assert_eq "window: very long-running source, none complete -> wait" \
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 0 2 600 -1)"
 
 assert_eq "window: complete source found, within grace -> wait" \
-  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 5 1)"
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 1 1 5 1)"
 
 assert_eq "window: complete source found, past grace -> stop (speed-first)" \
-  "stop" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 8 4)"
+  "stop" "$(GRACE_SECS=3 "$SCRIPT" window 1 1 8 4)"
 
-# locale robustness: a comma-decimal elapsed (pt_BR/de_DE etc. format awk
-# printf output) must still be compared NUMERICALLY, not as a string. The
-# original bug: "3,050" >= "25" string-compares '3' > '2' -> stop, closing
-# the window at ~3s regardless of CAP and cancelling slow-but-complete sources.
-assert_eq "window: comma-decimal elapsed parsed numerically -> wait (not string-compare)" \
-  "wait" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 0 1 "3,050" -1)"
+# locale robustness: the grace comparison (since_satisfied vs GRACE_SECS) must
+# stay NUMERIC even under comma-decimal locales (pt_BR/de_DE awk printf emits
+# "12,000"); a string compare would mis-order it.
+assert_eq "window: comma-decimal since-grace past grace -> stop" \
+  "stop" "$(GRACE_SECS=3 "$SCRIPT" window 1 1 "12,000" "10,500")"
 
-assert_eq "window: comma-decimal since-grace parsed numerically -> stop" \
-  "stop" "$(GRACE_SECS=3 CAP_SECS=25 "$SCRIPT" window 1 1 "12,000" "10,500")"
+assert_eq "window: comma-decimal since-grace within grace -> wait" \
+  "wait" "$(GRACE_SECS=3 "$SCRIPT" window 1 1 "5,500" "2,250")"
 
 # --- progress: monotonic, capped percentage (no backward jumps) -----------
 # mono_pct <prev_pct> <raw_pct> -> the percentage to display: never below the
@@ -465,23 +478,25 @@ PY
     if [[ "$elapB" -le 8 ]]; then promptB="yes"; else promptB="no"; fi
     assert_eq "speed-first: did not await the slow source (${elapB}s)" "yes" "$promptB"
 
-    # Scenario C (no-hang backstop): a dead source must be cancelled by
-    # curl --max-time; the only completer (fast-incomplete) wins, no hang.
+    # Scenario C (no-hang via speed floor): a dead source that accepts the
+    # connection then sends nothing must be dropped by curl's speed floor
+    # (--speed-limit/--speed-time), NOT by a wall-clock --max-time. The only
+    # completer (fast-incomplete) wins; the run is bounded by the speed floor.
     CANDC="$TMP/candsC.txt"
     printf 'deadslow\thttp://127.0.0.1:%s/dead.zip\n'      "$PORT2" >  "$CANDC"
     printf 'fastincomplete\thttp://127.0.0.1:%s/fast.zip\n' "$PORT2" >> "$CANDC"
     DESTC="$TMP/dlC"; mkdir -p "$DESTC"
     STATEC="$DESTC/1134710_state.json"
     startC="$(date +%s)"
-    SPEED_LIMIT=1 SPEED_TIME=99 MAX_TIME=3 GRACE_SECS=2 CAP_SECS=12 \
+    SPEED_LIMIT=1000 SPEED_TIME=3 GRACE_SECS=2 \
       "$SCRIPT" 1134710 "$STATEC" "$DESTC" "$CANDC" >/dev/null 2>&1
     endC="$(date +%s)"; elapC=$((endC - startC))
     finC="$(grep -oE '"status"[: ]*"[a-z]+"' "$STATEC" 2>/dev/null | tail -1 | grep -oE '[a-z]+"$' | tr -d '"')"
     assert_eq "no-hang: dead source does not block completion (extracted)" "extracted" "$finC"
     assert_eq "no-hang: the live (incomplete) source won" \
       "no" "$(has_app_key_lua "$DESTC/extracted_1134710")"
-    if [[ "$elapC" -le 12 ]]; then withinC="yes"; else withinC="no"; fi
-    assert_eq "no-hang: bounded by max-time, did not hang (${elapC}s)" "yes" "$withinC"
+    if [[ "$elapC" -le 15 ]]; then withinC="yes"; else withinC="no"; fi
+    assert_eq "no-hang: dropped by speed floor, did not hang (${elapC}s)" "yes" "$withinC"
   else
     echo "skip - could not start slow http server"
   fi
