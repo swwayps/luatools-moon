@@ -152,6 +152,57 @@ do
 end
 
 -- ---------------------------------------------------------------------------
+-- remove_overrides(current): the Un-Fix inverse of merge_launch_options. Strip
+-- the WINEDLLOVERRIDES assignment, restoring the user's original launch
+-- options. A bare "%command%" left behind (fix had added the override to an
+-- empty field) collapses to "" so the field clears fully.
+-- ---------------------------------------------------------------------------
+
+-- E1: override added to an empty field -> fully cleared.
+do
+  local r = fo.remove_overrides('WINEDLLOVERRIDES="OnlineFix64=n" %command%')
+  check("E1 cleared to empty", r == "")
+end
+
+-- E2: override + user options -> keeps the user options & %command%.
+do
+  local r = fo.remove_overrides('WINEDLLOVERRIDES="OnlineFix64=n;winmm=n,b" mangohud %command%')
+  check("E2 keeps mangohud", r == "mangohud %command%")
+  check("E2 no override left", r:find("WINEDLLOVERRIDES=") == nil)
+end
+
+-- E3: no override present -> unchanged.
+do
+  local r = fo.remove_overrides("game-performance mangohud %command%")
+  check("E3 unchanged", r == "game-performance mangohud %command%")
+end
+
+-- E4: empty / nil -> "".
+do
+  check("E4 empty", fo.remove_overrides("") == "")
+  check("E4 nil", fo.remove_overrides(nil) == "")
+end
+
+-- E5: unquoted override form is stripped too.
+do
+  local r = fo.remove_overrides("WINEDLLOVERRIDES=steam_api64=n mangohud %command%")
+  check("E5 unquoted stripped", r == "mangohud %command%")
+end
+
+-- E6: override only, no %command% -> "".
+do
+  check("E6 override only", fo.remove_overrides('WINEDLLOVERRIDES="x=n"') == "")
+end
+
+-- E7: round-trip with merge is idempotent and reversible.
+do
+  local merged = fo.merge_launch_options("mangohud %command%", OV)
+  local back = fo.remove_overrides(merged)
+  check("E7 reverses merge", back == "mangohud %command%")
+  check("E7 remove idempotent", fo.remove_overrides(back) == back)
+end
+
+-- ---------------------------------------------------------------------------
 -- is_proton_tool(name): only Proton/compat tools warrant DLL overrides.
 -- ---------------------------------------------------------------------------
 do
@@ -208,6 +259,74 @@ do
   local ffs = { list_recursive = function(_) return nil end }
   check("C14 fs nil -> nil", fo.overrides_for_install_dir(ffs, "/x") == nil)
   check("C14 bad fs -> nil", fo.overrides_for_install_dir(nil, "/x") == nil)
+end
+
+-- ---------------------------------------------------------------------------
+-- parse_dlllist / build_overrides_from_list / dlllist.txt preference.
+-- A fix's own dlllist.txt is authoritative: every named DLL is forced, with
+-- system-proxy names chained native+builtin and the rest native only. This
+-- covers cracks using proxies outside the recognised-DLL allowlist.
+-- ---------------------------------------------------------------------------
+
+-- D1: parse tolerates CRLF, spaces, comments, path prefixes, non-dll lines.
+do
+  local list = fo.parse_dlllist("OnlineFix64.dll\r\n  winmm.dll \n# comment\nnotes.txt\nBin/dsound.dll\n")
+  check("D1 count", #list == 3)
+  check("D1 keeps OnlineFix64", list[1] == "OnlineFix64.dll")
+  check("D1 trims winmm", list[2] == "winmm.dll")
+  check("D1 strips path prefix", list[3] == "dsound.dll")
+end
+check("D1 non-string -> empty", #fo.parse_dlllist(nil) == 0)
+
+-- D2: build_overrides_from_list forces ALL named DLLs (not allowlist-limited);
+-- uncommon system proxies chain n,b.
+do
+  local s = fo.build_overrides_from_list({ "EMP.dll", "dsound.dll", "uplay_r1_loader64.dll" })
+  check("D2 EMP native", s:find("EMP=n") ~= nil)
+  check("D2 dsound native+builtin (uncommon proxy)", s:find("dsound=n,b") ~= nil)
+  check("D2 uplay loader native", s:find("uplay_r1_loader64=n") ~= nil)
+  check("D2 quoted", s:sub(1, #'WINEDLLOVERRIDES="') == 'WINEDLLOVERRIDES="' and s:sub(-1) == '"')
+end
+check("D2 empty -> nil", fo.build_overrides_from_list({}) == nil)
+check("D2 no dll -> nil", fo.build_overrides_from_list({ "readme.txt" }) == nil)
+
+-- D3: case-insensitive dedup, preserves first-seen casing.
+do
+  local s = fo.build_overrides_from_list({ "WinMM.dll", "winmm.dll" })
+  check("D3 single winmm", select(2, s:gsub("[Ww]in[Mm][Mm]=", "")) == 1)
+end
+
+-- D4: overrides_for_install_dir prefers a dlllist.txt when present, reading it
+-- via the injected reader; uses its names verbatim over the allowlist scan.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "OnlineFix64.dll", path = "/g/OnlineFix64.dll", is_directory = false },
+        { name = "dsound.dll", path = "/g/dsound.dll", is_directory = false },
+        { name = "dlllist.txt", path = "/g/dlllist.txt", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p) return p == "/g/dlllist.txt" and "OnlineFix64.dll\ndsound.dll\n" or nil end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("D4 uses dlllist OnlineFix64", s and s:find("OnlineFix64=n") ~= nil)
+  check("D4 dlllist covers dsound (not in allowlist)", s and s:find("dsound=n,b") ~= nil)
+end
+
+-- D5: empty/missing dlllist.txt -> fall back to the allowlist scan.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "steam_api64.dll", path = "/g/steam_api64.dll", is_directory = false },
+        { name = "dlllist.txt", path = "/g/dlllist.txt", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(_) return "" end  -- empty dlllist
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("D5 falls back to allowlist scan", s and s:find("steam_api64=n") ~= nil)
 end
 
 if fails == 0 then

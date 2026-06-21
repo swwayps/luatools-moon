@@ -406,64 +406,18 @@ print("[patch-frontend] AIO button repurposed to SpaceFix (FakeAppIds)")
 PY
 
 # ---------------------------------------------------------------------------
-# Manage Game / Un-Fix: drop the steam://validate navigation (Linux line).
-#
-# UnFixGame on Linux only removes the FakeAppIds mapping (SpaceFix off); no
-# game files are touched, so a full Steam verify is pointless and could
-# re-trigger staging for an added (unowned) game. Neutralize only the
-# showUnfixProgress site (the Manage Game flow); the settings InstalledFixes
-# flow is unrelated and left as-is.
-#
-# Anchored on the "done"-branch validate block (unique via "Stop polling").
+# Manage Game / Un-Fix: the upstream steam://validate navigation is KEPT
+# (no patch here). Un-Fix now restores the game to its original state, and
+# the file-based fixes (Crack/Bypass, Online Fix) DO modify game files, so a
+# Steam verify is the mechanism that restores them. (SpaceFix/FakeAppIds
+# changes no files; that part is handled by UnFixGame dropping the mapping.)
 # ---------------------------------------------------------------------------
-"$PYBIN" - "$JS" <<'PY'
-import sys
-
-path = sys.argv[1]
-with open(path, "r", encoding="utf-8") as f:
-    s = f.read()
-
-anchor = (
-'                // Trigger Steam verification after a short delay\n'
-'                setTimeout(function () {\n'
-'                  try {\n'
-'                    const verifyUrl = "steam://validate/" + appid;\n'
-'                    window.location.href = verifyUrl;\n'
-'                    backendLog("LuaTools: Running verify for appid " + appid);\n'
-'                  } catch (_) {}\n'
-'                }, 1000);\n'
-'\n'
-'                return; // Stop polling\n'
-)
-
-replacement = (
-'                // slsteammoon: no steam://validate on Linux — Un-Fix only\n'
-'                // toggles slsteam-moon\'s FakeAppIds (SpaceFix off); no game\n'
-'                // files change, so a full verify is unnecessary and could\n'
-'                // re-trigger staging for an added game.\n'
-'\n'
-'                return; // Stop polling\n'
-)
-
-n = s.count(anchor)
-if n != 1:
-    sys.stderr.write(
-        "[patch-frontend] UNFIX VALIDATE ANCHOR FAILED: found %d matches "
-        "(need 1). The showUnfixProgress done-branch moved upstream; update "
-        "scripts/patch-frontend.sh.\n" % n)
-    sys.exit(3)
-
-s = s.replace(anchor, replacement, 1)
-with open(path, "w", encoding="utf-8") as f:
-    f.write(s)
-print("[patch-frontend] Un-Fix steam://validate navigation removed (Linux)")
-PY
 
 # ---------------------------------------------------------------------------
-# Manage Game / Un-Fix: confirm copy. The upstream text promises to "remove
-# fix files and verify game files", which no longer matches the Linux
-# behavior (Un-Fix just turns SpaceFix off — no files removed, no verify).
-# Rewrite it to be coherent. Anchored on the confirm string literal.
+# Manage Game / Un-Fix: confirm copy. Reworded for the Linux Un-Fix, which
+# now restores the game to its original state (drops the SpaceFix/FakeAppIds
+# mapping AND verifies game files to undo the file-based Crack/Online fixes).
+# Anchored on the confirm string literal.
 # ---------------------------------------------------------------------------
 "$PYBIN" - "$JS" <<'PY'
 import sys
@@ -476,7 +430,7 @@ anchor = (
 '              "Are you sure you want to un-fix? This will remove fix files and verify game files.",\n'
 )
 replacement = (
-'              "Are you sure you want to un-fix? This turns off the SpaceFix for this game.",\n'
+'              "Are you sure you want to un-fix? This removes any applied fixes and restores the game to its original state.",\n'
 )
 
 n = s.count(anchor)
@@ -490,16 +444,16 @@ if n != 1:
 s = s.replace(anchor, replacement, 1)
 with open(path, "w", encoding="utf-8") as f:
     f.write(s)
-print("[patch-frontend] Un-Fix confirm copy updated for SpaceFix")
+print("[patch-frontend] Un-Fix confirm copy updated for restore-original-state")
 PY
 
 # ---------------------------------------------------------------------------
-# Manage Game / Un-Fix: done-branch message. After dropping the
-# steam://validate step (above), the upstream "done" message still read
-# "Removed {count} files. Running Steam verification..." — a step that no
-# longer runs, so the modal looked hung (and "0 files" is misleading, since
-# Un-Fix removes the FakeAppIds mapping, not files). Replace it with a clear
-# completion message. The Hide button (overlay.remove()) still dismisses it.
+# Manage Game / Un-Fix: done-branch message. The upstream message read
+# "Removed {count} files. Running Steam verification..." but the backend
+# UnFixGame doesn't report a count (it drops the FakeAppIds mapping), so it
+# showed a misleading "0 files". Replace it with a clear status; the
+# upstream steam://validate that follows is KEPT (it restores the original
+# game files modified by the file-based fixes).
 #
 # Anchored on the showUnfixProgress done-branch message block.
 # ---------------------------------------------------------------------------
@@ -520,7 +474,7 @@ anchor = (
 replacement = (
 '                if (msgEl)\n'
 '                  msgEl.textContent = lt(\n'
-'                    "SpaceFix removed. Relaunch the game to apply.",\n'
+'                    "Restoring the game to its original state\\u2026",\n'
 '                  );\n'
 )
 
@@ -535,7 +489,7 @@ if n != 1:
 s = s.replace(anchor, replacement, 1)
 with open(path, "w", encoding="utf-8") as f:
     f.write(s)
-print("[patch-frontend] Un-Fix done-branch message updated for SpaceFix")
+print("[patch-frontend] Un-Fix done-branch message updated for restore-original-state")
 PY
 
 # ---------------------------------------------------------------------------
@@ -590,7 +544,7 @@ replacement = r'''    // slsteammoon: source Online Fix from the perondepot mirr
     // game name on click.
     const onlineSection = createFixButton(
       lt("Online Fix"),
-      lt("Multiplayer fix via the online-fix mirror"),
+      lt("Multiplayer fix via peron online-fix.me mirror"),
       "fa-globe",
       null,
       function (e) {
@@ -723,6 +677,151 @@ s = s.replace(anchor, replacement, 1)
 with open(path, "w", encoding="utf-8") as f:
     f.write(s)
 print("[patch-frontend] Online Fix button routed to perondepot mirror")
+PY
+
+# ---------------------------------------------------------------------------
+# Crack/Bypass button -> ryuu.lol fixes (replaces upstream's Generic Fix).
+#
+# Upstream's "Generic Fix" hits index.luatools.work (a rate-limited CF-Workers
+# free tier that serves ~0 fixes), so it's effectively dead. Replace that
+# button with "Crack/Bypass" sourced from the ryuu catalogue: availability +
+# download URL come from data.crackFix (resolved server-side by CheckForFixes
+# against the bundled appid->fix index). Same native/Proton gate as Online Fix
+# (a Windows crack does nothing on a title Steam runs natively), then the normal
+# applyFix download/extract flow (downloader.sh unpacks nested .rar payloads).
+#
+# Anchored on the upstream genericSection createFixButton block.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = r'''    // left thing in fixes modal
+    const genericStatus = data.genericFix.status;
+    const genericSection = createFixButton(
+      lt("Generic Fix"),
+      genericStatus === 200 ? lt("Apply") : lt("No generic fix"),
+      genericStatus === 200 ? "fa-check" : "fa-circle-xmark",
+      genericStatus === 200 ? true : false,
+      function (e) {
+        e.preventDefault();
+        if (genericStatus === 200 && isGameInstalled) {
+          const genericUrl =
+            "https://files.luatools.work/GameBypasses/" + data.appid + ".zip";
+          applyFix(
+            data.appid,
+            genericUrl,
+            lt("Generic Fix"),
+            data.gameName,
+            overlay,
+          );
+        }
+      },
+    );
+    columnsContainer.appendChild(genericSection);
+
+    if (!isGameInstalled) {
+      genericSection.style.opacity = "0.5";
+      genericSection.style.cursor = "not-allowed";
+    }'''
+
+replacement = r'''    // slsteammoon: replace upstream's dead "Generic Fix" with a "Crack/Bypass"
+    // button sourced from the ryuu catalogue. Availability + URL come from
+    // data.crackFix (CheckForFixes resolves it against the bundled index).
+    const crackStatus = (data.crackFix && data.crackFix.status) || 0;
+    const crackSection = createFixButton(
+      lt("Crack/Bypass"),
+      // slsteammoon: static descriptive subtitle (like the sibling buttons),
+      // not the Apply/No-crack status -- availability is conveyed by the
+      // dimmed style below, not the text.
+      lt("Fetches and applies fixes from Ryuu Fixes"),
+      "fa-wrench",
+      // slsteammoon: a normal (theme-colored) button when available, NOT the
+      // green "success" highlight -- it's an action, not an applied state.
+      // Match the sibling buttons (Online Fix passes null). Stay dimmed/
+      // disabled when no crack/bypass exists (isSuccess === false).
+      crackStatus === 200 ? null : false,
+      function (e) {
+        e.preventDefault();
+        if (crackStatus !== 200 || !isGameInstalled) return;
+        const crackUrl = data.crackFix && data.crackFix.url;
+        if (!crackUrl) return;
+        // slsteammoon: a crack/bypass is a bundle of Windows files that only
+        // takes effect under Proton/Wine. A title that ships a native Linux
+        // build runs WITHOUT Proton by default, so the crack would do nothing.
+        // Allow it only when the user has forced a Proton compatibility tool;
+        // otherwise explain how. Windows-only titles always run under Proton.
+        function __cfLooksNativeLinux() {
+          try {
+            if (
+              document.querySelector(
+                ".platform_img.linux, .platform_img.steamos, .sysreq_tab[data-os='linux']",
+              )
+            )
+              return true;
+            var tabs = document.querySelectorAll(
+              ".sysreq_tabs .sysreq_tab, .game_area_sys_req_full",
+            );
+            for (var i = 0; i < tabs.length; i++) {
+              var txt = (tabs[i].textContent || "").toLowerCase();
+              if (txt.indexOf("linux") !== -1 || txt.indexOf("steamos") !== -1)
+                return true;
+            }
+          } catch (_) {}
+          return false;
+        }
+        function __cfBlockNative() {
+          ShowLuaToolsAlert(
+            "LuaTools",
+            lt(
+              "This game has a native Linux version, so Steam runs it without Proton. Cracks are Windows files that only work under Proton. To use one, open the game's Properties \u2192 Compatibility, turn on \u201CForce the use of a specific Steam Play compatibility tool\u201D, pick a Proton version, then try Crack/Bypass again.",
+            ),
+          );
+        }
+        function __cfProceed() {
+          applyFix(data.appid, crackUrl, lt("Crack/Bypass"), data.gameName, overlay);
+        }
+        if (__cfLooksNativeLinux()) {
+          Millennium.callServerMethod("luatools", "IsCompatToolForced", {
+            appid: data.appid,
+            contentScriptQuery: "",
+          })
+            .then(function (res) {
+              var p = typeof res === "string" ? JSON.parse(res) : res;
+              if (p && p.success && p.forced) {
+                __cfProceed();
+              } else {
+                __cfBlockNative();
+              }
+            })
+            .catch(function (err) {
+              backendLog("LuaTools: IsCompatToolForced error: " + err);
+              __cfBlockNative();
+            });
+        } else {
+          __cfProceed();
+        }
+      },
+    );
+    columnsContainer.appendChild(crackSection);
+
+    if (!isGameInstalled) {
+      crackSection.style.opacity = "0.5";
+      crackSection.style.cursor = "not-allowed";
+    }'''
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] CRACK/BYPASS ANCHOR FAILED: found %d matches (need 1). "
+        "The genericSection block moved upstream; update patch-frontend.sh.\n" % n)
+    sys.exit(3)
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Generic Fix button replaced with Crack/Bypass (ryuu)")
 PY
 
 # ---------------------------------------------------------------------------
@@ -929,4 +1028,135 @@ s = s.replace(helper_anchor, helper + helper_anchor, 1)
 with open(path, "w", encoding="utf-8") as f:
     f.write(s)
 print("[patch-frontend] WINEDLLOVERRIDES on-fix-apply wiring injected")
+PY
+
+# ---------------------------------------------------------------------------
+# Manage Game button -> "Unfix".
+#
+# The button's job on this fork is to undo any applied fix and restore the
+# game to its original state (drop the SpaceFix/FakeAppIds mapping + verify
+# game files to revert the file-based Crack/Online fixes). Rename the label
+# from "Manage Game" to "Unfix" and give it a coherent description.
+#
+# Anchored on the unfixSection createFixButton label/subtitle.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = (
+'    const unfixSection = createFixButton(\n'
+'      lt("Manage Game"),\n'
+'      lt("Un-Fix (verify game)"),\n'
+)
+replacement = (
+'    const unfixSection = createFixButton(\n'
+'      lt("Unfix"),\n'
+'      lt("Restore the game to its original state"),\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] UNFIX LABEL ANCHOR FAILED: found %d matches (need 1). "
+        "The unfixSection block moved upstream; update patch-frontend.sh.\n" % n)
+    sys.exit(3)
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Manage Game button renamed to Unfix")
+PY
+
+# ---------------------------------------------------------------------------
+# Remove the "Only possible thanks to ShayneVi" credit footer.
+#
+# Every fix option in this modal has been reworked by this fork, so the
+# upstream attribution no longer reflects the feature set. Drop the footer by
+# removing the line that inserts it into the DOM. The (now orphaned) creditMsg
+# element is created but never shown; the link-wiring setTimeout finds nothing
+# and no-ops. Keeping the creation avoids a ReferenceError on the append site.
+#
+# Anchored on the credit append.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = '    contentContainer.appendChild(creditMsg);\n'
+replacement = (
+'    // slsteammoon: credit footer removed (every fix option was reworked by\n'
+'    // this fork). creditMsg is created above but intentionally not appended.\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] CREDIT FOOTER ANCHOR FAILED: found %d matches (need 1). "
+        "The credit append moved upstream; update patch-frontend.sh.\n" % n)
+    sys.exit(3)
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] credit footer (ShayneVi) removed")
+PY
+
+# ---------------------------------------------------------------------------
+# Un-Fix: clear the WINEDLLOVERRIDES launch option.
+#
+# A Crack/Online fix sets a WINEDLLOVERRIDES launch option (so Proton loads the
+# fix DLLs). Un-Fix restores the game to its original state, so it must also
+# remove that option -- without it the leftover Windows DLLs are inert. The
+# backend UnFixGame computes the cleaned launch options (current minus the
+# override) and returns clearLaunchOptions + launchOptions; here we apply them
+# via the Lumen relay (SteamClient lives in SharedJSContext, not this store web
+# view). Empty string clears the field entirely.
+#
+# Anchored on the startUnfix UnFixGame success branch.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = (
+'            const payload = typeof res === "string" ? JSON.parse(res) : res;\n'
+'            if (payload && payload.success) {\n'
+'              showUnfixProgress(appid);\n'
+'            } else {\n'
+)
+replacement = (
+'            const payload = typeof res === "string" ? JSON.parse(res) : res;\n'
+'            if (payload && payload.success) {\n'
+'              // slsteammoon: clear the WINEDLLOVERRIDES launch option the fix\n'
+'              // set, restoring the original launch options (the leftover fix\n'
+'              // DLLs are inert without it). Relayed via Lumen -- SteamClient\n'
+'              // lives in SharedJSContext, not this store web view.\n'
+'              if (payload.clearLaunchOptions) {\n'
+'                try {\n'
+'                  Millennium.callServerMethod("luatools", "__lumenSetLaunchOptions", {\n'
+'                    appid: Number(appid),\n'
+'                    options: payload.launchOptions || "",\n'
+'                  });\n'
+'                } catch (_) {}\n'
+'              }\n'
+'              showUnfixProgress(appid);\n'
+'            } else {\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] UNFIX CLEAR-LAUNCHOPTS ANCHOR FAILED: found %d matches "
+        "(need 1). The startUnfix success branch moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % n)
+    sys.exit(3)
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Un-Fix clears WINEDLLOVERRIDES launch option")
 PY

@@ -114,6 +114,18 @@ cp "$OVERLAY/backend/protoncompat.lua" "$OUT/backend/protoncompat.lua"
 cp "$OVERLAY/backend/launchopts.lua" "$OUT/backend/launchopts.lua"
 # Steam client language detection (Use Steam Language).
 cp "$OVERLAY/backend/steamlang.lua" "$OUT/backend/steamlang.lua"
+# ryuu Crack/Bypass resolver + the bundled appid->fix index it reads.
+cp "$OVERLAY/backend/crackfix.lua" "$OUT/backend/crackfix.lua"
+cp "$OVERLAY/backend/ryuu_index.json" "$OUT/backend/ryuu_index.json"
+# Best-effort: refresh the SHIPPED index from the live catalogue at build time.
+# Writes are atomic (temp + mv on success only), so any download failure/timeout
+# leaves the committed bundled copy just placed above untouched. A build never
+# depends on network and never ships a broken/empty index.
+if CONNECT_TIMEOUT=10 MAX_TIME=45 bash "$OVERLAY/backend/scripts/ryuu_index.sh" "$OUT/backend/ryuu_index.json" >/dev/null 2>&1; then
+  echo "[build] ryuu_index.json: refreshed from live catalogue"
+else
+  echo "[build] ryuu_index.json: refresh failed/slow; shipping bundled copy"
+fi
 
 # Merge extra locale strings (new SpaceFix / Online Fix UI keys) into the
 # shipped locale files. The locale manager only surfaces keys present in
@@ -147,8 +159,11 @@ cp "$OVERLAY/backend/scripts/downloader.sh" "$OUT/backend/scripts/downloader.sh"
 # Smart source selector (speed-first, completeness-aware race) used by the
 # fast-download path.
 cp "$OVERLAY/backend/scripts/smart_download.sh" "$OUT/backend/scripts/smart_download.sh"
+# Crack/Bypass index transformer/refresher (build-time gen + runtime refresh).
+cp "$OVERLAY/backend/scripts/ryuu_index.sh" "$OUT/backend/scripts/ryuu_index.sh"
 chmod +x "$OUT/backend/scripts/restart_steam.sh" \
          "$OUT/backend/scripts/downloader.sh" \
+         "$OUT/backend/scripts/ryuu_index.sh" \
          "$OUT/backend/scripts/smart_download.sh" 2>/dev/null || true
 cp "$OVERLAY/backend/api.json" "$OUT/backend/api.json"
 
@@ -328,6 +343,23 @@ end' \
     if type(appid) == "table" then appid = appid.appid end
     local ok, res = pcall(fixes.check_for_fixes, tonumber(appid))
     if not ok then return json_err(res) end
+    -- slsteammoon: augment with the ryuu Crack/Bypass lookup (bundled index +
+    -- non-blocking background refresh). Never fails the call.
+    pcall(function()
+        local crackfix = require("crackfix")
+        local home = os.getenv("HOME") or ""
+        local plugin_dir = ""
+        local okp, paths = pcall(require, "paths")
+        if okp and paths and paths.get_plugin_dir then plugin_dir = paths.get_plugin_dir() end
+        res.crackFix = crackfix.check(tonumber(appid), {
+            cache_path = (home ~= "") and (home .. "/.local/share/Lumen/ryuu_index.json") or nil,
+            bundled_path = (plugin_dir ~= "") and (plugin_dir .. "/backend/ryuu_index.json") or nil,
+            refresh_script = (plugin_dir ~= "") and (plugin_dir .. "/backend/scripts/ryuu_index.sh") or nil,
+        })
+    end)
+    if type(res) == "table" and type(res.crackFix) ~= "table" then
+        res.crackFix = { status = 404, available = false }
+    end
     return json_ok(res)
 end
 
@@ -597,22 +629,41 @@ end' \
                 pcall(fs.remove, fs.join(path, name))
             end
         end
-        return { success = true }
+        -- slsteammoon: clear the WINEDLLOVERRIDES launch option a Crack/Online
+        -- fix added, restoring the original launch options (the leftover fix
+        -- DLLs are inert without it). The actual write happens in the frontend
+        -- via the Lumen relay (SteamClient lives in SharedJSContext), so here
+        -- we just compute and return the cleaned value.
+        local clearLaunchOptions, launchOptions = false, nil
+        do
+            local ok_lo, lo = pcall(require, "launchopts")
+            local ok_fo, fo = pcall(require, "fix_overlays")
+            if ok_lo and lo and lo.read and ok_fo and fo and fo.remove_overrides then
+                local current = lo.read(appid) or ""
+                if current:find("WINEDLLOVERRIDES=") then
+                    launchOptions = fo.remove_overrides(current)
+                    clearLaunchOptions = true
+                end
+            end
+        end
+        return { success = true, clearLaunchOptions = clearLaunchOptions, launchOptions = launchOptions }
     end)
     if not ok then return json_err(res) end
     return json_ok(res)
 end'
 
-# 3j. fixes.lua — lift the 25s hard download cap for the fix-apply path.
-#     downloader.sh defaults MAX_TIME=25 (right for small manifest zips, the
-#     manual-add path it was written for). Game fixes are large (e.g. a Denuvo
-#     bypass is hundreds of MB), so 25s aborts the download as "curl failed"
-#     before it can extract. Pass MAX_TIME=0 (no total-time cap) for fix
-#     downloads; the speed floor (--speed-limit/--speed-time in downloader.sh)
-#     still aborts a genuinely stalled transfer. Linux branch only.
+# 3j. fixes.lua — lift the 25s hard download cap for the fix-apply path AND
+#     enable nested-archive extraction. downloader.sh defaults MAX_TIME=25
+#     (right for small manifest zips, the manual-add path it was written for).
+#     Game fixes are large (hundreds of MB) so 25s aborts as "curl failed";
+#     pass MAX_TIME=0 (no total-time cap; the speed floor still aborts a
+#     stalled transfer). Some fixes (e.g. ryuu Crack/Bypass) ship the payload
+#     as a nested .rar / multi-part .rar INSIDE the zip, so set EXTRACT_NESTED=1
+#     to unpack those one level and drop the residual archives. Manifest
+#     downloads keep the default (no nested pass). Linux branch only.
 patch_replace "$OUT/backend/fixes.lua" \
 'nohup bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &' \
-'nohup env MAX_TIME=0 bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &'
+'nohup env MAX_TIME=0 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &'
 
 # 3k. main.lua — GetFixLaunchOptions RPC. After an online/generic fix is
 #     applied, the frontend reads the app's live launch options + compat tool
@@ -822,7 +873,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts test-crackfix; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
