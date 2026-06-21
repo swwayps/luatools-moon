@@ -979,6 +979,45 @@ any_release_asset_url() {
 		2>/dev/null | head -n1
 }
 
+# Echo a compact JSON object {tag, asset_at, size} describing the release asset
+# matching glob $2, for the Lumen About tab's update check. The fingerprint is
+# the asset's UPLOAD time + size — so re-uploading the asset under the SAME tag
+# (the common workflow: edit the v2.6 asset, no new tag) is still detected as an
+# update. $3 selects "latest" (default) or "any" (scan releases, newest first).
+# Always echoes valid JSON ("{}" on failure); best-effort, never fails install.
+release_asset_info() {
+	local repo="$1" glob="$2" mode="${3:-latest}" api meta
+	if [ "$mode" = "any" ]; then
+		api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50"
+		meta="$(api_get "$api")" || { printf '{}'; return 0; }
+		printf '%s' "$meta" | jq -c --arg glob "$glob" \
+			'[ .[] as $r | $r.assets[]? | select(.name | test($glob))
+			   | {tag:$r.tag_name, asset_at:.created_at, size:.size} ][0] // {}' \
+			2>/dev/null || printf '{}'
+	else
+		api="https://codeberg.org/api/v1/repos/${repo}/releases/latest"
+		meta="$(api_get "$api")" || { printf '{}'; return 0; }
+		printf '%s' "$meta" | jq -c --arg glob "$glob" \
+			'.tag_name as $t | [ .assets[]? | select(.name | test($glob))
+			   | {tag:$t, asset_at:.created_at, size:.size} ][0] // {}' \
+			2>/dev/null || printf '{}'
+	fi
+}
+
+# Record the installed release fingerprints so the Lumen About tab can show
+# installed-vs-latest. The plugin's bundled version string is unreliable, and a
+# tag alone misses asset-only re-uploads, so we stamp {tag, asset_at, size} per
+# component. Best-effort: never fails the install.
+write_versions_stamp() {
+	local f="$LUMEN_DIR/versions.json"
+	mkdir -p "$LUMEN_DIR" 2>/dev/null || true
+	jq -n \
+		--argjson sls "${SLS_INFO:-{\}}" \
+		--argjson lumen "${LUMEN_INFO:-{\}}" \
+		--argjson plugin "${PLUGIN_INFO:-{\}}" \
+		'{slsteam_moon:$sls, lumen:$lumen, plugin:$plugin}' >"$f" 2>/dev/null || true
+}
+
 # Shared message for when the release host (Codeberg) can't be reached — slow,
 # flaky, or temporarily down. Distinct from "asset not found" so the user knows
 # it's a connectivity issue to retry, not a broken install.
@@ -1019,6 +1058,7 @@ install_slsteam_moon() {
 		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
 	                          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
+	SLS_INFO="$(release_asset_info "$SLS_REPO" "$SLS_ASSET_GLOB" any)"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/slsteam-moon.zip"
@@ -1066,6 +1106,7 @@ install_lumen() {
 		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find the Lumen release asset." \
 	                          "Não foi possível encontrar o asset da release do Lumen.")"
+	LUMEN_INFO="$(release_asset_info "$LUMEN_REPO" "^${LUMEN_ASSET}$")"
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$LUMEN_ASSET"
 	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
@@ -1093,6 +1134,7 @@ install_plugin() {
 		|| fail "$(forge_unreachable_msg)"
 	[ -n "$url" ] || fail "$(L "Could not find the plugin release asset." \
 	                          "Não foi possível encontrar o asset da release do plugin.")"
+	PLUGIN_INFO="$(release_asset_info "$PLUGIN_REPO" "^${PLUGIN_ASSET}$")"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$PLUGIN_ASSET"
@@ -1612,6 +1654,10 @@ main() {
 
 	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
 	install_plugin
+
+	# Record the installed release tags for the Lumen About tab (installed-vs-
+	# latest). Best-effort; never fails the install.
+	write_versions_stamp
 
 	# Game Mode is opt-in and gamescope-only. It prints its own section header
 	# (and prompts) ONLY when a gamescope session exists, so normal desktop
