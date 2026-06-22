@@ -99,6 +99,23 @@ do
   check("C6 single %command%", select(2, r:gsub("%%command%%", "")) == 1)
 end
 
+-- C6b: a WINEDLLOVERRIDES is an ENV assignment, so it must sit at the very
+-- FRONT -- before any wrapper like mangohud/gamemoderun. Steam only treats
+-- leading VAR=VALUE tokens as environment; one placed after a wrapper is
+-- passed as an argument to that wrapper and the override silently never
+-- applies. So the override must precede the wrapper, not just %command%.
+do
+  local r = fo.merge_launch_options("mangohud %command%", OV)
+  check("C6b override at the very front",
+        r:sub(1, #OV) == OV)
+  check("C6b wrapper after override", r:find("mangohud") > r:find("WINEDLLOVERRIDES"))
+  check("C6b single %command%", select(2, r:gsub("%%command%%", "")) == 1)
+  -- also ahead of a user's own earlier env assignment? both still precede the
+  -- wrapper, which is what matters; our override just needs to be at front.
+  local r2 = fo.merge_launch_options("gamemoderun %command%", OV)
+  check("C6b2 override before gamemoderun", r2:find("gamemoderun") > r2:find("WINEDLLOVERRIDES"))
+end
+
 -- C7: existing options WITHOUT %command% -> still inject, append %command%.
 do
   local r = fo.merge_launch_options("mangohud", OV)
@@ -262,10 +279,11 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- parse_dlllist / build_overrides_from_list / dlllist.txt preference.
--- A fix's own dlllist.txt is authoritative: every named DLL is forced, with
--- system-proxy names chained native+builtin and the rest native only. This
--- covers cracks using proxies outside the recognised-DLL allowlist.
+-- parse_dlllist / build_overrides_from_list / dlllist.txt handling.
+-- A fix's dlllist.txt is honoured (every named DLL forced, system-proxy names
+-- chained native+builtin, the rest native only) AND unioned with the
+-- recognised fix DLLs found in the folder, so a short/incomplete dlllist never
+-- suppresses a DLL the game actually needs.
 -- ---------------------------------------------------------------------------
 
 -- D1: parse tolerates CRLF, spaces, comments, path prefixes, non-dll lines.
@@ -327,6 +345,174 @@ do
   local reader = function(_) return "" end  -- empty dlllist
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
   check("D5 falls back to allowlist scan", s and s:find("steam_api64=n") ~= nil)
+end
+
+-- D6: a SHORT/incomplete dlllist.txt must NOT suppress the folder DLLs. Many
+-- OnlineFix payloads ship a dlllist.txt that names only OnlineFix64.dll (the
+-- list the loader reads), yet the folder also carries SteamOverlay64/winmm/
+-- dnet/steam_api64/winhttp -- all of which need a Wine override or the game
+-- won't actually connect. The result must UNION the dlllist with every
+-- recognised fix DLL present in the folder. (Meccha Chameleon regression.)
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "OnlineFix64.dll", path = "/g/OnlineFix64.dll", is_directory = false },
+        { name = "SteamOverlay64.dll", path = "/g/SteamOverlay64.dll", is_directory = false },
+        { name = "winmm.dll", path = "/g/winmm.dll", is_directory = false },
+        { name = "dnet.dll", path = "/g/dnet.dll", is_directory = false },
+        { name = "steam_api64.dll", path = "/g/steam_api64.dll", is_directory = false },
+        { name = "winhttp.dll", path = "/g/winhttp.dll", is_directory = false },
+        { name = "OnlineFix.ini", path = "/g/OnlineFix.ini", is_directory = false },
+        { name = "dlllist.txt", path = "/g/dlllist.txt", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p) return p == "/g/dlllist.txt" and "OnlineFix64.dll\n" or nil end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("D6 keeps OnlineFix64", s and s:find("OnlineFix64=n") ~= nil)
+  check("D6 adds SteamOverlay64 from folder", s and s:find("SteamOverlay64=n") ~= nil)
+  check("D6 adds winmm (n,b) from folder", s and s:find("winmm=n,b") ~= nil)
+  check("D6 adds dnet from folder", s and s:find("dnet=n") ~= nil)
+  check("D6 adds steam_api64 from folder", s and s:find("steam_api64=n") ~= nil)
+  check("D6 adds winhttp (n,b) from folder", s and s:find("winhttp=n,b") ~= nil)
+  check("D6 single OnlineFix64 (no dupe)",
+        s and select(2, s:gsub("OnlineFix64=", "")) == 1)
+  check("D6 ignores OnlineFix.ini", s and s:find("OnlineFix%.ini") == nil)
+end
+
+-- D7: a dlllist.txt naming an uncommon proxy outside the allowlist is STILL
+-- honoured on top of the folder scan (union, not replacement).
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "OnlineFix64.dll", path = "/g/OnlineFix64.dll", is_directory = false },
+        { name = "dsound.dll", path = "/g/dsound.dll", is_directory = false },
+        { name = "dlllist.txt", path = "/g/dlllist.txt", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p) return p == "/g/dlllist.txt" and "dsound.dll\n" or nil end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("D7 dlllist proxy dsound (n,b)", s and s:find("dsound=n,b") ~= nil)
+  check("D7 folder OnlineFix64 still present", s and s:find("OnlineFix64=n") ~= nil)
+end
+
+-- D8: the REAL Meccha Chameleon "Steam Generic" fix layout. DLLs live nested
+-- under Binaries/Win64 and Engine/Binaries/..., and dlllist.txt names ONLY
+-- OnlineFix64.dll. The proxy LOADER (winmm.dll) MUST end up overridden -- it is
+-- what makes Wine run the fix chain at all -- so the previous dlllist-verbatim
+-- behaviour (OnlineFix64=n only) left the game non-working.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "winmm.dll", path = "/g/Chameleon/Binaries/Win64/winmm.dll", is_directory = false },
+        { name = "OnlineFix64.dll", path = "/g/Chameleon/Binaries/Win64/OnlineFix64.dll", is_directory = false },
+        { name = "OnlineFix.ini", path = "/g/Chameleon/Binaries/Win64/OnlineFix.ini", is_directory = false },
+        { name = "OnlineFix.url", path = "/g/Chameleon/Binaries/Win64/OnlineFix.url", is_directory = false },
+        { name = "dlllist.txt", path = "/g/Chameleon/Binaries/Win64/dlllist.txt", is_directory = false },
+        { name = "EOSSDK-Win64-Shipping.dll", path = "/g/Chameleon/Binaries/Win64/RedpointEOS/EOSSDK-Win64-Shipping.dll", is_directory = false },
+        { name = "EOSSDK-Win64-Shipping.of", path = "/g/Chameleon/Binaries/Win64/RedpointEOS/EOSSDK-Win64-Shipping.of", is_directory = false },
+        { name = "steam_api64.dll", path = "/g/Engine/Binaries/ThirdParty/Steamworks/Steamv157/Win64/steam_api64.dll", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p)
+    return p == "/g/Chameleon/Binaries/Win64/dlllist.txt" and "OnlineFix64.dll" or nil
+  end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("D8 OnlineFix64 native", s and s:find("OnlineFix64=n") ~= nil)
+  check("D8 winmm proxy loader (n,b) -- the fix", s and s:find("winmm=n,b") ~= nil)
+  check("D8 steam_api64 native", s and s:find("steam_api64=n") ~= nil)
+  check("D8 no .of treated as dll", s and s:find("Shipping%.of") == nil)
+end
+
+-- D9: a crack whose LOADER is a system proxy Wine has a builtin for (dsound)
+-- with NO dlllist.txt must still be caught by the folder scan -- otherwise Wine
+-- loads its builtin and the crack never runs.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "dsound.dll", path = "/g/dsound.dll", is_directory = false },
+        { name = "OnlineFix64.dll", path = "/g/OnlineFix64.dll", is_directory = false },
+      }
+    end,
+  }
+  local s = fo.overrides_for_install_dir(ffs, "/g")  -- no reader, no dlllist
+  check("D9 dsound proxy loader (n,b)", s and s:find("dsound=n,b") ~= nil)
+  check("D9 OnlineFix64 native", s and s:find("OnlineFix64=n") ~= nil)
+end
+
+-- ---------------------------------------------------------------------------
+-- build_overrides_all / fix manifest (.slssteam_fix_dlls).
+-- The manifest, written by downloader.sh at apply time, lists EXACTLY the DLLs
+-- the fix/crack archive shipped (not the game's own). It is authoritative: it
+-- is the only way to tell a crack DLL (arbitrary name -- voices38, Goldberg's
+-- steam_api64, any cracker) from the hundreds of game DLLs they get extracted
+-- next to. Every listed DLL is forced =n,b (matches the proven community
+-- launch line), so the override is crack-agnostic instead of name-allowlisted.
+-- ---------------------------------------------------------------------------
+
+-- M1: build_overrides_all forces n,b for every named DLL, dedups case-insensitively.
+do
+  local s = fo.build_overrides_all({ "steam_api64.dll", "voices38.dll", "Voices38.dll", "data.bin" })
+  check("M1 steam_api64 n,b", s and s:find("steam_api64=n,b") ~= nil)
+  check("M1 voices38 n,b", s and s:find("voices38=n,b") ~= nil)
+  check("M1 dedup voices38", s and select(2, s:gsub("[Vv]oices38=", "")) == 1)
+  check("M1 ignores non-dll", s and s:find("data") == nil)
+  check("M1 quoted", s and s:sub(1, #'WINEDLLOVERRIDES="') == 'WINEDLLOVERRIDES="' and s:sub(-1) == '"')
+end
+check("M1 empty -> nil", fo.build_overrides_all({}) == nil)
+check("M1 no dll -> nil", fo.build_overrides_all({ "readme.txt" }) == nil)
+
+-- M2: overrides_for_install_dir uses the manifest when present, forcing EXACTLY
+-- the crack's DLLs (voices38 + steam_api64) and NOT the game's own DLLs
+-- (d3d11.dll, the game exe) that sit in the same tree.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "SonicFrontiers.exe", path = "/g/SonicFrontiers.exe", is_directory = false },
+        { name = "steam_api64.dll", path = "/g/steam_api64.dll", is_directory = false },
+        { name = "voices38.dll", path = "/g/voices38.dll", is_directory = false },
+        { name = "d3d11.dll", path = "/g/d3d11.dll", is_directory = false },        -- game's own
+        { name = ".slssteam_fix_dlls", path = "/g/.slssteam_fix_dlls", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p)
+    return p == "/g/.slssteam_fix_dlls" and "steam_api64.dll\nvoices38.dll\n" or nil
+  end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("M2 steam_api64 from manifest", s and s:find("steam_api64=n,b") ~= nil)
+  check("M2 voices38 from manifest", s and s:find("voices38=n,b") ~= nil)
+  check("M2 does NOT touch game d3d11", s and s:find("d3d11") == nil)
+end
+
+-- M3: manifest is authoritative even over a dlllist.txt (manifest = exact ship
+-- list; dlllist could be a short loader-list). Manifest wins.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "OnlineFix64.dll", path = "/g/OnlineFix64.dll", is_directory = false },
+        { name = "winmm.dll", path = "/g/winmm.dll", is_directory = false },
+        { name = "dlllist.txt", path = "/g/dlllist.txt", is_directory = false },
+        { name = ".slssteam_fix_dlls", path = "/g/.slssteam_fix_dlls", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p)
+    if p == "/g/.slssteam_fix_dlls" then return "OnlineFix64.dll\nwinmm.dll\n" end
+    if p == "/g/dlllist.txt" then return "OnlineFix64.dll" end
+    return nil
+  end
+  local s = fo.overrides_for_install_dir(ffs, "/g", reader)
+  check("M3 manifest covers winmm", s and s:find("winmm=n,b") ~= nil)
+  check("M3 manifest covers OnlineFix64", s and s:find("OnlineFix64=n,b") ~= nil)
 end
 
 if fails == 0 then

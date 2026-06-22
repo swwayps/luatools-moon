@@ -147,6 +147,35 @@ function fix_overlays.build_overrides_from_list(names)
   return 'WINEDLLOVERRIDES="' .. table.concat(parts, ";") .. '"'
 end
 
+-- build_overrides_all(names): force EVERY named DLL to load native-then-builtin
+-- (=n,b). Used for the fix manifest (.slssteam_fix_dlls), which lists exactly
+-- the DLLs the fix/crack archive shipped. Unlike the allowlist/proxy scans this
+-- makes NO assumption about the DLL's role -- a crack loader has an arbitrary
+-- name (voices38, ...) and emulator DLLs (steam_api64) need native under Proton,
+-- so the safe, proven choice is =n,b for all of them. =n,b is harmless for a
+-- DLL with no Wine builtin (it just loads native). Case-insensitive dedup,
+-- first-seen casing preserved. Returns nil if no .dll entries.
+function fix_overlays.build_overrides_all(names)
+  if type(names) ~= "table" then return nil end
+  local seen, order = {}, {}
+  for _, name in ipairs(names) do
+    local stem = tostring(name):gsub("%.[Dd][Ll][Ll]$", "")
+    if stem ~= tostring(name) then  -- had a .dll suffix
+      local key = stem:lower()
+      if not seen[key] then
+        seen[key] = true
+        order[#order + 1] = stem
+      end
+    end
+  end
+  if #order == 0 then return nil end
+  local parts = {}
+  for _, stem in ipairs(order) do
+    parts[#parts + 1] = stem .. "=n,b"
+  end
+  return 'WINEDLLOVERRIDES="' .. table.concat(parts, ";") .. '"'
+end
+
 -- Strip any existing WINEDLLOVERRIDES="..." (or unquoted) assignment from
 -- a launch-options string, returning the remainder trimmed. Used so a
 -- re-apply replaces rather than stacks.
@@ -163,7 +192,10 @@ end
 -- Merge `overrides` (a full WINEDLLOVERRIDES="..." fragment) into the
 -- user's `current` launch options. Idempotent and order-preserving:
 --   * removes any prior WINEDLLOVERRIDES assignment first (no stacking),
---   * places the override BEFORE %command% (env precedes the command),
+--   * places the override at the FRONT -- it is an environment assignment, so
+--     it must precede any wrapper (mangohud/gamemoderun/...): Steam only reads
+--     leading VAR=VALUE tokens as env; one after a wrapper is passed as an
+--     argument and never takes effect,
 --   * keeps every other user option and a single %command%.
 function fix_overlays.merge_launch_options(current, overrides)
   current = current or ""
@@ -185,14 +217,11 @@ function fix_overlays.merge_launch_options(current, overrides)
     return overrides .. " %command%"
   end
 
+  -- Prepend the override so it sits before any wrapper. If the user options
+  -- have no %command%, append one so the game still launches.
   if rest:find("%%command%%") then
-    -- insert override immediately before the first %command%.
-    local new = rest:gsub("%%command%%", overrides .. " %%command%%", 1)
-    return (new:gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", ""))
+    return (overrides .. " " .. rest):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
   end
-
-  -- no %command% present: override first, then the user options, then a
-  -- trailing %command% so the game still launches.
   return overrides .. " " .. rest .. " %command%"
 end
 
@@ -238,10 +267,13 @@ end
 -- .is_directory. `read_file` is injectable (defaults to io.open) and only
 -- used to read a fix's dlllist.txt. Any failure degrades to nil (no override).
 --
--- A fix's own dlllist.txt (when present) is AUTHORITATIVE: it names exactly
--- which DLLs to force native, so we honour it verbatim (covers cracks using
--- uncommon system proxies). Otherwise we fall back to the recognised-DLL
--- allowlist scan.
+-- A fix's own dlllist.txt (when present) is honoured, but it is NOT treated as
+-- the complete set: many OnlineFix payloads ship a dlllist.txt that names only
+-- OnlineFix64.dll (the list the loader reads) while the folder also carries
+-- winmm/SteamOverlay64/dnet/steam_api64/winhttp, all of which still need a Wine
+-- override. So we UNION the dlllist entries with every recognised fix DLL found
+-- in the folder. dlllist covers cracks using uncommon system proxies; the
+-- folder scan covers the standard fix DLLs even when the dlllist is incomplete.
 function fix_overlays.overrides_for_install_dir(fs_impl, install_path, read_file)
   if type(fs_impl) ~= "table" or type(fs_impl.list_recursive) ~= "function" then
     return nil
@@ -259,23 +291,65 @@ function fix_overlays.overrides_for_install_dir(fs_impl, install_path, read_file
 
   local names = {}
   local dlllist_path
+  local manifest_path
   for _, entry in ipairs(entries) do
     if type(entry) == "table" and not entry.is_directory and entry.name then
       names[#names + 1] = entry.name
-      if not dlllist_path and entry.path
-        and tostring(entry.name):lower() == "dlllist.txt" then
-        dlllist_path = entry.path
+      local low = tostring(entry.name):lower()
+      if entry.path then
+        if not manifest_path and low == ".slssteam_fix_dlls" then
+          manifest_path = entry.path
+        elseif not dlllist_path and low == "dlllist.txt" then
+          dlllist_path = entry.path
+        end
       end
     end
   end
 
-  if dlllist_path then
-    local listed = fix_overlays.parse_dlllist(read_file(dlllist_path))
-    local ov = fix_overlays.build_overrides_from_list(listed)
+  -- The fix manifest (written by downloader.sh at apply time) is authoritative:
+  -- it lists EXACTLY the DLLs the fix/crack archive shipped, so it is the only
+  -- reliable way to override an arbitrary-named crack loader (voices38, ...) or
+  -- an emulator's steam_api64 without touching the game's own DLLs. Every entry
+  -- is forced =n,b.
+  if manifest_path then
+    local listed = fix_overlays.parse_dlllist(read_file(manifest_path))
+    local ov = fix_overlays.build_overrides_all(listed)
     if ov then return ov end
   end
 
-  return fix_overlays.build_overrides(names)
+  -- Recognise the fix DLLs present in the folder: a known fix DLL
+  -- (OnlineFix64/steam_api64/...) OR any system DLL Wine ships a builtin for
+  -- (winmm/dsound/dinput8/version/...), since a crack's proxy LOADER is always
+  -- one of the latter and MUST be forced native or Wine runs its builtin and
+  -- the fix never loads. Known names get their canonical casing; bare system
+  -- proxies keep the on-disk casing (Wine keys are case-insensitive anyway).
+  local folder_recognized = {}
+  for _, n in ipairs(names) do
+    local stem = tostring(n):lower():match("^(.+)%.dll$")
+    if stem then
+      if KNOWN_FIX_DLLS[stem] then
+        folder_recognized[#folder_recognized + 1] = KNOWN_FIX_DLLS[stem] .. ".dll"
+      elseif SYSTEM_PROXY[stem] then
+        folder_recognized[#folder_recognized + 1] = tostring(n)
+      end
+    end
+  end
+
+  -- Union the fix author's dlllist.txt (covers proxies outside the recognised
+  -- sets) with the folder-recognised DLLs (covers the standard payload even
+  -- when the dlllist is short/incomplete -- e.g. an OnlineFix dlllist that
+  -- names only OnlineFix64.dll while winmm.dll is the actual loader).
+  local union = {}
+  if dlllist_path then
+    for _, n in ipairs(fix_overlays.parse_dlllist(read_file(dlllist_path))) do
+      union[#union + 1] = n
+    end
+  end
+  for _, n in ipairs(folder_recognized) do
+    union[#union + 1] = n
+  end
+
+  return fix_overlays.build_overrides_from_list(union)
 end
 
 return fix_overlays

@@ -102,6 +102,26 @@ if [ -n "$EXTRACT_DIR" ]; then
   # game folder. Requires 7zz (handles .rar v5 + multi-volume from the first
   # volume). Best-effort: a nested failure still leaves any loose crack files.
   if [ "${EXTRACT_NESTED:-0}" = "1" ] && [ -x "$SEVENZ" ]; then
+    # Record the DLLs the fix/crack archive shipped into a manifest in the game
+    # folder (.slssteam_fix_dlls). This is the ONLY moment we can tell a crack's
+    # DLLs (arbitrary names -- voices38, an emulator's steam_api64, ...) apart
+    # from the game's own DLLs, since they get extracted side by side. The
+    # launch-option builder (fix_overlays.lua) reads this and forces native
+    # (=n,b) on exactly these so Proton loads the fix DLLs instead of its
+    # builtins. Listing the archive(s) (not a dir diff) is reliable even when a
+    # crack DLL overwrites a same-named game DLL. Best-effort.
+    MANIFEST="$EXTRACT_DIR/.slssteam_fix_dlls"
+    DLL_ACC="$(mktemp 2>/dev/null)" || DLL_ACC=""
+    list_fix_dlls() {  # $1 = archive -> append shipped .dll basenames to $DLL_ACC
+      [ -n "$DLL_ACC" ] || return 0
+      "$SEVENZ" l -ba -slt "$1" 2>/dev/null \
+        | sed -n 's/^Path = //p' \
+        | grep -iE '\.dll$' \
+        | sed 's#.*[/\\]##' >> "$DLL_ACC"
+    }
+    # Primary archive (covers non-nested cracks whose DLLs sit at top level).
+    list_fix_dlls "$DEST_PATH"
+
     # Is $1 a SECONDARY volume we should not invoke 7zz on directly?
     #   name.partN.rar (N>1), name.rNN, name.zNN  -> secondary
     is_secondary() {
@@ -121,6 +141,7 @@ if [ -n "$EXTRACT_DIR" ]; then
     while IFS= read -r -d '' arc; do
       found_archive=1
       if ! is_secondary "$arc"; then
+        list_fix_dlls "$arc"   # capture nested-archive DLLs BEFORE deletion
         "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$arc" >/dev/null 2>&1 || true
       fi
     done < <(find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
@@ -132,6 +153,12 @@ if [ -n "$EXTRACT_DIR" ]; then
         -o -iname '*.7z' -o -iname '*.r[0-9][0-9]' -o -iname '*.z[0-9][0-9]' \) \
         -delete 2>/dev/null || true
     fi
+
+    # Persist the manifest (case-insensitive unique) when any fix DLL was seen.
+    if [ -n "$DLL_ACC" ] && [ -s "$DLL_ACC" ]; then
+      sort -u -f "$DLL_ACC" > "$MANIFEST" 2>/dev/null || true
+    fi
+    [ -n "$DLL_ACC" ] && rm -f "$DLL_ACC"
   fi
 
   write_state "extracted" "$TOTAL" "$TOTAL"
