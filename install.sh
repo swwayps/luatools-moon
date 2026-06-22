@@ -279,9 +279,35 @@ gamescope_session_base() {
 # True when this host can launch Steam in a gamescope Game Mode session.
 has_gamescope_session() {
 	[ -n "$(gamescope_session_base)" ] && return 0
+	has_steamos_gamescope && return 0
 	command -v gamescope-session-plus >/dev/null 2>&1 && return 0
 	command -v gamescope-session >/dev/null 2>&1 && return 0
 	return 1
+}
+
+# SteamOS launches Game Mode Steam from a systemd *user* unit
+# (steam-launcher.service -> /usr/lib/steamos/steam-launcher -> `exec steam`),
+# NOT from a gamescope-session/sessions.d/steam override.  Detect + hook that
+# separately.  Dirs/launcher path overridable so the logic is unit-testable
+# against synthetic fixtures.
+STEAMOS_SESSION_UNIT_DIRS="${STEAMOS_SESSION_UNIT_DIRS:-/usr/lib/systemd/user /etc/systemd/user /run/systemd/user}"
+STEAMOS_STEAM_LAUNCHER="${STEAMOS_STEAM_LAUNCHER:-/usr/lib/steamos/steam-launcher}"
+
+# Echo the path to the SteamOS Game Mode steam unit, or "" when none is present.
+steamos_steam_launcher_unit() {
+	local d
+	for d in $STEAMOS_SESSION_UNIT_DIRS; do
+		if [ -f "$d/steam-launcher.service" ]; then
+			printf '%s' "$d/steam-launcher.service"
+			return 0
+		fi
+	done
+	printf ''
+}
+
+# True when this host uses the SteamOS systemd Game Mode launcher.
+has_steamos_gamescope() {
+	[ -n "$(steamos_steam_launcher_unit)" ]
 }
 
 # Privilege-escalation prefix for system package operations.
@@ -1220,19 +1246,30 @@ export STEAMCMD="\$HOME/.local/share/SLSsteam/path/steam\${_lt_args:+ \$_lt_args
 EOF
 }
 
+# Echo the body of the SteamOS steam-launcher.service drop-in. SteamOS Game Mode
+# runs steam-launcher.service -> $STEAMOS_STEAM_LAUNCHER -> `exec steam ...`
+# (steam resolved via PATH), so we PREPEND the slsteam-moon wrapper dir to PATH
+# and re-exec the distro launcher unchanged: the wrapper resolves the real Steam
+# (skipping itself), injects LD_AUDIT + Lumen, and the launcher keeps its own
+# flags/devkit branch + ExecStartPre. The empty ExecStart= first resets the
+# unit's command list (required before adding our replacement). %h is left for
+# systemd to expand to the user's home; $$ escapes a literal $ so the runtime
+# PATH is preserved by the shell, not by systemd. Kept as its own function so it
+# is unit-testable (scripts/test-gamemode-steamos.sh).
+steamos_gamemode_dropin_content() {
+	cat <<EOF
+[Service]
+$GAMEMODE_HOOK_SENTINEL
+ExecStart=
+ExecStart=/bin/sh -c 'PATH="%h/.local/share/SLSsteam/path:\$\$PATH" exec $STEAMOS_STEAM_LAUNCHER'
+EOF
+}
+
 install_gamemode_hook() {
 	# Hard gate: do nothing unless this host actually has a gamescope session.
 	has_gamescope_session || return 0
 
 	print_section "$(L "Game Mode (gamescope) support" "Suporte ao Game Mode (gamescope)")"
-
-	local base; base="$(gamescope_session_base)"
-	# has_gamescope_session may have matched via the on-PATH binary only;
-	# fall back to the canonical current name for the config dir.
-	[ -n "$base" ] || base="gamescope-session-plus"
-
-	local dir="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d"
-	local hook="$dir/steam"
 
 	log_info "$(L "Game Mode (gamescope) session detected on this system." \
 	             "Sessão Game Mode (gamescope) detectada neste sistema.")"
@@ -1246,6 +1283,28 @@ install_gamemode_hook() {
 		             "Pulando a configuração do Game Mode. Rode o instalador de novo para ativar depois.")"
 		return 0
 	fi
+
+	# Two launch mechanisms:
+	#   - ChimeraOS/Bazzite: gamescope-session(-plus)/sessions.d/steam override.
+	#   - SteamOS: steam-launcher.service (systemd user) -> `exec steam` via PATH.
+	# Prefer the sessions.d layout when present; else use the SteamOS drop-in.
+	local base; base="$(gamescope_session_base)"
+	if [ -z "$base" ] && has_steamos_gamescope; then
+		install_steamos_gamemode_dropin
+		return 0
+	fi
+	# has_gamescope_session may have matched via the on-PATH binary only;
+	# fall back to the canonical current name for the config dir.
+	[ -n "$base" ] || base="gamescope-session-plus"
+	install_sessionsd_gamemode_hook "$base"
+}
+
+# ChimeraOS/Bazzite: drop a user sessions.d/steam override that re-points the
+# Game Mode launcher (CLIENTCMD/STEAMCMD) at the slsteam-moon wrapper.
+install_sessionsd_gamemode_hook() {
+	local base="$1"
+	local dir="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d"
+	local hook="$dir/steam"
 
 	mkdir -p "$dir" || {
 		log_warn "$(L "Could not create $dir; skipping Game Mode setup." \
@@ -1265,6 +1324,27 @@ install_gamemode_hook() {
 
 	log_success "$(L "Game Mode enabled (hook: $hook)" \
 	             "Game Mode ativado (hook: $hook)")"
+}
+
+# SteamOS: drop a systemd user drop-in for steam-launcher.service that prepends
+# the slsteam-moon wrapper dir to PATH (see steamos_gamemode_dropin_content).
+install_steamos_gamemode_dropin() {
+	local unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/steam-launcher.service.d"
+	local conf="$unit_dir/slsteammoon.conf"
+
+	mkdir -p "$unit_dir" || {
+		log_warn "$(L "Could not create $unit_dir; skipping Game Mode setup." \
+		             "Não foi possível criar $unit_dir; pulando a configuração do Game Mode.")"
+		return 0
+	}
+
+	steamos_gamemode_dropin_content > "$conf"
+
+	# Pick up the drop-in without a full re-login when a user manager is live.
+	systemctl --user daemon-reload >/dev/null 2>&1 || true
+
+	log_success "$(L "Game Mode enabled (SteamOS drop-in: $conf)" \
+	             "Game Mode ativado (drop-in SteamOS: $conf)")"
 }
 
 # ============================================================================

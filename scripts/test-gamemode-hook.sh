@@ -34,6 +34,11 @@ export SLSPLUGIN_LIB_ONLY=1
 # shellcheck disable=SC1090
 source "$INSTALL_SH" >/dev/null 2>&1
 
+# Neutralise the SteamOS Game Mode detector so this (ChimeraOS/Bazzite) test is
+# hermetic even when run on a real SteamOS host (which ships steam-launcher.
+# service under the default unit dirs). The SteamOS path has its own test.
+export STEAMOS_SESSION_UNIT_DIRS="$TESTDIR/no-steamos-units"
+
 # --- gamescope_session_base / has_gamescope_session (synthetic fixtures) ----
 
 # No gamescope dirs at all -> not a gamescope host.

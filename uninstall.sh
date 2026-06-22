@@ -488,6 +488,19 @@ remove_gamemode_hook() {
 		fi
 	done
 	[ "$removed" = 1 ] && log_success "$(L "Game Mode hook removed" "Hook do Game Mode removido")"
+
+	# SteamOS systemd drop-in (steam-launcher.service.d/slsteammoon.conf).
+	# Sentinel-guarded so we never touch a foreign drop-in.
+	local dropin="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/steam-launcher.service.d/slsteammoon.conf"
+	if [ -f "$dropin" ] && grep -qF "managed-by: slsteammoon" "$dropin" 2>/dev/null; then
+		log_step "$(L "Removing SteamOS Game Mode drop-in: $dropin" \
+		             "Removendo drop-in do Game Mode (SteamOS): $dropin")"
+		rm -f "$dropin" 2>/dev/null || true
+		# Drop the now-empty override dir (rmdir is a no-op if other files remain).
+		rmdir "$(dirname "$dropin")" 2>/dev/null || true
+		systemctl --user daemon-reload >/dev/null 2>&1 || true
+		log_success "$(L "SteamOS Game Mode drop-in removed" "Drop-in do Game Mode (SteamOS) removido")"
+	fi
 	return 0
 }
 
