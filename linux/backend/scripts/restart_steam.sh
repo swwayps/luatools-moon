@@ -39,12 +39,31 @@ unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENIT
 if command -v systemctl >/dev/null 2>&1; then
   : "${XDG_RUNTIME_DIR:=/run/user/$(id -u)}"
   export XDG_RUNTIME_DIR
+
+  # SteamOS Game Mode: Steam runs as its OWN user unit (steam-launcher.service),
+  # separate from the gamescope compositor (gamescope-session.service, which is
+  # RefuseManualStart=yes and therefore CANNOT be restarted directly — that is
+  # exactly why the button did nothing on SteamOS: the glob below matched the
+  # un-restartable compositor). Restart just Steam: it comes back through our
+  # steam-launcher.service.d drop-in (slsteam-moon wrapper on PATH, injection
+  # preserved) while the compositor stays up. Checked BEFORE the gamescope glob.
+  if systemctl --user is-active --quiet steam-launcher.service 2>/dev/null; then
+    if [ -n "${SLS_RESTART_DRYRUN:-}" ]; then echo "unit:steam-launcher.service"; exit 0; fi
+    setsid nohup systemctl --user restart steam-launcher.service </dev/null >/dev/null 2>&1 &
+    exit 0
+  fi
+
+  # Bazzite/ChimeraOS Game Mode: Steam is supervised by a gamescope-session*
+  # service (e.g. gamescope-session-plus@steam.service). Restart that unit — it
+  # re-sources its config (incl. our STEAMCMD override) and brings Steam back
+  # through the wrapper. Discovered generically (NOT hardcoded to "-plus").
   gs_unit="$(
     systemctl --user list-units --type=service --state=active \
       --plain --no-legend 'gamescope-session*' 2>/dev/null \
       | awk '{print $1}' | head -n1
   )"
   if [ -n "${gs_unit:-}" ]; then
+    if [ -n "${SLS_RESTART_DRYRUN:-}" ]; then echo "unit:$gs_unit"; exit 0; fi
     setsid nohup systemctl --user restart "$gs_unit" </dev/null >/dev/null 2>&1 &
     exit 0
   fi
@@ -67,6 +86,13 @@ for candidate in \
 done
 if [ -z "$LAUNCHER" ] && command -v steam >/dev/null 2>&1; then
   LAUNCHER="$(command -v steam)"
+fi
+
+# Dry-run seam (tests): report the desktop decision and exit BEFORE touching
+# the running Steam, so the strategy can be pinned without killing anything.
+if [ -n "${SLS_RESTART_DRYRUN:-}" ]; then
+  echo "desktop:${LAUNCHER:-none}"
+  exit 0
 fi
 
 # Ask Steam to shut down cleanly first.
