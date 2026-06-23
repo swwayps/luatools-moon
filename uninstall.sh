@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  slsteammoon-ltsteamplugin — one-shot uninstaller
+#  luatools-moon — one-shot uninstaller
 # ============================================================================
 #  Removes EVERYTHING this stack installs, in a single command:
 #
-#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/uninstall.sh | bash
+#    curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/main/uninstall.sh | bash
 #
 #  What it removes (no flags, no prompts):
 #    • slsteam-moon          (~/.local/share/SLSsteam, ~/.config/SLSsteam,

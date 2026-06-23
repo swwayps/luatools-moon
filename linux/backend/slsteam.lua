@@ -1,4 +1,4 @@
--- slsteam.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- slsteam.lua  (Linux overlay for luatools-moon)
 --
 -- slsteam-moon establishes ownership of an "added" game by reading the
 -- appid from the AdditionalApps: list in ~/.config/SLSsteam/config.yaml

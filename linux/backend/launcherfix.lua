@@ -1,4 +1,4 @@
--- launcherfix.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- launcherfix.lua  (Linux overlay for luatools-moon)
 --
 -- Some crack/bypass archives ship their OWN launcher (FC25's Launcher.exe, an
 -- EA/Denuvo unlocker, ...) that is the real entry point: you run the launcher

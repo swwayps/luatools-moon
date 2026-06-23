@@ -1,4 +1,4 @@
--- launchopts.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- launchopts.lua  (Linux overlay for luatools-moon)
 --
 -- Reads a game's current Steam "Launch Options" string from localconfig.vdf so
 -- the online-fix flow can MERGE its WINEDLLOVERRIDES into whatever the user

@@ -1,4 +1,4 @@
--- crackfix.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- crackfix.lua  (Linux overlay for luatools-moon)
 --
 -- Resolves a Steam appid to a Crack/Bypass archive on the ryuu.lol fixes
 -- catalogue. There is no appid index endpoint on the source, so we ship a

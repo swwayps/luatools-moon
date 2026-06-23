@@ -1,4 +1,4 @@
--- fix_overlays.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- fix_overlays.lua  (Linux overlay for luatools-moon)
 --
 -- Online/generic game fixes are Windows DLLs (OnlineFix64.dll,
 -- steam_api64.dll, ...). When the game runs through Proton, Wine loads
