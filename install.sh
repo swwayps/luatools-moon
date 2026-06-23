@@ -36,24 +36,27 @@ LUMEN_REPO="unplausible/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
+# CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
+# repo now; we fetch the prebuilt hook straight from its raw branch.
+CR_MOON_REPO="unplausible/cloudredirect-moon"
+
 # CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
 # user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
-# hook (cloud_redirect.so) bundled in this repo under cloudredirect/ and load it
-# via the Steam wrapper's LD_PRELOAD; the flatpak companion app provides the
+# hook (cloud_redirect.so) from the cloudredirect-moon repo and load it via the
+# Steam wrapper's LD_PRELOAD; the flatpak companion app provides the
 # cloud-provider login UI.
 #
-# Why a bundled build instead of an upstream release asset: no upstream release
+# Why a patched build instead of an upstream release asset: no upstream release
 # ships both fixes we need. 2.0.4 (the `linux` LD_AUDIT tag) attaches reliably
 # but restores saves to a broken "<file>/<sha>" directory layout (games see no
 # save). 2.1.5 (`latest`) restores saves correctly but its LD_PRELOAD init
 # polls steamclient.so for only 10s and then gives up, so on slower-bootstrap
-# distros (Arch/CachyOS) it never attaches. Our build is 2.1.5 with the
-# steamclient wait extended to 120s and the CAS-path fix also applied to the
-# legacy-migration path. Built for an old-enough glibc to load in the Steam
-# runtime. See cloudredirect/README.md. The companion flatpak app is still
-# fetched from upstream releases.
-PLUGIN_RAW_BASE="https://codeberg.org/${PLUGIN_REPO}/raw/branch/main"
-CR_SO_BUNDLED_URL="${PLUGIN_RAW_BASE}/cloudredirect/cloud_redirect.so"
+# distros (Arch/CachyOS) it never attaches. Our branch keeps the 120s wait, the
+# CAS-path healing, and worker-thread crash containment on top of upstream.
+# Built for an old-enough glibc to load in the Steam runtime. The companion
+# flatpak app is still fetched from upstream releases.
+CR_MOON_RAW_BASE="https://codeberg.org/${CR_MOON_REPO}/raw/branch/master"
+CR_SO_URL="${CR_MOON_RAW_BASE}/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
 CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
 CR_DIR="$HOME/.local/share/CloudRedirect"
@@ -1354,9 +1357,9 @@ install_steamos_gamemode_dropin() {
 # Steam Cloud reads/writes for unowned (lua) games to the user's own cloud
 # provider. Two pieces:
 #   1. cloud_redirect.so — the 32-bit hook loaded into Steam. We always install
-#      our PATCHED build bundled in this repo under cloudredirect/ (CloudRedirect
-#      2.1.5 with the steamclient.so wait extended to 120s and the CAS save-path
-#      fix; see cloudredirect/README.md). The Steam wrapper injects it via
+#      our PATCHED build from the cloudredirect-moon repo (upstream CloudRedirect
+#      with the steamclient.so wait extended to 120s, CAS save-path healing, and
+#      worker-thread crash containment). The Steam wrapper injects it via
 #      LD_PRELOAD when present (NOT LD_AUDIT — 2.1.x corrupts the client heap if
 #      loaded as an auditor).
 #   2. The flatpak companion app — the cloud-provider login UI (Google Drive /
@@ -1379,7 +1382,7 @@ install_cloudredirect_so() {
 	so="$tmp/cloud_redirect.so"
 
 	log_info "$(L "Downloading cloud_redirect.so" "Baixando cloud_redirect.so")"
-	if ! curl -fL "$CR_SO_BUNDLED_URL" -o "$so"; then
+	if ! curl -fL "$CR_SO_URL" -o "$so"; then
 		log_warn "$(L "Download of cloud_redirect.so failed; skipping cloud saves." \
 		             "Falha ao baixar cloud_redirect.so; pulando cloud saves.")"
 		return 1
