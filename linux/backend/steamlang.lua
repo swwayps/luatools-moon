@@ -1,4 +1,4 @@
--- steamlang.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- steamlang.lua  (Linux overlay for luatools-moon)
 --
 -- Detects the Steam client language and maps it to a LuaTools locale code so
 -- the "Use Steam Language" setting actually follows Steam. Upstream's

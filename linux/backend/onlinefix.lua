@@ -1,4 +1,4 @@
--- onlinefix.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- onlinefix.lua  (Linux overlay for luatools-moon)
 --
 -- Resolves a Steam store-page game name to an online-fix archive on the
 -- perondepot mirror (http://api.perondepot.xyz/all/), which is an nginx

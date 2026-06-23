@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# restart_steam.sh — Linux restart helper for slsteammoon-ltsteamplugin.
+# restart_steam.sh — Linux restart helper for luatools-moon.
 #
 # Upstream's auto_update.restart_steam() runs `killall steam && steam &`
 # on Linux. That has two problems for slsteam-moon:

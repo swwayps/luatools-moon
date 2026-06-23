@@ -1,11 +1,11 @@
-# 🌕 slsteammoon-ltsteamplugin
+# 🌕 luatools-moon
 
 ## Install
 
 Set up slsteam-moon, Millennium and the LuaTools plugin automatically with a single command:
 
 ```bash
-curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/millennium/install.sh | bash
+curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/millennium/install.sh | bash
 ```
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
@@ -34,12 +34,12 @@ Reference material:
 
 ## Support
 
-Open an issue: https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/issues
+Open an issue: https://codeberg.org/unplausible/luatools-moon/issues
 
 ## Uninstall
 
 Want to remove everything? Run:
 
 ```bash
-curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/main/uninstall.sh | bash
+curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/main/uninstall.sh | bash
 ```

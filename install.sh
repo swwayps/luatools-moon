@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ============================================================================
-#  slsteammoon-ltsteamplugin — one-shot installer
+#  luatools-moon — one-shot installer
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://codeberg.org/unplausible/slsteammoon-ltsteamplugin/raw/branch/millennium/install.sh | bash
+#    curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/millennium/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -29,7 +29,7 @@ SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ve
 # so publishing a new version (e.g. v2.5) needs no installer edit.
 SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-[0-9][0-9.]*\\.zip$"
 
-PLUGIN_REPO="unplausible/slsteammoon-ltsteamplugin"
+PLUGIN_REPO="unplausible/luatools-moon"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 

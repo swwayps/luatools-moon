@@ -749,7 +749,7 @@ cat > "$OUT/backend/update.json" <<'EOF'
 {
   "codeberg": {
     "owner": "unplausible",
-    "repo": "slsteammoon-ltsteamplugin",
+    "repo": "luatools-moon",
     "asset_name": "luatools-linux.zip"
   }
 }

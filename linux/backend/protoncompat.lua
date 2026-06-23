@@ -1,4 +1,4 @@
--- protoncompat.lua  (Linux overlay for slsteammoon-ltsteamplugin)
+-- protoncompat.lua  (Linux overlay for luatools-moon)
 --
 -- Tells whether the user has forced a Steam Play compatibility tool (Proton)
 -- for a given appid. The Online Fix feature needs this: an online fix is a
