@@ -119,8 +119,28 @@ if [ -n "$EXTRACT_DIR" ]; then
         | grep -iE '\.dll$' \
         | sed 's#.*[/\\]##' >> "$DLL_ACC"
     }
-    # Primary archive (covers non-nested cracks whose DLLs sit at top level).
+
+    # Some cracks ship their OWN launcher (FC25's Launcher.exe, an EA/Denuvo
+    # unlocker, ...) that must run INSTEAD of the game's default exe. Record the
+    # launcher-pattern exes (launcher.exe / launcher_*.exe / *_launcher.exe) the
+    # archive(s) shipped, with their RELATIVE PATHS (the exe lands at
+    # $EXTRACT_DIR/<path>), into .slssteam_fix_launchers. launcherfix.lua reads
+    # this to redirect Steam's Play button at the launcher via a Proton launch
+    # option. Listing the archive (not a dir scan) is what lets us tell a
+    # crack-shipped launcher from the game's own pre-existing launcher.exe.
+    LAUNCHER_MANIFEST="$EXTRACT_DIR/.slssteam_fix_launchers"
+    LAUNCHER_ACC="$(mktemp 2>/dev/null)" || LAUNCHER_ACC=""
+    list_fix_launchers() {  # $1 = archive -> append launcher exe relpaths to $LAUNCHER_ACC
+      [ -n "$LAUNCHER_ACC" ] || return 0
+      "$SEVENZ" l -ba -slt "$1" 2>/dev/null \
+        | sed -n 's/^Path = //p' \
+        | tr '\\' '/' \
+        | grep -iE '(^|/)(launcher\.exe|launcher_[^/]+\.exe|[^/]+_launcher\.exe)$' \
+        >> "$LAUNCHER_ACC"
+    }
+    # Primary archive (covers non-nested cracks whose files sit at top level).
     list_fix_dlls "$DEST_PATH"
+    list_fix_launchers "$DEST_PATH"
 
     # Is $1 a SECONDARY volume we should not invoke 7zz on directly?
     #   name.partN.rar (N>1), name.rNN, name.zNN  -> secondary
@@ -142,6 +162,7 @@ if [ -n "$EXTRACT_DIR" ]; then
       found_archive=1
       if ! is_secondary "$arc"; then
         list_fix_dlls "$arc"   # capture nested-archive DLLs BEFORE deletion
+        list_fix_launchers "$arc"  # capture nested-archive launcher exes too
         "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$arc" >/dev/null 2>&1 || true
       fi
     done < <(find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
@@ -159,6 +180,13 @@ if [ -n "$EXTRACT_DIR" ]; then
       sort -u -f "$DLL_ACC" > "$MANIFEST" 2>/dev/null || true
     fi
     [ -n "$DLL_ACC" ] && rm -f "$DLL_ACC"
+
+    # Persist the launcher manifest (case-insensitive unique relpaths) when the
+    # crack shipped a launcher exe.
+    if [ -n "$LAUNCHER_ACC" ] && [ -s "$LAUNCHER_ACC" ]; then
+      sort -u -f "$LAUNCHER_ACC" > "$LAUNCHER_MANIFEST" 2>/dev/null || true
+    fi
+    [ -n "$LAUNCHER_ACC" ] && rm -f "$LAUNCHER_ACC"
   fi
 
   write_state "extracted" "$TOTAL" "$TOTAL"

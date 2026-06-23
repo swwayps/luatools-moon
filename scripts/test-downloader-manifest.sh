@@ -75,4 +75,44 @@ check "T2 lists nested OnlineFix64" "grep -qix 'OnlineFix64.dll' '$MAN2'"
 check "T2 lists nested winhttp" "grep -qix 'winhttp.dll' '$MAN2'"
 check "T2 inner archive removed" "[ -z \"\$(find '$GAME2' -iname '*.7z')\" ]"
 
+# ---------------------------------------------------------------------------
+# T3: a crack that ships its OWN launcher (FC25-style). The launcher manifest
+# (.slssteam_fix_launchers) must list the launcher-pattern exes WITH their
+# relative paths, and must NOT list the game's own pre-existing launcher.exe
+# (we list the archive, not the game dir) nor plain game exes.
+# ---------------------------------------------------------------------------
+LSRC="$TMP/t3src"
+mkfile "$LSRC/Launcher.exe"
+mkfile "$LSRC/tools/FC25_Launcher.exe"
+mkfile "$LSRC/bin/Launcher_x64.exe"
+mkfile "$LSRC/FIFA23.exe"        # plain game exe -- must be ignored
+mkfile "$LSRC/relauncher.exe"    # substring only -- must be ignored
+( cd "$LSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t3.zip" . >/dev/null 2>&1 )
+
+GAME3="$TMP/game3"
+mkfile "$GAME3/launcher.exe"     # the game's OWN launcher -- must be ignored
+EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
+  "file://$TMP/t3.zip" "$TMP/t3dl.zip" "$GAME3" "$TMP/t3state.json" >/dev/null 2>&1
+
+LMAN3="$GAME3/.slssteam_fix_launchers"
+check "T3 launcher manifest exists" "[ -f '$LMAN3' ]"
+check "T3 lists top-level Launcher.exe" "grep -qix 'Launcher.exe' '$LMAN3'"
+check "T3 lists nested _launcher with path" "grep -qix 'tools/FC25_Launcher.exe' '$LMAN3'"
+check "T3 lists nested launcher_ with path" "grep -qix 'bin/Launcher_x64.exe' '$LMAN3'"
+check "T3 excludes plain game exe" "! grep -qi 'FIFA23.exe' '$LMAN3'"
+check "T3 excludes substring relauncher" "! grep -qix 'relauncher.exe' '$LMAN3'"
+
+# ---------------------------------------------------------------------------
+# T4: a crack with NO launcher must NOT produce a launcher manifest (so the
+# redirect feature stays inert for the common DLL-only crack).
+# ---------------------------------------------------------------------------
+NSRC="$TMP/t4src"
+mkfile "$NSRC/steam_api64.dll"
+mkfile "$NSRC/game.exe"
+( cd "$NSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t4.zip" . >/dev/null 2>&1 )
+GAME4="$TMP/game4"; mkdir -p "$GAME4"
+EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
+  "file://$TMP/t4.zip" "$TMP/t4dl.zip" "$GAME4" "$TMP/t4state.json" >/dev/null 2>&1
+check "T4 no launcher manifest" "[ ! -f '$GAME4/.slssteam_fix_launchers' ]"
+
 if [ "$fails" -eq 0 ]; then echo; echo "ALL TESTS OK"; else echo; echo "$fails FAILED"; exit 1; fi

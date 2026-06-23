@@ -107,6 +107,9 @@ cp "$OVERLAY/backend/slsteam.lua" "$OUT/backend/slsteam.lua"
 # Pure helpers: perondepot online-fix matcher + WINEDLLOVERRIDES builder.
 cp "$OVERLAY/backend/onlinefix.lua" "$OUT/backend/onlinefix.lua"
 cp "$OVERLAY/backend/fix_overlays.lua" "$OUT/backend/fix_overlays.lua"
+# Crack-shipped launcher redirect: points Steam'"'"'s Play button at a launcher
+# the crack provides (FC25 Launcher.exe, ...) via a Proton launch option.
+cp "$OVERLAY/backend/launcherfix.lua" "$OUT/backend/launcherfix.lua"
 # Forced-compat-tool (Proton) reader: gates Online Fix on a native title.
 cp "$OVERLAY/backend/protoncompat.lua" "$OUT/backend/protoncompat.lua"
 # Reads current launch options from localconfig.vdf so the online fix merges
@@ -658,18 +661,27 @@ end' \
             end
         end
         -- slsteammoon: clear the WINEDLLOVERRIDES launch option a Crack/Online
-        -- fix added, restoring the original launch options (the leftover fix
-        -- DLLs are inert without it). The actual write happens in the frontend
-        -- via the Lumen relay (SteamClient lives in SharedJSContext), so here
-        -- we just compute and return the cleaned value.
+        -- fix added AND any launcher redirect (FC25-style), restoring the
+        -- original launch options (the leftover fix DLLs / launcher are inert
+        -- without it). The actual write happens in the frontend via the Lumen
+        -- relay (SteamClient lives in SharedJSContext), so here we just compute
+        -- and return the cleaned value.
         local clearLaunchOptions, launchOptions = false, nil
         do
             local ok_lo, lo = pcall(require, "launchopts")
             local ok_fo, fo = pcall(require, "fix_overlays")
-            if ok_lo and lo and lo.read and ok_fo and fo and fo.remove_overrides then
+            local ok_lf, lf = pcall(require, "launcherfix")
+            if ok_lo and lo and lo.read then
                 local current = lo.read(appid) or ""
-                if current:find("WINEDLLOVERRIDES=") then
-                    launchOptions = fo.remove_overrides(current)
+                local hadOverride = ok_fo and fo and fo.remove_overrides
+                    and current:find("WINEDLLOVERRIDES=", 1, true) ~= nil
+                local hadRedirect = ok_lf and lf and lf.remove_redirect
+                    and lf.remove_redirect(current) ~= current
+                if hadOverride or hadRedirect then
+                    local cleaned = current
+                    if hadOverride then cleaned = fo.remove_overrides(cleaned) end
+                    if hadRedirect then cleaned = lf.remove_redirect(cleaned) end
+                    launchOptions = cleaned
                     clearLaunchOptions = true
                 end
             end
@@ -716,18 +728,27 @@ patch_replace "$OUT/backend/main.lua" \
     end
     local ok, res = pcall(function()
         local fix_overlays = require("fix_overlays")
+        local launcherfix = require("launcherfix")
         -- Gate on the fix DLLs actually being present in the install dir, NOT
         -- on the frontend compat-tool name: slsteam-moon injects the Proton
         -- CompatToolMapping into appinfo.vdf, so Steam'"'"'s AppDetails reports an
         -- empty compat tool and is_proton_tool would wrongly skip. The
         -- WINEDLLOVERRIDES is consumed only by Proton/Wine anyway (harmless if
         -- the title somehow runs native).
-        local overrides = fix_overlays.overrides_for_install_dir(fs, tostring(installPath or ""))
+        local install = tostring(installPath or "")
+        local overrides = fix_overlays.overrides_for_install_dir(fs, install)
+        -- Some cracks ship their OWN launcher (FC25 Launcher.exe, an unlocker,
+        -- ...) that must run INSTEAD of the game'"'"'s default exe. Redirect the
+        -- Play button to it via a Proton launch option. Only a launcher the
+        -- crack SHIPPED (recorded in .slssteam_fix_launchers by downloader.sh)
+        -- is used, never a game'"'"'s own pre-existing launcher.exe.
+        local launcher = launcherfix.launcher_for_install_dir(install)
         logger.log("GetFixLaunchOptions: appid=" .. tostring(appid)
             .. " compat=" .. tostring(compatToolName)
             .. " installPath=" .. tostring(installPath)
-            .. " overrides=" .. tostring(overrides))
-        if not overrides then
+            .. " overrides=" .. tostring(overrides)
+            .. " launcher=" .. tostring(launcher))
+        if not overrides and not launcher then
             return { success = true, apply = false }
         end
         -- Merge into the user'"'"'s EXISTING launch options so wrappers like
@@ -739,8 +760,21 @@ patch_replace "$OUT/backend/main.lua" \
             local ok_lo, lo = pcall(require, "launchopts")
             if ok_lo and lo and lo.read then current = lo.read(tonumber(appid)) or "" end
         end
-        local merged = fix_overlays.merge_launch_options(current, overrides)
-        return { success = true, apply = true, launchOptions = merged, overrides = overrides }
+        -- When the crack ships a launcher, it IS the entry point: it starts the
+        -- game the correct way itself. Point Play straight at it (the
+        -- "<launcher>" %command% form) and do NOT add WINEDLLOVERRIDES -- the
+        -- launcher handles the crack, and forcing those DLLs native can
+        -- conflict. Strip any override a prior apply left behind. Otherwise (no
+        -- launcher) keep the WINEDLLOVERRIDES merge for the bare DLL crack.
+        local merged
+        if launcher then
+            local base = current
+            if fix_overlays.remove_overrides then base = fix_overlays.remove_overrides(base) end
+            merged = launcherfix.merge_launch_options(base, launcher)
+        else
+            merged = fix_overlays.merge_launch_options(current, overrides)
+        end
+        return { success = true, apply = true, launchOptions = merged, overrides = overrides, launcher = launcher }
     end)
     if not ok then return json_err(res) end
     return json_ok(res)
@@ -901,7 +935,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts test-crackfix; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts test-crackfix test-launcherfix; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
