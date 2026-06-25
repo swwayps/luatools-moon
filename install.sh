@@ -4,7 +4,7 @@
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/main/install.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -21,24 +21,24 @@ set -uo pipefail
 # ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
-SLS_REPO="unplausible/slsteam-moon"
+SLS_REPO="luatools-linux/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
 # Lumen line: pick the newest release whose asset is the Lumen wrapper build
 # (named slsteam-moon-linux-<ver>-lumen.zip). Convention-based, so publishing a
 # new version (e.g. v2.5-lumen) needs no installer edit.
 SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-.*-lumen\\.zip$"
 
-PLUGIN_REPO="unplausible/luatools-moon"
+PLUGIN_REPO="luatools-linux/luatools-moon"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
-LUMEN_REPO="unplausible/lumen"
+LUMEN_REPO="luatools-linux/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
 # CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
 # repo now; we fetch the prebuilt hook straight from its raw branch.
-CR_MOON_REPO="unplausible/cloudredirect-moon"
+CR_MOON_REPO="luatools-linux/cloudredirect-moon"
 
 # CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
 # user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
@@ -55,7 +55,7 @@ CR_MOON_REPO="unplausible/cloudredirect-moon"
 # CAS-path healing, and worker-thread crash containment on top of upstream.
 # Built for an old-enough glibc to load in the Steam runtime. The companion
 # flatpak app is still fetched from upstream releases.
-CR_MOON_RAW_BASE="https://codeberg.org/${CR_MOON_REPO}/raw/branch/master"
+CR_MOON_RAW_BASE="https://raw.githubusercontent.com/${CR_MOON_REPO}/master"
 CR_SO_URL="${CR_MOON_RAW_BASE}/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
 CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
@@ -343,7 +343,7 @@ check_arch() {
 }
 
 check_internet() {
-	if ! curl -fsS --head "https://codeberg.org" >/dev/null 2>&1; then
+	if ! curl -fsS --head "https://github.com" >/dev/null 2>&1; then
 		fail "$(L "No internet connection." "Sem conexão com a internet.")"
 	fi
 	log_success "$(L "Internet reachable" "Internet acessível")"
@@ -951,9 +951,9 @@ remove_millennium_framework() {
 }
 
 # ============================================================================
-# Release helpers (Codeberg / Forgejo + GitHub)
+# Release helpers (GitHub + Codeberg fallback)
 # ============================================================================
-# Fetch a JSON API URL, tolerating a slow / flaky forge (Codeberg has busy
+# Fetch a JSON API URL, tolerating a slow / flaky forge (GitHub can have busy
 # spells). Retries transient failures (timeouts, 5xx, refused connections) with
 # a short backoff. Echoes the validated JSON body and returns 0 on success;
 # returns non-zero ONLY when the endpoint is genuinely unreachable / returns
@@ -975,16 +975,15 @@ api_get() {
 
 # Echo the browser_download_url of the first asset whose name matches the glob
 # $2 in the latest release of repo $1. Optional $3 selects the forge:
-# "codeberg" (default) or "github". Codeberg's Forgejo API mirrors GitHub's
-# release JSON shape (.tag_name, .assets[].browser_download_url), so the same
-# jq query works for both.
+# "github" (default) or "codeberg". Both expose the same release JSON shape
+# (.tag_name, .assets[].browser_download_url), so the same jq query works.
 # Returns: 0 + the URL on stdout (empty if the release carries no matching
 # asset); 2 if the forge could not be reached (network / forge down).
 latest_release_asset_url() {
-	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
+	local repo="$1" asset_glob="$2" forge="${3:-github}" api meta
 	case "$forge" in
-		github) api="https://api.github.com/repos/${repo}/releases/latest" ;;
-		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases/latest" ;;
+		codeberg) api="https://codeberg.org/api/v1/repos/${repo}/releases/latest" ;;
+		*)        api="https://api.github.com/repos/${repo}/releases/latest" ;;
 	esac
 	meta="$(api_get "$api")" || return 2
 	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
@@ -997,10 +996,10 @@ latest_release_asset_url() {
 # the newest flatpak lives in an older release under a versioned filename.
 # Same return convention as latest_release_asset_url (2 = forge unreachable).
 any_release_asset_url() {
-	local repo="$1" asset_glob="$2" forge="${3:-codeberg}" api meta
+	local repo="$1" asset_glob="$2" forge="${3:-github}" api meta
 	case "$forge" in
-		github) api="https://api.github.com/repos/${repo}/releases?per_page=50" ;;
-		*)      api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50" ;;
+		codeberg) api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50" ;;
+		*)        api="https://api.github.com/repos/${repo}/releases?per_page=50" ;;
 	esac
 	meta="$(api_get "$api")" || return 2
 	printf '%s' "$meta" | jq -r --arg glob "$asset_glob" \
@@ -1017,14 +1016,14 @@ any_release_asset_url() {
 release_asset_info() {
 	local repo="$1" glob="$2" mode="${3:-latest}" api meta
 	if [ "$mode" = "any" ]; then
-		api="https://codeberg.org/api/v1/repos/${repo}/releases?limit=50"
+		api="https://api.github.com/repos/${repo}/releases?per_page=50"
 		meta="$(api_get "$api")" || { printf '{}'; return 0; }
 		printf '%s' "$meta" | jq -c --arg glob "$glob" \
 			'[ .[] as $r | $r.assets[]? | select(.name | test($glob))
 			   | {tag:$r.tag_name, asset_at:.created_at, size:.size} ][0] // {}' \
 			2>/dev/null || printf '{}'
 	else
-		api="https://codeberg.org/api/v1/repos/${repo}/releases/latest"
+		api="https://api.github.com/repos/${repo}/releases/latest"
 		meta="$(api_get "$api")" || { printf '{}'; return 0; }
 		printf '%s' "$meta" | jq -c --arg glob "$glob" \
 			'.tag_name as $t | [ .assets[]? | select(.name | test($glob))
@@ -1047,12 +1046,12 @@ write_versions_stamp() {
 		'{slsteam_moon:$sls, lumen:$lumen, plugin:$plugin}' >"$f" 2>/dev/null || true
 }
 
-# Shared message for when the release host (Codeberg) can't be reached — slow,
+# Shared message for when the release host (GitHub) can't be reached — slow,
 # flaky, or temporarily down. Distinct from "asset not found" so the user knows
 # it's a connectivity issue to retry, not a broken install.
 forge_unreachable_msg() {
-	L "Couldn't reach Codeberg to fetch the download. It may be slow or temporarily down — check your connection and try again in a few minutes." \
-	  "Não foi possível acessar o Codeberg para baixar. Ele pode estar lento ou fora do ar no momento — verifique sua conexão e tente de novo em alguns minutos."
+	L "Couldn't reach GitHub to fetch the download. It may be slow or temporarily down — check your connection and try again in a few minutes." \
+	  "Não foi possível acessar o GitHub para baixar. Ele pode estar lento ou fora do ar no momento — verifique sua conexão e tente de novo em alguns minutos."
 }
 
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
