@@ -4,7 +4,7 @@
 # ============================================================================
 #  Removes EVERYTHING this stack installs, in a single command:
 #
-#    curl -fsSL https://codeberg.org/unplausible/luatools-moon/raw/branch/main/uninstall.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/uninstall.sh | bash
 #
 #  What it removes (no flags, no prompts):
 #    • slsteam-moon          (~/.local/share/SLSsteam, ~/.config/SLSsteam,
