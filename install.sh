@@ -1649,7 +1649,7 @@ install_cloudredirect() {
 	if ! prompt_yes_no \
 		"Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves." \
 		"Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves." \
-		"y"; then
+		"n"; then
 		log_info "$(L "Skipping cloud saves (CloudRedirect)." \
 		             "Pulando os cloud saves (CloudRedirect).")"
 		# Match the config to the hook's real state: if no hook is present,
