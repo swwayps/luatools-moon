@@ -8,6 +8,15 @@ Set up slsteam-moon, Lumen and the LuaTools plugin automatically with a single c
 curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/install.sh | bash
 ```
 
+### Runtime stack only (no plugin)
+
+Want just the runtime (slsteam-moon + Lumen) without the LuaTools plugin? Pass
+`--noplugin`. CloudRedirect is still offered (the prompt defaults to *no*):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/install.sh | bash -s -- --noplugin
+```
+
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
 > manager. Flatpak and Snap Steam are not supported.
 >

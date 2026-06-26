@@ -19,6 +19,16 @@
 set -uo pipefail
 
 # ----------------------------------------------------------------------------
+# Command-line options (parsed by parse_args; see main)
+# ----------------------------------------------------------------------------
+# --noplugin : install only the runtime stack (slsteam-moon + Lumen) and skip
+#              the LuaTools plugin. CloudRedirect is still offered (its prompt
+#              defaults to "no"). Invoke as: curl ... | bash -s -- --noplugin
+OPT_NOPLUGIN=0
+OPT_HELP=0
+OPT_BAD_ARG=""
+
+# ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
 SLS_REPO="luatools-linux/slsteam-moon"
@@ -1039,6 +1049,15 @@ release_asset_info() {
 write_versions_stamp() {
 	local f="$LUMEN_DIR/versions.json"
 	mkdir -p "$LUMEN_DIR" 2>/dev/null || true
+	if [ "${OPT_NOPLUGIN:-0}" = 1 ]; then
+		# --noplugin: stamp only the runtime components so the About tab doesn't
+		# surface a phantom plugin entry.
+		jq -n \
+			--argjson sls "${SLS_INFO:-{\}}" \
+			--argjson lumen "${LUMEN_INFO:-{\}}" \
+			'{slsteam_moon:$sls, lumen:$lumen}' >"$f" 2>/dev/null || true
+		return
+	fi
 	jq -n \
 		--argjson sls "${SLS_INFO:-{\}}" \
 		--argjson lumen "${LUMEN_INFO:-{\}}" \
@@ -1153,6 +1172,29 @@ install_lumen() {
 # ============================================================================
 # Step: LuaTools plugin (this repo)
 # ============================================================================
+# --noplugin: the LuaTools plugin must not be present. If a previous (standard)
+# install left it on disk, remove it so Lumen runs in settings-menu-only mode;
+# if it was never installed, there's nothing to do and we just continue. The
+# plugin lives entirely under ~/.local/share/Lumen/luatools, so removing that
+# directory takes its backend, frontend and stored data with it.
+remove_plugin_if_present() {
+	local dest="$LUMEN_DIR/luatools"
+	if [ -d "$dest" ]; then
+		log_step "$(L "Removing the existing LuaTools plugin (--noplugin)" \
+		             "Removendo o plugin LuaTools existente (--noplugin)")"
+		rm -rf "$dest" 2>/dev/null || true
+		if [ -d "$dest" ]; then
+			log_warn "$(L "Could not fully remove the plugin at $dest" \
+			             "Não foi possível remover totalmente o plugin em $dest")"
+		else
+			log_success "$(L "LuaTools plugin removed" "Plugin LuaTools removido")"
+		fi
+	else
+		log_info "$(L "No LuaTools plugin installed; nothing to remove" \
+		             "Nenhum plugin LuaTools instalado; nada a remover")"
+	fi
+}
+
 install_plugin() {
 	local url tmp zip dest
 
@@ -1665,7 +1707,9 @@ print_complete() {
 	echo -e "  $(L "Everything is installed:" "Tudo instalado:")"
 	echo -e "    ${GREEN}•${NC} slsteam-moon"
 	echo -e "    ${GREEN}•${NC} Lumen"
-	echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
+	if [ "$OPT_NOPLUGIN" != 1 ]; then
+		echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
+	fi
 	if [ -f "$CR_SO_PATH" ]; then
 		echo -e "    ${GREEN}•${NC} CloudRedirect ($(L "cloud saves" "cloud saves"))"
 	fi
@@ -1695,8 +1739,13 @@ print_complete() {
 		fi
 	fi
 
-	echo -e "  $(L "Start Steam to begin using LuaTools." \
-	               "Inicie a Steam para começar a usar o LuaTools.")"
+	if [ "$OPT_NOPLUGIN" = 1 ]; then
+		echo -e "  $(L "Start Steam to begin using the stack." \
+		               "Inicie a Steam para começar a usar.")"
+	else
+		echo -e "  $(L "Start Steam to begin using LuaTools." \
+		               "Inicie a Steam para começar a usar o LuaTools.")"
+	fi
 	echo -e "  $(L "The first launch can take longer than usual while Steam loads" \
 	               "A primeira abertura pode demorar mais que o normal enquanto a Steam carrega")"
 	echo -e "  $(L "everything. This is normal — just give it a moment." \
@@ -1705,10 +1754,58 @@ print_complete() {
 }
 
 # ============================================================================
+# Command-line options
+# ============================================================================
+usage() {
+	cat <<EOF
+$(L "Usage" "Uso"): install.sh [$(L "options" "opções")]
+
+$(L "When run through the one-liner, pass options after '-- ':" \
+   "Ao rodar pelo one-liner, passe as opções após '-- ':")
+  curl -fsSL .../install.sh | bash -s -- --noplugin
+
+$(L "Options" "Opções"):
+  --noplugin   $(L "Install only slsteam-moon + Lumen (skip the LuaTools plugin)." \
+                  "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
+  -h, --help   $(L "Show this help and exit." "Mostra esta ajuda e sai.")
+EOF
+}
+
+# Pure option parser: sets OPT_NOPLUGIN / OPT_HELP, records the first unknown
+# option in OPT_BAD_ARG and returns 1 (main turns that into usage + abort).
+# Resets its output vars each call so it's safe to invoke repeatedly (tests).
+parse_args() {
+	OPT_NOPLUGIN=0
+	OPT_HELP=0
+	OPT_BAD_ARG=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--noplugin) OPT_NOPLUGIN=1 ;;
+			-h|--help)  OPT_HELP=1 ;;
+			*)          OPT_BAD_ARG="$1"; return 1 ;;
+		esac
+		shift
+	done
+	return 0
+}
+
+# ============================================================================
 # Entry point
 # ============================================================================
 main() {
 	detect_language
+
+	if ! parse_args "$@"; then
+		log_error "$(L "Unknown option: $OPT_BAD_ARG" "Opção desconhecida: $OPT_BAD_ARG")"
+		echo ""
+		usage
+		exit 1
+	fi
+	if [ "$OPT_HELP" = 1 ]; then
+		usage
+		exit 0
+	fi
+
 	print_banner
 
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
@@ -1734,8 +1831,15 @@ main() {
 	print_section "$(L "Installing Lumen" "Instalando Lumen")"
 	install_lumen
 
-	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
-	install_plugin
+	if [ "$OPT_NOPLUGIN" = 1 ]; then
+		print_section "$(L "LuaTools plugin (skipped)" "Plugin LuaTools (ignorado)")"
+		log_info "$(L "Runtime-only install (--noplugin): slsteam-moon + Lumen." \
+		             "Instalação somente runtime (--noplugin): slsteam-moon + Lumen.")"
+		remove_plugin_if_present
+	else
+		print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
+		install_plugin
+	fi
 
 	# Record the installed release tags for the Lumen About tab (installed-vs-
 	# latest). Best-effort; never fails the install.
@@ -1746,6 +1850,8 @@ main() {
 	# installs see nothing here.
 	install_gamemode_hook
 
+	# CloudRedirect (optional cloud saves) is always offered — the prompt
+	# itself defaults to "no" on Enter — even with --noplugin.
 	print_section "$(L "Setting up cloud saves (CloudRedirect)" "Configurando cloud saves (CloudRedirect)")"
 	install_cloudredirect
 
