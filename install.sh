@@ -20,6 +20,16 @@
 set -uo pipefail
 
 # ----------------------------------------------------------------------------
+# Command-line options (parsed by parse_args; see main)
+# ----------------------------------------------------------------------------
+# --noplugin : install only the runtime stack (slsteam-moon + Millennium) and
+#              skip the LuaTools plugin. CloudRedirect is still offered.
+#              Invoke as: curl ... | bash -s -- --noplugin
+OPT_NOPLUGIN=0
+OPT_HELP=0
+OPT_BAD_ARG=""
+
+# ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
 SLS_REPO="luatools-linux/slsteam-moon"
@@ -1151,6 +1161,39 @@ plugin_install_root() {
 	echo "$HOME/.local/share/millennium/plugins"
 }
 
+# --noplugin: the LuaTools plugin must not be present. If a previous (standard)
+# install left it under any of Millennium's plugin roots, remove it; if it was
+# never installed, there's nothing to do and we just continue. The plugin lives
+# in <plugins>/luatools, so removing that directory takes its backend, frontend
+# and stored data with it.
+remove_plugin_if_present() {
+	local dir target removed=0
+	for dir in \
+		"$HOME/.local/share/millennium/plugins" \
+		"$HOME/.millennium/plugins" \
+		"$HOME/.steam/steam/millennium/plugins" \
+		"$HOME/.local/share/Steam/millennium/plugins"; do
+		target="$dir/$PLUGIN_NAME"
+		if [ -d "$target" ]; then
+			log_step "$(L "Removing the existing LuaTools plugin (--noplugin)" \
+			             "Removendo o plugin LuaTools existente (--noplugin)")"
+			rm -rf "$target" 2>/dev/null || true
+			if [ -d "$target" ]; then
+				log_warn "$(L "Could not fully remove the plugin at $target" \
+				             "Não foi possível remover totalmente o plugin em $target")"
+			else
+				removed=1
+			fi
+		fi
+	done
+	if [ "$removed" = 1 ]; then
+		log_success "$(L "LuaTools plugin removed" "Plugin LuaTools removido")"
+	else
+		log_info "$(L "No LuaTools plugin installed; nothing to remove" \
+		             "Nenhum plugin LuaTools instalado; nada a remover")"
+	fi
+}
+
 install_plugin() {
 	local url tmp zip root dest
 
@@ -1655,7 +1698,9 @@ print_complete() {
 	echo -e "  $(L "Everything is installed:" "Tudo instalado:")"
 	echo -e "    ${GREEN}•${NC} slsteam-moon"
 	echo -e "    ${GREEN}•${NC} Millennium"
-	echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
+	if [ "$OPT_NOPLUGIN" != 1 ]; then
+		echo -e "    ${GREEN}•${NC} LuaTools ($(L "plugin" "plugin"))"
+	fi
 	if [ -f "$CR_SO_PATH" ]; then
 		echo -e "    ${GREEN}•${NC} CloudRedirect ($(L "cloud saves" "cloud saves"))"
 	fi
@@ -1685,8 +1730,13 @@ print_complete() {
 		fi
 	fi
 
-	echo -e "  $(L "Start Steam to begin using LuaTools." \
-	               "Inicie a Steam para começar a usar o LuaTools.")"
+	if [ "$OPT_NOPLUGIN" = 1 ]; then
+		echo -e "  $(L "Start Steam to begin using the stack." \
+		               "Inicie a Steam para começar a usar.")"
+	else
+		echo -e "  $(L "Start Steam to begin using LuaTools." \
+		               "Inicie a Steam para começar a usar o LuaTools.")"
+	fi
 	echo -e "  $(L "The first launch can take longer than usual while Steam loads" \
 	               "A primeira abertura pode demorar mais que o normal enquanto a Steam carrega")"
 	echo -e "  $(L "everything. This is normal — just give it a moment." \
@@ -1695,10 +1745,58 @@ print_complete() {
 }
 
 # ============================================================================
+# Command-line options
+# ============================================================================
+usage() {
+	cat <<EOF
+$(L "Usage" "Uso"): install.sh [$(L "options" "opções")]
+
+$(L "When run through the one-liner, pass options after '-- ':" \
+   "Ao rodar pelo one-liner, passe as opções após '-- ':")
+  curl -fsSL .../install.sh | bash -s -- --noplugin
+
+$(L "Options" "Opções"):
+  --noplugin   $(L "Install only slsteam-moon + Millennium (skip the LuaTools plugin)." \
+                  "Instala apenas o slsteam-moon + Millennium (pula o plugin LuaTools).")
+  -h, --help   $(L "Show this help and exit." "Mostra esta ajuda e sai.")
+EOF
+}
+
+# Pure option parser: sets OPT_NOPLUGIN / OPT_HELP, records the first unknown
+# option in OPT_BAD_ARG and returns 1 (main turns that into usage + abort).
+# Resets its output vars each call so it's safe to invoke repeatedly (tests).
+parse_args() {
+	OPT_NOPLUGIN=0
+	OPT_HELP=0
+	OPT_BAD_ARG=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--noplugin) OPT_NOPLUGIN=1 ;;
+			-h|--help)  OPT_HELP=1 ;;
+			*)          OPT_BAD_ARG="$1"; return 1 ;;
+		esac
+		shift
+	done
+	return 0
+}
+
+# ============================================================================
 # Entry point
 # ============================================================================
 main() {
 	detect_language
+
+	if ! parse_args "$@"; then
+		log_error "$(L "Unknown option: $OPT_BAD_ARG" "Opção desconhecida: $OPT_BAD_ARG")"
+		echo ""
+		usage
+		exit 1
+	fi
+	if [ "$OPT_HELP" = 1 ]; then
+		usage
+		exit 0
+	fi
+
 	print_banner
 
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
@@ -1723,8 +1821,15 @@ main() {
 	print_section "$(L "Installing Millennium" "Instalando Millennium")"
 	install_millennium
 
-	print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
-	install_plugin
+	if [ "$OPT_NOPLUGIN" = 1 ]; then
+		print_section "$(L "LuaTools plugin (skipped)" "Plugin LuaTools (ignorado)")"
+		log_info "$(L "Runtime-only install (--noplugin): slsteam-moon + Millennium." \
+		             "Instalação somente runtime (--noplugin): slsteam-moon + Millennium.")"
+		remove_plugin_if_present
+	else
+		print_section "$(L "Installing LuaTools plugin" "Instalando o plugin LuaTools")"
+		install_plugin
+	fi
 
 	# Game Mode is opt-in and gamescope-only. It prints its own section header
 	# (and prompts) ONLY when a gamescope session exists, so normal desktop

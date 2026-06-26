@@ -10,6 +10,8 @@ curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/millen
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
 > manager. Flatpak and Snap Steam are not supported — Millennium does not work with them.
+>
+> **Want to install without the LuaTools plugin?** Append `-s -- --noplugin` to the command above.
 
 ---
 
