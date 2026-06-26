@@ -31,7 +31,7 @@
     const css =
       ".luatools-proton-btn{" +
       "position:relative;display:inline-flex !important;align-items:center;gap:7px;" +
-      "margin-left:6px;padding:0 12px;height:30px;border-radius:3px;box-sizing:border-box;" +
+      "margin-left:6px;padding:0 12px;height:32px;border-radius:3px;box-sizing:border-box;" +
       "vertical-align:bottom;cursor:pointer;text-decoration:none !important;" +
       "font-family:'Motiva Sans',Arial,Helvetica,sans-serif;font-size:11px;font-weight:700;" +
       "letter-spacing:.04em;line-height:1;white-space:nowrap;color:#c7d5e0;" +
