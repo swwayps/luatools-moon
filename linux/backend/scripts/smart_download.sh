@@ -210,11 +210,41 @@ STATE_FILE="${2:?state_file required}"
 DEST_ROOT="${3:?dest_root required}"
 CANDIDATES_FILE="${4:?candidates_file required}"
 
+# Diagnostics. This worker is launched detached with stdout+stderr appended to
+# ~/.lumen.log (see smart_downloads.inc.lua::_launch_smart_download), so these
+# lines land in the same log as the rest of the plugin. ISO-8601 UTC prefix
+# mirrors logger.lua's format; the appid + pid tie interleaved lines (parallel
+# sources, possibly more than one worker) back to their run.
+slog() { printf '%s INFO smart_download[%s pid %s]: %s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APPID" "$$" "$*"; }
+slog "worker start: state=$STATE_FILE dest=$DEST_ROOT candidates=$CANDIDATES_FILE"
+
 # Use system libraries, not the Steam Runtime's pinned ones (see downloader.sh).
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
 
+# Single-worker-per-appid lock. The fast-download click can fire more than once
+# (the frontend is re-injected on CEF context recreation) and the backend
+# dedups, but guard here too: two workers for the same appid would fight over
+# the shared appid-keyed handoff paths (the state file, <appid>.zip,
+# extracted_<appid>) and corrupt the install -> the spurious "failed"/flapping
+# users saw. The lock (fd 9) is held for this worker's whole lifetime; a second
+# worker that can't acquire it exits immediately without touching any state.
+LOCK="$DEST_ROOT/${APPID}.lock"
+if command -v flock >/dev/null 2>&1; then
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    slog "another worker already holds the lock for appid $APPID -> exiting (no-op)"
+    exit 0
+  fi
+fi
+
 UA="discord(dot)gg/luatools"
-WORK="$DEST_ROOT/race_${APPID}"
+# Per-worker (pid-suffixed) scratch dir so concurrent workers — should one ever
+# slip past the lock + backend dedup — never share the race scratch. The
+# appid-keyed HANDOFF paths (<appid>.zip, extracted_<appid>, the state file)
+# stay as-is: get_add_status reads them by appid, and the lock guarantees a
+# single writer.
+WORK="$DEST_ROOT/race_${APPID}.$$"
 rm -rf "$WORK"; mkdir -p "$WORK"
 # Always remove the race scratch dir (all candidate downloads, winner and
 # losers alike) AND the candidates manifest on any exit — success or failure —
@@ -229,8 +259,8 @@ declare -A API_ERR_CODE
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 write_state() {
-  # write_state <status> <currentApi> <bytesRead> <totalBytes>
-  local status="$1" capi="$2" br="$3" tb="$4"
+  # write_state <status> <currentApi> <bytesRead> <totalBytes> [error]
+  local status="$1" capi="$2" br="$3" tb="$4" err="${5:-}"
   local errs="{" first=1 k
   for k in "${!API_ERR_TYPE[@]}"; do
     [[ $first -eq 0 ]] && errs+=","
@@ -238,8 +268,10 @@ write_state() {
     errs+="\"$(json_escape "$k")\":{\"type\":\"${API_ERR_TYPE[$k]}\",\"code\":${API_ERR_CODE[$k]:-0}}"
   done
   errs+="}"
-  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":%s}\n' \
-    "$status" "$(json_escape "$capi")" "$br" "$tb" "$errs" > "$STATE_FILE"
+  # "error" carries a human-readable reason on the failure paths so the frontend
+  # shows it instead of the opaque "Unknown error"; it is "" for live/ok states.
+  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":%s,"error":"%s"}\n' \
+    "$status" "$(json_escape "$capi")" "$br" "$tb" "$errs" "$(json_escape "$err")" > "$STATE_FILE"
 }
 
 now() { date +%s.%N; }
@@ -260,9 +292,11 @@ while IFS=$'\t' read -r name url; do
 done < "$CANDIDATES_FILE"
 
 if [[ $n -eq 0 ]]; then
-  write_state "failed" "" 0 0
+  slog "no candidates parsed from $CANDIDATES_FILE -> failed"
+  write_state "failed" "" 0 0 "No sources are configured for this game"
   exit 1
 fi
+slog "loaded $n candidate source(s): ${C_NAME[*]}"
 
 write_state "downloading" "" 0 0
 
@@ -340,13 +374,18 @@ while :; do
       if [[ "$(zip_has_app_key "$APPID" "${C_ZIP[i]}")" == "yes" ]]; then
         satisfied=1
         [[ -z "$first_satisfied" ]] && first_satisfied="$(now)"
+        slog "source '${C_NAME[i]}' ok + has app key (http=${http:-?})"
+      else
+        slog "source '${C_NAME[i]}' ok but no app key (http=${http:-?})"
       fi
     else
       C_STATE[i]="failed"
       if [[ "${rc:-1}" == "28" ]]; then
         API_ERR_TYPE["${C_NAME[i]}"]="timeout"; API_ERR_CODE["${C_NAME[i]}"]=0
+        slog "source '${C_NAME[i]}' failed: timeout (rc=28)"
       else
         API_ERR_TYPE["${C_NAME[i]}"]="error"; API_ERR_CODE["${C_NAME[i]}"]="${http:-0}"
+        slog "source '${C_NAME[i]}' failed (http=${http:-0} rc=${rc:-?})"
       fi
     fi
   done
@@ -410,15 +449,20 @@ for ((i = 0; i < n; i++)); do
 done
 
 if [[ $completed -eq 0 ]]; then
-  write_state "failed" "" 0 0
+  errkeys="${!API_ERR_TYPE[*]}"; [[ -z "$errkeys" ]] && errkeys="none"
+  slog "no source completed successfully -> failed (errored sources: $errkeys)"
+  write_state "failed" "" 0 0 "All $n source(s) failed — no usable package was downloaded"
   exit 1
 fi
+slog "completed=$completed -> selecting winner"
 
 winner="$(select_winner "$APPID" "$SEL")"
 if [[ -z "$winner" ]]; then
-  write_state "failed" "" 0 0
+  slog "select_winner returned empty -> failed"
+  write_state "failed" "" 0 0 "Could not select a source from the downloaded packages"
   exit 1
 fi
+slog "winner='$winner'"
 
 # --- install the winner: place zip + extracted dir for _finalize_install_lua
 DEST_ZIP="$DEST_ROOT/${APPID}.zip"
@@ -439,10 +483,12 @@ write_state "extracting" "$winner" "$win_size" "$win_size"
 cp -f "$win_zip" "$DEST_ZIP" 2>/dev/null
 rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
 if ! unzip -o -q "$DEST_ZIP" -d "$EXTRACT_DIR" 2>/dev/null; then
-  write_state "failed" "$winner" 0 0
+  slog "extract of winner '$winner' failed -> failed"
+  write_state "failed" "$winner" 0 0 "Failed to extract the downloaded package"
   exit 1
 fi
 
 write_state "extracted" "$winner" "$win_size" "$win_size"
+slog "winner '$winner' extracted -> handing off to finalize (extracted)"
 rm -rf "$WORK" 2>/dev/null
 exit 0

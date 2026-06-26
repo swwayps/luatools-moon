@@ -247,6 +247,23 @@ patch_replace "$OUT/backend/downloads.lua" \
                     currentApi = data.currentApi,
                 })'
 
+# 3a-sexies. downloads.lua — terminal-latch in get_add_status. A duplicate or
+#     straggler worker can re-write a "failed" state file AFTER this appid has
+#     already finalized to "done" (the .lua + manifests are on disk), flipping
+#     the UI from "Game Added!" back to "Failed" even though the install is
+#     real (the user sees it after a Steam restart). Once the in-memory state
+#     is "done", ignore a late "failed" from disk and clear the stray file.
+patch_replace "$OUT/backend/downloads.lua" \
+'            if success and type(data) == "table" and data.status then' \
+'            if success and type(data) == "table" and data.status then
+                if data.status == "failed" then
+                    local _cur = _get_download_state(appid)
+                    if _cur and _cur.status == "done" then
+                        pcall(fs.remove, state_file)
+                        return { success = true, state = _cur }
+                    end
+                end'
+
 # 3a-quinquies. downloads.lua — the smart path leaves a <appid>_candidates.tsv
 #     in temp_dl. The worker removes it via its EXIT trap, but if the worker is
 #     killed before the trap runs the file leaks. Clean it defensively here too,
@@ -764,7 +781,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-smart-dedup; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2
