@@ -12,8 +12,6 @@ curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/i
 > manager. Flatpak and Snap Steam are not supported.
 >
 > **Want Steam theme support?** Use the [`millennium` branch](https://github.com/luatools-linux/luatools-moon/tree/millennium).
->
-> **Want to install without the LuaTools plugin?** Append `-s -- --noplugin` to the command above.
 
 ---
 
