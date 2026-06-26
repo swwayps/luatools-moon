@@ -1160,3 +1160,104 @@ with open(path, "w", encoding="utf-8") as f:
     f.write(s)
 print("[patch-frontend] Un-Fix clears WINEDLLOVERRIDES launch option")
 PY
+
+# ---------------------------------------------------------------------------
+# "Manage" header buttons for an already-added game.
+#
+# When a game is already added via LuaTools, HasLuaToolsForApp returns
+# exists===true and the upstream code suppresses the "Add via LuaTools" header
+# button (returning early). In that state the store-page button row only shows
+# "Restart Steam", with no inline way to remove the game or open the fixes
+# menu. This injects two buttons — "Remove via LuaTools" and "Fixes Menu" —
+# styled like the native Restart Steam / Add via LuaTools buttons, right after
+# Restart Steam.
+#
+# Three anchored splices:
+#   1. the helper (linux/frontend/manage-buttons.js) is inserted into the IIFE
+#      scope just before addLuaToolsButton (declarations hoist);
+#   2. a call is added in the HasLuaToolsForApp exists===true branch;
+#   3. the new insertion-guard flag is reset on page change (both reset blocks).
+#
+# Anchored: aborts loudly if any upstream anchor moved.
+# ---------------------------------------------------------------------------
+MANAGE_INC="$SCRIPT_DIR/../linux/frontend/manage-buttons.js"
+if [[ ! -f "$MANAGE_INC" ]]; then
+  echo "[patch-frontend] missing manage-buttons include at $MANAGE_INC" >&2
+  exit 2
+fi
+
+INC="$MANAGE_INC" "$PYBIN" - "$JS" <<'PY'
+import os, sys
+
+path = sys.argv[1]
+with open(os.environ["INC"], "r", encoding="utf-8") as f:
+    fn = f.read()
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+# 1. Splice the helper before addLuaToolsButton (same IIFE scope).
+def_anchor = "  function addLuaToolsButton() {\n"
+if s.count(def_anchor) != 1:
+    sys.stderr.write(
+        "[patch-frontend] MANAGE DEF ANCHOR FAILED: found %d matches (need 1).\n"
+        "addLuaToolsButton moved upstream; update scripts/patch-frontend.sh.\n"
+        % s.count(def_anchor))
+    sys.exit(3)
+s = s.replace(def_anchor, fn.rstrip() + "\n\n" + def_anchor, 1)
+
+# 2. Call the helper in the exists===true branch (game already added).
+call_anchor = (
+'                if (payload && payload.success && payload.exists === true) {\n'
+'                  backendLog(\n'
+'                    "LuaTools already present for this app; not inserting button",\n'
+'                  );\n'
+'                  window.__LuaToolsPresenceCheckInFlight = false;\n'
+'                  return; // do not insert\n'
+'                }\n'
+)
+if s.count(call_anchor) != 1:
+    sys.stderr.write(
+        "[patch-frontend] MANAGE CALL ANCHOR FAILED: found %d matches (need 1).\n"
+        "The HasLuaToolsForApp exists branch moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % s.count(call_anchor))
+    sys.exit(3)
+call_repl = (
+'                if (payload && payload.success && payload.exists === true) {\n'
+'                  backendLog(\n'
+'                    "LuaTools already present for this app; not inserting button",\n'
+'                  );\n'
+'                  // slsteammoon: the game is already added, so "Add via\n'
+'                  // LuaTools" is suppressed. Surface inline header buttons to\n'
+'                  // remove the game and open the Fixes Menu (same layout as\n'
+'                  // Restart Steam / Add via LuaTools).\n'
+'                  try {\n'
+'                    addLuaToolsManageButtons(appid, steamdbContainer);\n'
+'                  } catch (_) {}\n'
+'                  window.__LuaToolsPresenceCheckInFlight = false;\n'
+'                  return; // do not insert\n'
+'                }\n'
+)
+s = s.replace(call_anchor, call_repl, 1)
+
+# 3. Reset the manage insertion-guard flag on page change (both reset blocks
+#    carry the same 4-line flag-reset sequence -> expect exactly 2 matches).
+reset_anchor = (
+'      window.__LuaToolsButtonInserted = false;\n'
+'      window.__LuaToolsRestartInserted = false;\n'
+'      window.__LuaToolsIconInserted = false;\n'
+'      window.__LuaToolsHeaderInserted = false;\n'
+)
+n_reset = s.count(reset_anchor)
+if n_reset != 2:
+    sys.stderr.write(
+        "[patch-frontend] MANAGE RESET ANCHOR FAILED: found %d matches (need 2).\n"
+        "The page-change flag-reset blocks moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % n_reset)
+    sys.exit(3)
+reset_repl = reset_anchor + '      window.__LuaToolsManageInserted = false;\n'
+s = s.replace(reset_anchor, reset_repl)
+
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Remove via LuaTools + Fixes Menu header buttons injected")
+PY
