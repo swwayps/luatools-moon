@@ -16,8 +16,9 @@
 #  ------------
 #  - No install-time footprint: run on demand, nothing persists on disk.
 #  - Only curl + tar/gzip + sed are needed (all implied by a `curl ... | bash`
-#    run). The bundle is uploaded to a binary-capable file host (catbox.moe,
-#    with uguu.se as fallback) so complete, possibly-large logs survive intact.
+#    run). The bundle is uploaded to a binary-capable file host (uguu.se, which
+#    auto-expires in ~3h, with catbox.moe as fallback) so complete,
+#    possibly-large logs survive intact.
 #  - Privacy: every archived log is filtered by scrub() before it leaves the
 #    machine. Person-identifying data is masked (home/username, Steam account
 #    id, SteamID64, email, IPv4, Steam CM region); technically useful, non-PII
@@ -210,8 +211,8 @@ collect() {
 }
 
 # ----------------------------------------------------------------------------
-# Upload — catbox.moe (reliable, permanent) primary, uguu.se (auto-expires
-# ~3h) fallback. Both accept binary and large files (unlike text pastebins).
+# Upload — uguu.se (auto-expires ~3h) primary, catbox.moe (reliable, permanent)
+# fallback. Both accept binary and large files (unlike text pastebins).
 # Echoes a VALIDATED url on success; returns 1 if both sinks fail.
 # ----------------------------------------------------------------------------
 _catbox_upload() { # $1 file -> validated url
@@ -238,8 +239,8 @@ _uguu_upload() { # $1 file -> validated url
 
 upload() { # $1 file -> validated url
 	local file="$1" url
-	if url="$(_catbox_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
 	if url="$(_uguu_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
+	if url="$(_catbox_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
 	return 1
 }
 
@@ -274,7 +275,7 @@ main() {
 	if url="$(upload "$DIAG_TMP")"; then
 		printf '%s\n' "$url"
 	else
-		echo "diag: upload failed (catbox.moe and uguu.se both unreachable)" >&2
+		echo "diag: upload failed (uguu.se and catbox.moe both unreachable)" >&2
 		exit 1
 	fi
 }
