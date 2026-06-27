@@ -2,24 +2,31 @@
 # ============================================================================
 #  luatools-moon — diagnostics collector
 # ============================================================================
-#  Gathers the stack's logs, strips person-identifying data, bundles them and
-#  uploads the bundle to a public paste, printing ONLY the resulting link.
+#  Gathers the stack's logs, strips person-identifying data, bundles them into
+#  a .tar.gz and uploads the bundle to a public paste, printing ONLY the link.
 #
 #    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/diagnose.sh | bash
+#
+#  The link points at a gzip tarball of the COMPLETE logs (one file each),
+#  fetched + read with:
+#
+#    curl -fsSL <link> -o luatools-logs.tar.gz && tar xzf luatools-logs.tar.gz
 #
 #  Design notes
 #  ------------
 #  - No install-time footprint: run on demand, nothing persists on disk.
-#  - No hard dependencies beyond what a `curl ... | bash` run already implies
-#    (bash, curl, tar/gzip, sed). A bash /dev/tcp fallback covers the upload
-#    when the curl-based sink is unreachable.
-#  - Privacy: collected logs are filtered by scrub() before they ever leave the
-#    machine. We mask person-identifying data (home/username, Steam account id,
-#    SteamID64, email, IPv4, Steam CM region) and KEEP the technically useful,
-#    non-PII fields (appids, depot ids, manifest gids, build ids, hashes).
+#  - Only curl + tar/gzip + sed are needed (all implied by a `curl ... | bash`
+#    run). A bash /dev/tcp termbin fallback covers the upload if paste.rs is
+#    unreachable.
+#  - Privacy: every archived log is filtered by scrub() before it leaves the
+#    machine. Person-identifying data is masked (home/username, Steam account
+#    id, SteamID64, email, IPv4, Steam CM region); technically useful, non-PII
+#    fields (appids, depot ids, manifest gids, build ids, hashes) are kept.
 #  - Secrets are NEVER collected: OAuth tokens in ~/.config/CloudRedirect, the
 #    Lumen per-boot RPC token (session.json), etc. Only explicit log files are
 #    read.
+#  - Logs are archived COMPLETE, except cef_log (Chromium noise) which is
+#    tail-capped so a multi-MB file can't blow the paste size limit.
 #  - The paste link is treated as inert: validated against a strict regex,
 #    never eval'd, printed escaped.
 # ============================================================================
@@ -30,10 +37,9 @@ set -uo pipefail
 # scrub : stdin -> stdout, masking person-identifying data.
 #
 # The running identity is taken from SCRUB_USER / SCRUB_HOME (so it is unit-
-# testable with a fixed fixture identity); in normal runs main() seeds them
-# from the real user. Everything not person-identifying (appids, depot ids,
-# manifest gids, build ids, hashes, timestamps, memory addresses) is preserved
-# on purpose so the logs stay diagnosable.
+# testable with a fixed fixture identity); in normal runs they default to the
+# real user. Everything not person-identifying (appids, depot ids, manifest
+# gids, build ids, hashes, timestamps, memory addresses) is preserved.
 # ----------------------------------------------------------------------------
 
 # Escape every non-alphanumeric char so an arbitrary string is safe to embed in
@@ -47,27 +53,24 @@ scrub() {
 
 	local -a args=(-E)
 
-	# Literal home dir + running username (strongest: catches the name wherever
-	# it appears, not just under /home/). Added only when non-empty.
 	if [ -n "$h" ]; then
 		args+=(-e "s#$(_re_escape "$h")#/home/USER#g")
 	fi
-
-	# Generic home paths (other users mentioned in shared logs, e.g. cef logs).
 	args+=(-e 's#/home/[A-Za-z0-9._-]+#/home/USER#g')
 
-	# Steam account id (Steam3 accountid) — directly maps to a public SteamID64
-	# / profile URL, so it deanonymizes. Appears as userdata/<id> and in
-	# CloudRedirect storage/backups/<id> paths.
+	# Steam account id (Steam3 accountid) — maps to a public SteamID64 / profile
+	# URL, so it deanonymizes. Appears as userdata/<id> and in CloudRedirect
+	# storage/backups/<id> paths, or as a keyed value.
 	args+=(-e 's#(userdata|storage|backups)/[0-9]+#\1/ACCOUNTID#g')
-	# accountId given as a keyed value (e.g. "m_accountId = 488150314").
-	args+=(-e 's/(account[_ ]?id)([^0-9]{1,6})[0-9]+/\1\2ACCOUNTID/gI')
+	# Separator restricted to non-alphanumerics so the rule can't span across a
+	# following word (and can't re-consume the ACCOUNTID placeholder + eat the
+	# next token's digits).
+	args+=(-e 's/(account[_ ]?id)([^0-9A-Za-z]{1,6})[0-9]+/\1\2ACCOUNTID/gI')
 
-	# Full SteamID64 (17 digits, 7656...). Bounded so 18/19-digit manifest gids
-	# are untouched.
+	# Full SteamID64 (17 digits, 7656...). Bounded so longer manifest gids stay.
 	args+=(-e 's/\b7656[0-9]{13}\b/STEAMID/g')
 
-	# Email addresses (incl. a set FakeEmail value).
+	# Emails (incl. a set FakeEmail value).
 	args+=(-e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/EMAIL/g')
 
 	# IPv4 addresses.
@@ -79,7 +82,6 @@ scrub() {
 	# Forced account / persona name given as a keyed value.
 	args+=(-e 's/((force_)?account_?name|persona_?name)([[:space:]]*[:=][[:space:]]*)[^[:space:]]+/\1\3NAME/gI')
 
-	# Bare username token anywhere else. Added last and only when non-empty.
 	if [ -n "$u" ]; then
 		args+=(-e "s/\b$(_re_escape "$u")\b/USER/g")
 	fi
@@ -92,29 +94,23 @@ scrub() {
 #
 # The sink's response is attacker-controllable if the sink is hijacked, so the
 # returned link is treated as inert: only an exact https paste.rs / termbin.com
-# URL with an alphanumeric id is ever accepted. Anything with whitespace,
-# control/ANSI bytes, shell metacharacters, a foreign host or extra text is
-# rejected. The caller never eval's the value and prints it with printf %s.
+# URL with an alphanumeric id is accepted. Whitespace, control/ANSI bytes, shell
+# metacharacters, a foreign host or extra text are all rejected. The caller
+# never eval's the value and prints it with printf %s.
 # ----------------------------------------------------------------------------
 validate_paste_url() {
 	local u="${1-}"
-	# Reject any whitespace/newline up front (so a multiline string can't slip
-	# past the anchored regex on some regex engines).
 	case "$u" in
 		*[[:space:]]*) return 1 ;;
 	esac
-	# Strict shape. The trailing anchor + [A-Za-z0-9]-only id rejects control
-	# bytes, ANSI escapes, path traversal and shell metacharacters implicitly.
 	[[ "$u" =~ ^https://(paste\.rs|termbin\.com)/[A-Za-z0-9]+$ ]]
 }
 
 # ----------------------------------------------------------------------------
 # Log collection
 # ----------------------------------------------------------------------------
-# Per-file tail cap and overall cap. Diagnostic value lives in the tail (recent
-# events); the overall cap keeps the bundle under the paste host's size limit.
-DIAG_PER_FILE_CAP="${DIAG_PER_FILE_CAP:-262144}"   # 256 KiB / file
-DIAG_TOTAL_CAP="${DIAG_TOTAL_CAP:-716800}"         # ~700 KiB total
+DIAG_CEF_CAP="${DIAG_CEF_CAP:-262144}"   # tail cap for cef_log (Chromium noise)
+DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-900000}" # paste.rs ~1 MiB upload ceiling
 
 # Resolve the Steam root (layout-independent): prefer the bootstrapped
 # ~/.steam/steam symlink, else known per-distro data dirs. Echoes "" if none.
@@ -128,27 +124,35 @@ steam_root() {
 	printf ''
 }
 
-# Append a scrubbed, tail-capped copy of a log file to $DIAG_OUT. The header
-# (which embeds the path) is scrubbed too, so the home/username never leaks via
-# the section title. No-op when the file is absent/unreadable.
-_add_file() { # $1 label  $2 path
-	local label="$1" path="$2"
-	[ -f "$path" ] && [ -r "$path" ] || return 0
-	{
-		printf '\n===== %s (%s) =====\n' "$label" "$path"
-		tail -c "$DIAG_PER_FILE_CAP" "$path" 2>/dev/null
-	} | scrub >> "$DIAG_OUT"
+# Scrub a source log into the staging dir. With cap>0 only the trailing cap
+# bytes are kept (used to bound cef_log, and to shrink the whole bundle if it
+# exceeds the paste size limit). No-op when the source is absent/unreadable.
+_stage_file() { # $1 stage-dir  $2 dest-relpath  $3 src  $4 cap(bytes,0=full)
+	local stage="$1" dest="$2" src="$3" cap="${4:-0}"
+	[ -f "$src" ] && [ -r "$src" ] || return 0
+	mkdir -p "$stage/$(dirname "$dest")"
+	if [ "$cap" -gt 0 ]; then
+		tail -c "$cap" "$src" 2>/dev/null | scrub > "$stage/$dest"
+	else
+		scrub < "$src" > "$stage/$dest"
+	fi
 }
 
-# Build the diagnostics bundle at $1. Only explicit log files are read — never
-# whole config dirs (CloudRedirect holds OAuth tokens; Lumen holds a session
-# token). Auto-detects which line (Lumen/Millennium) and components are present.
+DIAG_STAGE=""   # current staging dir (for cleanup on interrupt)
+
+# Build the diagnostics tarball at $1. $2 = global tail cap in bytes (0 = full
+# logs, cef_log still capped). Only explicit log files are read — never whole
+# config dirs (CloudRedirect holds OAuth tokens; Lumen holds a session token).
 collect() {
-	DIAG_OUT="$1"
+	local outtar="$1" cap="${2:-0}"
+	local stage; stage="$(mktemp -d "${TMPDIR:-/tmp}/luatools-diag.XXXXXX")" || return 1
+	DIAG_STAGE="$stage"
+
 	local sr; sr="$(steam_root)"
 
+	# Summary header (scrubbed).
 	{
-		printf '===== luatools-moon diagnostics =====\n'
+		printf 'luatools-moon diagnostics\n'
 		printf 'date(utc): %s\n' "$(date -u '+%Y-%m-%d %H:%M:%S')"
 		printf 'kernel: %s   arch: %s\n' "$(uname -r 2>/dev/null)" "$(uname -m 2>/dev/null)"
 		if [ -r /etc/os-release ]; then
@@ -157,27 +161,37 @@ collect() {
 		fi
 		printf 'steam_root: %s\n' "${sr:-NOT FOUND}"
 		printf 'components:'
-		[ -d "$HOME/.local/share/Lumen" ] || [ -f "$HOME/.lumen.log" ] && printf ' lumen'
+		{ [ -d "$HOME/.local/share/Lumen" ] || [ -f "$HOME/.lumen.log" ]; } && printf ' lumen'
 		{ [ -d "$HOME/.millennium" ] || [ -d "$HOME/.local/share/millennium" ]; } && printf ' millennium'
 		[ -d "$HOME/.config/CloudRedirect" ] && printf ' cloudredirect'
 		[ -f "$HOME/.SLSsteam.log" ] && printf ' slsteam'
 		printf '\n'
-	} | scrub >> "$DIAG_OUT"
+		[ "$cap" -gt 0 ] && printf 'note: logs tail-capped to %d bytes to fit the upload limit\n' "$cap"
+	} | scrub > "$stage/summary.txt"
 
-	# Stack logs.
-	_add_file "slsteam"        "$HOME/.SLSsteam.log"
-	_add_file "slsteam-config" "$HOME/.config/SLSsteam/config.yaml"
-	_add_file "lumen"          "$HOME/.lumen.log"
+	# Stack logs (complete unless a global cap is in force).
+	_stage_file "$stage" "slsteam.log"        "$HOME/.SLSsteam.log"                  "$cap"
+	_stage_file "$stage" "slsteam-config.yaml" "$HOME/.config/SLSsteam/config.yaml"  "$cap"
+	_stage_file "$stage" "lumen.log"          "$HOME/.lumen.log"                     "$cap"
+	_stage_file "$stage" "cloudredirect-cr_debug.log"     "$HOME/.config/CloudRedirect/cr_debug.log"     "$cap"
+	_stage_file "$stage" "cloudredirect-cloud_redirect.log" "$HOME/.config/CloudRedirect/cloud_redirect.log" "$cap"
 
-	# Steam's own logs directory (content_log, cef_log, connection_log, ...).
-	if [ -n "$sr" ]; then
-		local f
-		for f in "$sr"/logs/*; do _add_file "steam-log" "$f"; done
+	# Steam's own logs directory — complete, except cef_log which is always
+	# tail-capped (the global cap, if any, only tightens it further).
+	if [ -n "$sr" ] && [ -d "$sr/logs" ]; then
+		local f base fcap
+		for f in "$sr"/logs/*; do
+			[ -f "$f" ] || continue
+			base="$(basename "$f")"
+			fcap="$cap"
+			case "$base" in
+				cef_log*)
+					if [ "$cap" -gt 0 ] && [ "$cap" -lt "$DIAG_CEF_CAP" ]; then fcap="$cap"
+					else fcap="$DIAG_CEF_CAP"; fi ;;
+			esac
+			_stage_file "$stage" "steam-logs/$base" "$f" "$fcap"
+		done
 	fi
-
-	# CloudRedirect — ONLY the two log files, never the config dir (tokens!).
-	_add_file "cloudredirect" "$HOME/.config/CloudRedirect/cr_debug.log"
-	_add_file "cloudredirect" "$HOME/.config/CloudRedirect/cloud_redirect.log"
 
 	# Millennium line (fallback branch) — best-effort glob of its log dirs.
 	local g
@@ -185,56 +199,76 @@ collect() {
 	         "$HOME"/.millennium/logs/*.log \
 	         "$HOME"/.local/share/millennium/*.log \
 	         "$HOME"/.local/share/millennium/logs/*.log; do
-		_add_file "millennium" "$g"
+		[ -f "$g" ] || continue
+		_stage_file "$stage" "millennium/$(basename "$g")" "$g" "$cap"
 	done
 
-	# Keep the bundle under the paste host's size limit (tail = recent events).
-	if [ "$(wc -c < "$DIAG_OUT" 2>/dev/null || echo 0)" -gt "$DIAG_TOTAL_CAP" ]; then
-		local tmp; tmp="$(mktemp "${TMPDIR:-/tmp}/luatools-diag.XXXXXX")" || return 0
-		{ printf '[... older output trimmed to fit ...]\n'; tail -c "$DIAG_TOTAL_CAP" "$DIAG_OUT"; } > "$tmp"
-		mv -f "$tmp" "$DIAG_OUT"
-	fi
+	tar -czf "$outtar" -C "$stage" . 2>/dev/null
+	local rc=$?
+	rm -rf "$stage"; DIAG_STAGE=""
+	return $rc
 }
 
 # ----------------------------------------------------------------------------
 # Upload — paste.rs (curl) primary, termbin (bash /dev/tcp) fallback.
 # Echoes a VALIDATED url on success; returns 1 if both sinks fail.
 # ----------------------------------------------------------------------------
-_termbin_upload() { # $1 file -> raw response
+
+# paste.rs: only a 201 (whole paste stored) is accepted. 206 (partial / too
+# big) is rejected so the caller can shrink and retry rather than serve a
+# truncated tarball.
+_paste_rs_upload() { # $1 file -> validated url (201 only)
+	command -v curl >/dev/null 2>&1 || return 1
+	local file="$1" body code
+	body="$(mktemp "${TMPDIR:-/tmp}/luatools-diag.XXXXXX")" || return 1
+	code="$(curl -sS --max-time 60 --data-binary @"$file" https://paste.rs/ \
+		-o "$body" -w '%{http_code}' 2>/dev/null || echo 000)"
+	local url; url="$(cat "$body" 2>/dev/null)"; rm -f "$body"
+	[ "$code" = "201" ] && validate_paste_url "$url" && { printf '%s' "$url"; return 0; }
+	return 1
+}
+
+_termbin_upload() { # $1 file -> validated url
 	local file="$1" resp
 	exec 3<>/dev/tcp/termbin.com/9999 || return 1
 	cat "$file" >&3
 	resp="$(cat <&3)"
 	exec 3>&- 2>/dev/null || true
-	printf '%s' "$resp" | tr -d '\000\r\n'
+	resp="$(printf '%s' "$resp" | tr -d '\000\r\n')"
+	validate_paste_url "$resp" && { printf '%s' "$resp"; return 0; }
+	return 1
 }
 
 upload() { # $1 file -> validated url
 	local file="$1" url
-	if command -v curl >/dev/null 2>&1; then
-		url="$(curl -sS --max-time 30 --data-binary @"$file" https://paste.rs/ 2>/dev/null || true)"
-		if validate_paste_url "$url"; then printf '%s\n' "$url"; return 0; fi
-	fi
-	url="$(_termbin_upload "$file" 2>/dev/null || true)"
-	if validate_paste_url "$url"; then printf '%s\n' "$url"; return 0; fi
+	if url="$(_paste_rs_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
+	if url="$(_termbin_upload "$file" 2>/dev/null)"; then printf '%s\n' "$url"; return 0; fi
 	return 1
 }
 
 # ----------------------------------------------------------------------------
 # main — collect, upload, print ONLY the link.
 # ----------------------------------------------------------------------------
-# Holds the temp bundle path; global so the EXIT trap can clean it after main
-# returns (a function-local would be out of scope by then, tripping set -u).
 DIAG_TMP=""
-_diag_cleanup() { rm -f "${DIAG_TMP:-}" 2>/dev/null || true; }
+_diag_cleanup() {
+	rm -f "${DIAG_TMP:-}" 2>/dev/null || true
+	[ -n "${DIAG_STAGE:-}" ] && rm -rf "${DIAG_STAGE}" 2>/dev/null || true
+}
 
 main() {
-	local url
+	local url cap
 	trap _diag_cleanup EXIT
 	DIAG_TMP="$(mktemp "${TMPDIR:-/tmp}/luatools-diag.XXXXXX")" \
 		|| { echo "diag: cannot create a temporary file" >&2; exit 1; }
 
-	collect "$DIAG_TMP"
+	# Build the complete bundle; shrink with progressively tighter caps only if
+	# it exceeds the paste size limit (keeps logs complete in the common case).
+	collect "$DIAG_TMP" 0
+	for cap in 524288 131072; do
+		[ "$(wc -c < "$DIAG_TMP" 2>/dev/null || echo 0)" -le "$DIAG_MAX_BYTES" ] && break
+		collect "$DIAG_TMP" "$cap"
+	done
+
 	if [ ! -s "$DIAG_TMP" ]; then
 		echo "diag: no logs found to collect" >&2
 		exit 1
@@ -243,7 +277,7 @@ main() {
 	if url="$(upload "$DIAG_TMP")"; then
 		printf '%s\n' "$url"
 	else
-		echo "diag: upload failed (paste.rs and termbin both unreachable)" >&2
+		echo "diag: upload failed (paste.rs and termbin both unreachable, or bundle too large)" >&2
 		exit 1
 	fi
 }
