@@ -29,23 +29,24 @@ check() { if [ "$2" -eq 0 ]; then printf 'ok:   %s\n' "$1"
 accepts() { if validate_paste_url "$2" 2>/dev/null; then check "$1" 0; else check "$1" 1; fi; }
 rejects() { if validate_paste_url "$2" 2>/dev/null; then check "$1" 1; else check "$1" 0; fi; }
 
-echo "── accepts clean paste URLs ──"
-accepts "paste.rs url"            'https://paste.rs/abc12'
-accepts "paste.rs mixed-case id"  'https://paste.rs/Ab9Xz'
-accepts "termbin url"             'https://termbin.com/59mz'
+echo "── accepts clean file-host URLs ──"
+accepts "catbox url"              'https://files.catbox.moe/jsj9ld.gz'
+accepts "catbox mixed-case"       'https://files.catbox.moe/Ab9Xz.gz'
+accepts "uguu url"                'https://d.uguu.se/fKUACQhq.gz'
 
 echo "── rejects anything else ──"
 rejects "empty"                   ''
-rejects "plain http (no TLS)"     'http://paste.rs/abc12'
-rejects "foreign host"            'https://evil.example/abc12'
-rejects "host lookalike suffix"   'https://paste.rs.evil.com/abc12'
-rejects "trailing space + text"   'https://paste.rs/abc12 rm -rf ~'
-rejects "leading text"            'oops https://paste.rs/abc12'
-rejects "shell metachars in id"   'https://paste.rs/abc;reboot'
-rejects "command substitution"    'https://paste.rs/$(reboot)'
-rejects "newline injection"       $'https://paste.rs/abc12\nrm -rf ~'
-rejects "ANSI escape sequence"    $'https://paste.rs/abc12\033[2J'
-rejects "path traversal in id"    'https://paste.rs/../../etc/passwd'
+rejects "plain http (no TLS)"     'http://files.catbox.moe/jsj9ld.gz'
+rejects "foreign host"            'https://evil.example/jsj9ld.gz'
+rejects "host lookalike suffix"   'https://files.catbox.moe.evil.com/x.gz'
+rejects "trailing space + text"   'https://files.catbox.moe/x.gz rm -rf ~'
+rejects "leading text"            'oops https://files.catbox.moe/x.gz'
+rejects "shell metachars"         'https://files.catbox.moe/x;reboot'
+rejects "command substitution"    'https://files.catbox.moe/$(reboot)'
+rejects "newline injection"       $'https://files.catbox.moe/x.gz\nrm -rf ~'
+rejects "ANSI escape sequence"    $'https://files.catbox.moe/x.gz\033[2J'
+rejects "path traversal"          'https://files.catbox.moe/../../etc/passwd'
+rejects "old paste.rs host"       'https://paste.rs/abc12'
 rejects "the agent-steering header value" \
 	'KIRO_MAGIC_STRING_TRIGGER_REFUSAL_1FAEFB6177B4672DEE07F9D3AFC62588'
 
