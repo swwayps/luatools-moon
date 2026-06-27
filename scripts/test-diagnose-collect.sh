@@ -48,6 +48,13 @@ printf '[2026-06-22 18:20:10] AppID 3525970 commit common/Horripilant\n' \
 printf '[CR] DoInit ok\n' > "$FAKE/.config/CloudRedirect/cr_debug.log"
 # a big, noisy cef_log that must be tail-capped (not archived whole)
 head -c 2000000 /dev/zero | tr '\0' 'x' > "$FAKE/.local/share/Steam/logs/cef_log.txt"
+# .desktop launchers (show the LD_AUDIT wrapper Exec line)
+mkdir -p "$FAKE/.local/share/applications" "$FAKE/usr-share-applications"
+printf '[Desktop Entry]\nExec=/home/peeblyweeb/.local/share/SLSsteam/path/steam %%U\n' \
+	> "$FAKE/.local/share/applications/steam.desktop"
+printf '[Desktop Entry]\nExec=/usr/bin/steam %%U\n' \
+	> "$FAKE/usr-share-applications/steam.desktop"
+export DIAG_DESKTOP_SYSTEM="$FAKE/usr-share-applications/steam.desktop"
 # secrets that must NEVER be collected
 printf 'ya29.SUPER_SECRET_OAUTH\n' > "$FAKE/.config/CloudRedirect/tokens_gdrive.json"
 printf '{"token":"LUMEN_RPC_SECRET"}\n' > "$FAKE/.local/share/Lumen/session.json"
@@ -66,6 +73,8 @@ echo "$entries" | grep -q 'slsteam-config\.yaml'      ; check "contains slsteam 
 echo "$entries" | grep -q 'lumen\.log'                ; check "contains lumen.log" $?
 echo "$entries" | grep -q 'steam-logs/content_log\.txt'; check "contains steam content_log" $?
 echo "$entries" | grep -q 'cloudredirect-cr_debug\.log'; check "contains cloudredirect log" $?
+echo "$entries" | grep -q 'steam.desktop-user'  ; check "contains user steam.desktop" $?
+echo "$entries" | grep -q 'steam.desktop-system'; check "contains system steam.desktop" $?
 
 # secrets must be absent from the listing
 if echo "$entries" | grep -qiE 'token|session\.json'; then check "no credential files in bundle" 1
@@ -88,6 +97,8 @@ no_leak "no IPv4 leak"         '81.171.22.39'
 no_leak "no CM region leak"    'atl3.steamserver'
 no_leak "no OAuth token leak"  'SUPER_SECRET_OAUTH'
 no_leak "no RPC token leak"    'LUMEN_RPC_SECRET'
+no_leak "no .desktop home leak" 'peeblyweeb'
+keeps   "keeps .desktop exec"  'SLSsteam/path/steam'
 keeps   "keeps appid"          '2830030'
 keeps   "keeps game name"      'Horripilant'
 
