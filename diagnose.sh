@@ -16,8 +16,8 @@
 #  ------------
 #  - No install-time footprint: run on demand, nothing persists on disk.
 #  - Only curl + tar/gzip + sed are needed (all implied by a `curl ... | bash`
-#    run). A bash /dev/tcp termbin fallback covers the upload if paste.rs is
-#    unreachable.
+#    run). The bundle is uploaded to a binary-capable file host (catbox.moe,
+#    with uguu.se as fallback) so complete, possibly-large logs survive intact.
 #  - Privacy: every archived log is filtered by scrub() before it leaves the
 #    machine. Person-identifying data is masked (home/username, Steam account
 #    id, SteamID64, email, IPv4, Steam CM region); technically useful, non-PII
@@ -26,7 +26,7 @@
 #    Lumen per-boot RPC token (session.json), etc. Only explicit log files are
 #    read.
 #  - Logs are archived COMPLETE, except cef_log (Chromium noise) which is
-#    tail-capped so a multi-MB file can't blow the paste size limit.
+#    tail-capped so a multi-MB file can't bloat the upload.
 #  - The paste link is treated as inert: validated against a strict regex,
 #    never eval'd, printed escaped.
 # ============================================================================
@@ -90,27 +90,27 @@ scrub() {
 }
 
 # ----------------------------------------------------------------------------
-# validate_paste_url : 0 iff $1 is a clean, known-shape paste URL.
+# validate_paste_url : 0 iff $1 is a clean, known-shape file-host URL.
 #
 # The sink's response is attacker-controllable if the sink is hijacked, so the
-# returned link is treated as inert: only an exact https paste.rs / termbin.com
-# URL with an alphanumeric id is accepted. Whitespace, control/ANSI bytes, shell
-# metacharacters, a foreign host or extra text are all rejected. The caller
-# never eval's the value and prints it with printf %s.
+# returned link is treated as inert: only an exact catbox / uguu file URL is
+# accepted. Whitespace, control/ANSI bytes, shell metacharacters, a foreign
+# host or extra text are rejected. The caller never eval's it and prints it
+# with printf %s.
 # ----------------------------------------------------------------------------
 validate_paste_url() {
 	local u="${1-}"
 	case "$u" in
 		*[[:space:]]*) return 1 ;;
 	esac
-	[[ "$u" =~ ^https://(paste\.rs|termbin\.com)/[A-Za-z0-9]+$ ]]
+	[[ "$u" =~ ^https://(files\.catbox\.moe|[a-z]\.uguu\.se)/[A-Za-z0-9._-]+$ ]]
 }
 
 # ----------------------------------------------------------------------------
 # Log collection
 # ----------------------------------------------------------------------------
 DIAG_CEF_CAP="${DIAG_CEF_CAP:-262144}"   # tail cap for cef_log (Chromium noise)
-DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-900000}" # paste.rs ~1 MiB upload ceiling
+DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-94371840}" # 90 MiB safety ceiling; catbox/uguu handle large files, so logs stay complete
 
 # Resolve the Steam root (layout-independent): prefer the bootstrapped
 # ~/.steam/steam symlink, else known per-distro data dirs. Echoes "" if none.
@@ -126,7 +126,7 @@ steam_root() {
 
 # Scrub a source log into the staging dir. With cap>0 only the trailing cap
 # bytes are kept (used to bound cef_log, and to shrink the whole bundle if it
-# exceeds the paste size limit). No-op when the source is absent/unreadable.
+# exceeds the safety ceiling). No-op when the source is absent/unreadable.
 _stage_file() { # $1 stage-dir  $2 dest-relpath  $3 src  $4 cap(bytes,0=full)
 	local stage="$1" dest="$2" src="$3" cap="${4:-0}"
 	[ -f "$src" ] && [ -r "$src" ] || return 0
@@ -210,39 +210,36 @@ collect() {
 }
 
 # ----------------------------------------------------------------------------
-# Upload — paste.rs (curl) primary, termbin (bash /dev/tcp) fallback.
+# Upload — catbox.moe (reliable, permanent) primary, uguu.se (auto-expires
+# ~3h) fallback. Both accept binary and large files (unlike text pastebins).
 # Echoes a VALIDATED url on success; returns 1 if both sinks fail.
 # ----------------------------------------------------------------------------
-
-# paste.rs: only a 201 (whole paste stored) is accepted. 206 (partial / too
-# big) is rejected so the caller can shrink and retry rather than serve a
-# truncated tarball.
-_paste_rs_upload() { # $1 file -> validated url (201 only)
+_catbox_upload() { # $1 file -> validated url
 	command -v curl >/dev/null 2>&1 || return 1
-	local file="$1" body code
-	body="$(mktemp "${TMPDIR:-/tmp}/luatools-diag.XXXXXX")" || return 1
-	code="$(curl -sS --max-time 60 --data-binary @"$file" https://paste.rs/ \
-		-o "$body" -w '%{http_code}' 2>/dev/null || echo 000)"
-	local url; url="$(cat "$body" 2>/dev/null)"; rm -f "$body"
-	[ "$code" = "201" ] && validate_paste_url "$url" && { printf '%s' "$url"; return 0; }
+	local url
+	url="$(curl -sS --max-time 120 -F 'reqtype=fileupload' \
+		-F "fileToUpload=@$1;filename=luatools-logs.tar.gz" \
+		https://catbox.moe/user/api.php 2>/dev/null | tr -d '\r\n')"
+	validate_paste_url "$url" && { printf '%s' "$url"; return 0; }
 	return 1
 }
 
-_termbin_upload() { # $1 file -> validated url
-	local file="$1" resp
-	exec 3<>/dev/tcp/termbin.com/9999 || return 1
-	cat "$file" >&3
-	resp="$(cat <&3)"
-	exec 3>&- 2>/dev/null || true
-	resp="$(printf '%s' "$resp" | tr -d '\000\r\n')"
-	validate_paste_url "$resp" && { printf '%s' "$resp"; return 0; }
+_uguu_upload() { # $1 file -> validated url
+	command -v curl >/dev/null 2>&1 || return 1
+	local raw url
+	raw="$(curl -sS --max-time 120 -F "files[]=@$1;filename=luatools-logs.tar.gz" https://uguu.se/upload.php 2>/dev/null)"
+	# Pull the JSON "url" value and unescape the \/ sequences.
+	url="$(printf '%s' "$raw" \
+		| sed -n 's/.*"url"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+		| sed 's#\\/#/#g' | tr -d '\r\n')"
+	validate_paste_url "$url" && { printf '%s' "$url"; return 0; }
 	return 1
 }
 
 upload() { # $1 file -> validated url
 	local file="$1" url
-	if url="$(_paste_rs_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
-	if url="$(_termbin_upload "$file" 2>/dev/null)"; then printf '%s\n' "$url"; return 0; fi
+	if url="$(_catbox_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
+	if url="$(_uguu_upload "$file")"; then printf '%s\n' "$url"; return 0; fi
 	return 1
 }
 
@@ -262,7 +259,7 @@ main() {
 		|| { echo "diag: cannot create a temporary file" >&2; exit 1; }
 
 	# Build the complete bundle; shrink with progressively tighter caps only if
-	# it exceeds the paste size limit (keeps logs complete in the common case).
+	# it exceeds the safety ceiling (keeps logs complete in the common case).
 	collect "$DIAG_TMP" 0
 	for cap in 524288 131072; do
 		[ "$(wc -c < "$DIAG_TMP" 2>/dev/null || echo 0)" -le "$DIAG_MAX_BYTES" ] && break
@@ -277,7 +274,7 @@ main() {
 	if url="$(upload "$DIAG_TMP")"; then
 		printf '%s\n' "$url"
 	else
-		echo "diag: upload failed (paste.rs and termbin both unreachable, or bundle too large)" >&2
+		echo "diag: upload failed (catbox.moe and uguu.se both unreachable)" >&2
 		exit 1
 	fi
 }
