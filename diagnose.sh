@@ -174,6 +174,11 @@ collect() {
 	_stage_file "$stage" "slsteam.log"        "$HOME/.SLSsteam.log"                  "$cap"
 	_stage_file "$stage" "slsteam-config.yaml" "$HOME/.config/SLSsteam/config.yaml"  "$cap"
 	_stage_file "$stage" "lumen.log"          "$HOME/.lumen.log"                     "$cap"
+
+	# Steam .desktop launchers — show the LD_AUDIT wrapper Exec line (key for
+	# launch issues). System path is overridable for tests.
+	_stage_file "$stage" "steam.desktop-user"   "$HOME/.local/share/applications/steam.desktop" "$cap"
+	_stage_file "$stage" "steam.desktop-system" "${DIAG_DESKTOP_SYSTEM:-/usr/share/applications/steam.desktop}" "$cap"
 	_stage_file "$stage" "cloudredirect-cr_debug.log"     "$HOME/.config/CloudRedirect/cr_debug.log"     "$cap"
 	_stage_file "$stage" "cloudredirect-cloud_redirect.log" "$HOME/.config/CloudRedirect/cloud_redirect.log" "$cap"
 
