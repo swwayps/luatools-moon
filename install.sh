@@ -1017,12 +1017,14 @@ any_release_asset_url() {
 		2>/dev/null | head -n1
 }
 
-# Echo a compact JSON object {tag, asset_at, size} describing the release asset
-# matching glob $2, for the Lumen About tab's update check. The fingerprint is
-# the asset's UPLOAD time + size — so re-uploading the asset under the SAME tag
-# (the common workflow: edit the v2.6 asset, no new tag) is still detected as an
-# update. $3 selects "latest" (default) or "any" (scan releases, newest first).
-# Always echoes valid JSON ("{}" on failure); best-effort, never fails install.
+# Echo a compact JSON object {tag, asset_at, size, id} describing the release
+# asset matching glob $2, for the Lumen About tab's update check. The
+# fingerprint is the asset's id + UPLOAD time + size — so re-uploading the asset
+# under the SAME tag (the common workflow: edit the v2.6 asset, no new tag) is
+# still detected as an update, and the unique asset id is shown installed-vs-new
+# so the change is legible even when the tag and date are unchanged. $3 selects
+# "latest" (default) or "any" (scan releases, newest first). Always echoes valid
+# JSON ("{}" on failure); best-effort, never fails install.
 release_asset_info() {
 	local repo="$1" glob="$2" mode="${3:-latest}" api meta
 	if [ "$mode" = "any" ]; then
@@ -1030,14 +1032,14 @@ release_asset_info() {
 		meta="$(api_get "$api")" || { printf '{}'; return 0; }
 		printf '%s' "$meta" | jq -c --arg glob "$glob" \
 			'[ .[] as $r | $r.assets[]? | select(.name | test($glob))
-			   | {tag:$r.tag_name, asset_at:.created_at, size:.size} ][0] // {}' \
+			   | {tag:$r.tag_name, asset_at:.created_at, size:.size, id:.id} ][0] // {}' \
 			2>/dev/null || printf '{}'
 	else
 		api="https://api.github.com/repos/${repo}/releases/latest"
 		meta="$(api_get "$api")" || { printf '{}'; return 0; }
 		printf '%s' "$meta" | jq -c --arg glob "$glob" \
 			'.tag_name as $t | [ .assets[]? | select(.name | test($glob))
-			   | {tag:$t, asset_at:.created_at, size:.size} ][0] // {}' \
+			   | {tag:$t, asset_at:.created_at, size:.size, id:.id} ][0] // {}' \
 			2>/dev/null || printf '{}'
 	fi
 }
