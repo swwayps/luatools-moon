@@ -1767,20 +1767,49 @@ $(L "When run through the one-liner, pass options after '-- ':" \
 $(L "Options" "Opções"):
   --noplugin   $(L "Install only slsteam-moon + Lumen (skip the LuaTools plugin)." \
                   "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
+  --nolaunch   $(L "Do not auto-start Steam at the end of install." \
+                  "Não inicia a Steam automaticamente ao final da instalação.")
   -h, --help   $(L "Show this help and exit." "Mostra esta ajuda e sai.")
 EOF
 }
 
-# Pure option parser: sets OPT_NOPLUGIN / OPT_HELP, records the first unknown
-# option in OPT_BAD_ARG and returns 1 (main turns that into usage + abort).
-# Resets its output vars each call so it's safe to invoke repeatedly (tests).
+# should_autolaunch — true when we should open Steam through the wrapper at the
+# end of install. The installer only ever runs in a normal DESKTOP session (a
+# gamescope Game Mode session has no terminal to run `curl | bash`; Game Mode is
+# covered separately by install_gamemode_hook), so there is no Game Mode case to
+# guard here. We only skip when the user opted out or there is no graphical
+# session (e.g. a headless/SSH install). Reads OPT_NOLAUNCH (parse_args) + env,
+# so it is unit-testable.
+should_autolaunch() {
+	[ "${OPT_NOLAUNCH:-0}" = 1 ] && return 1
+	[ -n "${SLS_NO_LAUNCH:-}" ] && return 1
+	[ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ] && return 1
+	return 0
+}
+
+# do_autolaunch — open Steam injected through the wrapper, detached + silent, so
+# the first post-install launch is injected and the desktop-coverage re-assert
+# runs. Never blocks: returns immediately. No-op if the wrapper is missing.
+do_autolaunch() {
+	local wrapper="$HOME/.local/share/SLSsteam/path/steam"
+	[ -x "$wrapper" ] || return 0
+	log_info "$(L "Starting Steam (injected) for the first time…" \
+	             "Iniciando a Steam (injetada) pela primeira vez…")"
+	setsid nohup "$wrapper" -silent >/dev/null 2>&1 < /dev/null &
+}
+
+# Pure option parser: sets OPT_NOPLUGIN / OPT_NOLAUNCH / OPT_HELP, records the
+# first unknown option in OPT_BAD_ARG and returns 1 (main turns that into usage +
+# abort). Resets its output vars each call so it's safe to invoke repeatedly.
 parse_args() {
 	OPT_NOPLUGIN=0
+	OPT_NOLAUNCH=0
 	OPT_HELP=0
 	OPT_BAD_ARG=""
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			--noplugin) OPT_NOPLUGIN=1 ;;
+			--nolaunch) OPT_NOLAUNCH=1 ;;
 			-h|--help)  OPT_HELP=1 ;;
 			*)          OPT_BAD_ARG="$1"; return 1 ;;
 		esac
@@ -1856,6 +1885,12 @@ main() {
 	install_cloudredirect
 
 	print_complete
+
+	# Open Steam (injected, windowed, detached) so the first post-install launch
+	# is injected and the desktop-coverage re-assert runs. Guarded + opt-out.
+	if should_autolaunch; then
+		do_autolaunch
+	fi
 }
 
 # Run the installer unless sourced for unit tests (SLSPLUGIN_LIB_ONLY=1).
