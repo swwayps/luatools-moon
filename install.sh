@@ -1793,8 +1793,9 @@ should_autolaunch() {
 do_autolaunch() {
 	local wrapper="$HOME/.local/share/SLSsteam/path/steam"
 	[ -x "$wrapper" ] || return 0
-	log_info "$(L "Starting Steam (injected) for the first time…" \
-	             "Iniciando a Steam (injetada) pela primeira vez…")"
+	# Start Steam injected, detached + silent. No explicit "starting Steam"
+	# message: it just comes up as part of finishing, so the first-run client
+	# update isn't mistaken for the installer hanging.
 	setsid nohup "$wrapper" -silent >/dev/null 2>&1 < /dev/null &
 }
 
