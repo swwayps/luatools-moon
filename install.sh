@@ -657,10 +657,15 @@ restore_steam_sh() {
 
 	[ -f "$sh" ] || return 0
 
-	# Genuine Valve steam.sh always mentions bootstrap.tar.xz. If it does and
-	# it does not inject SLSsteam, it's already clean — leave it alone.
-	if grep -q "bootstrap.tar.xz" "$sh" 2>/dev/null \
-	   && ! grep -qiE "SLSsteam|client\.sh|headcrab|LD_AUDIT" "$sh" 2>/dev/null; then
+	# Genuine Valve steam.sh always mentions bootstrap.tar.xz. Judge it with our
+	# OWN slsteam-moon shim block stripped out, so the wrapper path (which
+	# contains the substring "SLSsteam") is never mistaken for the old headcrab
+	# hijack. Headcrab's steam.sh is identified by client.sh / headcrab / a raw
+	# LD_AUDIT= injection plus the ABSENCE of bootstrap.tar.xz.
+	local _body
+	_body="$(sed '/^# >>> slsteam-moon >>>$/,/^# <<< slsteam-moon <<<$/d' "$sh" 2>/dev/null)"
+	if printf '%s' "$_body" | grep -q "bootstrap.tar.xz" \
+	   && ! printf '%s' "$_body" | grep -qiE "client\.sh|headcrab|LD_AUDIT"; then
 		return 0
 	fi
 
