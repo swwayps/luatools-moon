@@ -570,6 +570,74 @@ end' \
     return true
 end'
 
+# 3g-bis. steam_utils.lua — multi-source library discovery (Fixes menu
+#     install detection). Steam keeps two copies of the library list:
+#     config/libraryfolders.vdf and steamapps/libraryfolders.vdf. The
+#     content system reads the steamapps copy (content_log: "Loaded Steam
+#     library folders configuration: .../steamapps/libraryfolders.vdf"),
+#     and the two files can drift -- a drive added later may be present in
+#     one but stale/absent in the other. Upstream read ONLY the config
+#     copy, so an entire drive's games could be invisible to the Fixes menu
+#     ("not installed" no matter what) while Steam still listed/installed
+#     them. Union BOTH files (plus the Steam root itself) and de-duplicate.
+LIB_NEEDLE="$(cat <<'NEEDLE_EOF'
+    local library_vdf_path = fs.join(steam_path, "config", "libraryfolders.vdf")
+    if not fs.exists(library_vdf_path) then
+        return { success = false, error = "Could not find libraryfolders.vdf" }
+    end
+    
+    local vdf_content = m_utils.read_file(library_vdf_path)
+    if not vdf_content then
+        return { success = false, error = "Failed to read libraryfolders.vdf" }
+    end
+    
+    local all_library_paths = {}
+    for path in vdf_content:gmatch('"path"%s+"([^"]+)"') do
+        path = path:gsub("\\\\", "\\")
+        table.insert(all_library_paths, path)
+    end
+NEEDLE_EOF
+)"
+LIB_REPL="$(cat <<'REPL_EOF'
+    -- Steam keeps two copies of the library list: config/libraryfolders.vdf
+    -- and steamapps/libraryfolders.vdf. The content system reads the
+    -- steamapps copy and the two can drift, so a drive added later may be
+    -- present in one but stale or absent in the other. Reading only the
+    -- config copy made whole drives invisible here. Union BOTH files (plus
+    -- the Steam root itself) and de-duplicate.
+    local seen = {}
+    local all_library_paths = {}
+    local function add_lib(p)
+        if not p or p == "" then return end
+        p = p:gsub("\\\\", "\\"):gsub("/+$", "")
+        if p == "" or seen[p] then return end
+        seen[p] = true
+        table.insert(all_library_paths, p)
+    end
+
+    add_lib(steam_path)
+    local vdf_candidates = {
+        fs.join(steam_path, "config", "libraryfolders.vdf"),
+        fs.join(steam_path, "steamapps", "libraryfolders.vdf"),
+    }
+    for _, vdf_path in ipairs(vdf_candidates) do
+        if fs.exists(vdf_path) then
+            local vdf_content = m_utils.read_file(vdf_path)
+            if vdf_content then
+                for p in vdf_content:gmatch('"path"%s+"([^"]+)"') do
+                    add_lib(p)
+                end
+            end
+        end
+    end
+
+    if #all_library_paths == 0 then
+        return { success = false, error = "Could not find libraryfolders.vdf" }
+    end
+REPL_EOF
+)"
+patch_replace "$OUT/backend/steam_utils.lua" "$LIB_NEEDLE" "$LIB_REPL"
+
 # 3h. main.lua — SpaceFix (AIO button). On Linux the "All-In-One Fixes"
 #     fix is not the Windows Unsteam emulator (Proton ignores the dropped
 #     DLLs); instead we enable slsteam-moon's native FakeAppIds map so the
