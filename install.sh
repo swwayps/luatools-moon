@@ -1793,10 +1793,12 @@ should_autolaunch() {
 do_autolaunch() {
 	local wrapper="$HOME/.local/share/SLSsteam/path/steam"
 	[ -x "$wrapper" ] || return 0
-	# Start Steam injected, detached + silent. No explicit "starting Steam"
-	# message: it just comes up as part of finishing, so the first-run client
-	# update isn't mistaken for the installer hanging.
-	setsid nohup "$wrapper" -silent >/dev/null 2>&1 < /dev/null &
+	# Start Steam injected, detached. No -silent: a silent first launch doesn't
+	# survive Steam's post-update self-relaunch (the client updates on a fresh
+	# install, then re-launches; -silent broke that relaunch), and a normal
+	# window also makes the first-run client update visible instead of looking
+	# like the installer hung.
+	setsid nohup "$wrapper" >/dev/null 2>&1 < /dev/null &
 }
 
 # Pure option parser: sets OPT_NOPLUGIN / OPT_NOLAUNCH / OPT_HELP, records the
