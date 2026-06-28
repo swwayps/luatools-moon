@@ -789,128 +789,8 @@ stop_lumen() {
 	log_success "$(L "Lumen stopped" "Lumen parado")"
 }
 
-# True iff <appid> is a list item under the AdditionalApps: key in the SLSsteam
-# config ($1). AdditionalApps holds the appids the new port (and the old port's
-# accela, on a correct install) inject as owned — those are real, working games
-# and must NOT be touched. Scoped to the AdditionalApps block so a matching id
-# under another list key (FakeAppIds, ...) doesn't count.
-config_has_added_app() {
-	local cfg="$1" appid="$2"
-	[ -f "$cfg" ] || return 1
-	awk -v id="$appid" '
-		/^[A-Za-z_][A-Za-z0-9_]*:/ { inblk = ($0 ~ /^AdditionalApps:/) ? 1 : 0 }
-		inblk && $0 ~ ("(^|[[:space:]])-[[:space:]]*" id "([[:space:]]|#|$)") { found = 1 }
-		END { exit(found ? 0 : 1) }
-	' "$cfg"
-}
-
-# is_oldport_dummy <acf_path> <appid> -> 0 (true) iff this appmanifest is an
-# old-port "dummy" game we should reset:
-#   - SizeOnDisk == 0 (a real install has bytes on disk), AND
-#   - a stplug-in <appid>.lua exists (where the LuaTools-style old port stored
-#     the game's depot keys — corroborates it's ours; Steam runtimes and an
-#     accela'd working game have no stplug lua), AND
-#   - the appid is NOT in AdditionalApps (accela / the new port register working
-#     games there; e.g. Hollow Knight: Silksong installed via accela stays).
-is_oldport_dummy() {
-	local acf="$1" appid="$2"
-	local cfg="$HOME/.config/SLSsteam/config.yaml"
-	local stplug="$HOME/.steam/steam/config/stplug-in"
-	local size
-	size="$(grep -E '"SizeOnDisk"' "$acf" 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1)"
-	[ "${size:-x}" = "0" ] || return 1
-	[ -f "$stplug/$appid.lua" ] || [ -f "$stplug/$appid.lua.disabled" ] || return 1
-	config_has_added_app "$cfg" "$appid" && return 1
-	return 0
-}
-
-# True iff at least one old-port dummy is present. Secondary trigger so the
-# reset still runs for users who already migrated off the old port (its
-# headcrab markers were removed on that first install) but kept a dummy.
-has_oldport_dummy() {
-	local steam_root="$HOME/.steam/steam"
-	local data_dir; data_dir="$(readlink -f "$steam_root" 2>/dev/null || echo "$steam_root")"
-	local sa="$data_dir/steamapps"
-	[ -d "$sa" ] || return 1
-	local acf appid
-	for acf in "$sa"/appmanifest_*.acf; do
-		[ -f "$acf" ] || continue
-		appid="$(basename "$acf" | sed -E 's/^appmanifest_([0-9]+)\.acf$/\1/')"
-		[ -n "$appid" ] || continue
-		if is_oldport_dummy "$acf" "$appid"; then return 0; fi
-	done
-	return 1
-}
-
-# Reset "dummy" games left behind by the old port. The old port, when the user
-# did NOT point it at accela, drops a game into a half-state: an appmanifest
-# marked installed but with SizeOnDisk 0 and no real files, plus a stplug-in
-# .lua. slsteam-moon can't heal that in place (no ownership ticket -> the
-# validate just verifies-and-stops), so we remove the dummy entirely and let
-# the user re-add it cleanly through LuaTools. See is_oldport_dummy for the
-# strict criterion that keeps real installs (and Steam runtimes) untouched.
-# Steam is already stopped (main() calls stop_steam before cleanup).
-reset_dummy_oldport_games() {
-	local steam_root="$HOME/.steam/steam"
-	local data_dir; data_dir="$(readlink -f "$steam_root" 2>/dev/null || echo "$steam_root")"
-	local sa="$data_dir/steamapps"
-	local stplug="$steam_root/config/stplug-in"
-	[ -d "$sa" ] || return 0
-
-	local removed=0 acf appid installdir
-	for acf in "$sa"/appmanifest_*.acf; do
-		[ -f "$acf" ] || continue
-		appid="$(basename "$acf" | sed -E 's/^appmanifest_([0-9]+)\.acf$/\1/')"
-		[ -n "$appid" ] || continue
-		is_oldport_dummy "$acf" "$appid" || continue
-
-		installdir="$(grep -E '"installdir"' "$acf" 2>/dev/null | head -1 | sed -E 's/.*"installdir"[[:space:]]+"([^"]*)".*/\1/')"
-
-		log_step "$(L "Resetting dummy game left by the old port (appid $appid)" \
-		             "Resetando jogo dummy deixado pelo port antigo (appid $appid)")"
-		rm -f "$acf" 2>/dev/null || true
-		[ -n "$installdir" ] && rm -rf "$sa/common/$installdir" 2>/dev/null || true
-		rm -rf "$sa/downloading/$appid" 2>/dev/null || true
-		rm -f "$stplug/$appid.lua" "$stplug/$appid.lua.disabled" 2>/dev/null || true
-		rm -f "$HOME/.config/SLSsteam/cache/picsbuffer_${appid}."* 2>/dev/null || true
-		removed=$((removed + 1))
-	done
-
-	if [ "$removed" -gt 0 ]; then
-		log_success "$(L "Reset $removed dummy game(s); re-add them through LuaTools" \
-		             "$removed jogo(s) dummy resetado(s); re-adicione pelo LuaTools")"
-	fi
-}
-
-# Set SLSsteam's PlayNotOwnedGames back to our default (no). The old port flips
-# it to yes (so unowned games surface in the library even without a proper
-# install); our default is no. Only this scalar key is touched — AdditionalApps
-# and depot keys are preserved, so AddedApps (real games) keep working.
-disable_playnotowned() {
-	local cfg="$HOME/.config/SLSsteam/config.yaml"
-	[ -f "$cfg" ] || return 0
-	grep -qiE '^[[:space:]]*PlayNotOwnedGames:[[:space:]]*(no|false)([[:space:]]|#|$)' "$cfg" && return 0
-	grep -qE '^[[:space:]]*PlayNotOwnedGames:' "$cfg" || return 0
-	sed -i -E 's/^([[:space:]]*PlayNotOwnedGames:[[:space:]]*).*/\1no/' "$cfg"
-	log_success "$(L "Reset PlayNotOwnedGames to its default (no) in the SLSsteam config" \
-	             "PlayNotOwnedGames revertido ao padrão (no) na config do SLSsteam")"
-}
-
 cleanup_previous_install() {
 	local steam_root="$HOME/.steam/steam"
-
-	# Detect whether the OLD port was present BEFORE we remove its markers
-	# below. The dummy-game reset + PlayNotOwnedGames revert only run on this
-	# path, so a clean install is never touched.
-	local had_old_port=0
-	if [ -f "$steam_root/client.sh" ] \
-	   || [ -d "$HOME/.headcrab" ] \
-	   || [ -d "$HOME/.local/share/SLSsteam" ] \
-	   || { [ -f "$steam_root/steam.cfg" ] && grep -qi "BootStrapperInhibitAll" "$steam_root/steam.cfg" 2>/dev/null; } \
-	   || { [ -f "$steam_root/steam.sh" ] && grep -qiE "client\.sh|headcrab|LD_AUDIT" "$steam_root/steam.sh" 2>/dev/null \
-	        && ! grep -q "bootstrap.tar.xz" "$steam_root/steam.sh" 2>/dev/null; }; then
-		had_old_port=1
-	fi
 
 	# --- Old Millennium plugin directories --------------------------------
 	# The previous port and this plugin both install under a dir named
@@ -1021,16 +901,6 @@ cleanup_previous_install() {
 	# install would BLOCK Lumen. Remove the whole framework here (not just the
 	# old plugin dir handled above) so 8080 is free for Lumen.
 	remove_millennium_framework
-
-	# Old-port residue: reset dummy games + revert PlayNotOwnedGames. Runs when
-	# the old port was detected above, OR when a dummy is still present (covers
-	# users who already migrated — the headcrab markers are gone but a dummy
-	# lingered). is_oldport_dummy keeps the criterion strict, so this never
-	# touches a real install or a Steam runtime.
-	if [ "$had_old_port" -eq 1 ] || has_oldport_dummy; then
-		reset_dummy_oldport_games
-		disable_playnotowned
-	fi
 
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
 }
