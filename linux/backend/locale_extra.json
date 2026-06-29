@@ -1,5 +1,6 @@
 {
   "en": {
+    "Couldn't reach the key server. Check your connection.": "Couldn't reach the key server. Check your connection.",
     "Fixes online play in some games by simulating Spacewar": "Fixes online play in some games by simulating Spacewar",
     "SpaceFix enabled \u2014 (re)launch the game to apply it.": "SpaceFix enabled \u2014 (re)launch the game to apply it.",
     "Are you sure you want to un-fix? This turns off the SpaceFix for this game.": "Are you sure you want to un-fix? This turns off the SpaceFix for this game.",
@@ -24,6 +25,7 @@
     "Restoring the game to its original state\u2026": "Restoring the game to its original state\u2026"
   },
   "pt-BR": {
+    "Couldn't reach the key server. Check your connection.": "N\u00e3o foi poss\u00edvel acessar o servidor da chave. Verifique sua conex\u00e3o.",
     "Fixes online play in some games by simulating Spacewar": "Corrige o online de alguns jogos simulando o Spacewar",
     "SpaceFix enabled \u2014 (re)launch the game to apply it.": "SpaceFix ativado \u2014 (re)inicie o jogo para aplicar.",
     "Are you sure you want to un-fix? This turns off the SpaceFix for this game.": "Tem certeza que deseja desfazer? Isso desativa o SpaceFix deste jogo.",
@@ -48,6 +50,7 @@
     "Restoring the game to its original state\u2026": "Restaurando o jogo ao estado original\u2026"
   },
   "pt": {
+    "Couldn't reach the key server. Check your connection.": "N\u00e3o foi poss\u00edvel aceder ao servidor da chave. Verifique a sua liga\u00e7\u00e3o.",
     "Fixes online play in some games by simulating Spacewar": "Corrige o online de alguns jogos simulando o Spacewar",
     "SpaceFix enabled \u2014 (re)launch the game to apply it.": "SpaceFix ativado \u2014 (re)inicie o jogo para aplicar.",
     "Are you sure you want to un-fix? This turns off the SpaceFix for this game.": "Tem a certeza de que deseja desfazer? Isto desativa o SpaceFix deste jogo.",

@@ -115,6 +115,67 @@ print("[patch-frontend] Restart Steam button injected into Game Added modal")
 PY
 
 # ---------------------------------------------------------------------------
+# Morrenus key status: show the REAL problem, not always "Invalid or rejected".
+#
+# The backend (GetMorrenusStats, patched in build.sh) now returns a structured
+# errorType: "rejected" only on a 401/403 (the server actively refused the
+# key), "unreachable" when the validation request got no usable answer
+# (offline, DNS/TLS, server down/busy, Cloudflare block). Upstream's UI shows
+# one red "Invalid or rejected key" for every failure, which misleads a user
+# whose key is fine but whose network can't reach hubcapmanifest.com. Branch on
+# errorType: keep the red rejection message only for an actual rejection, and
+# show a distinct amber connectivity message otherwise.
+#
+# Anchored: aborts loudly if the upstream stats-error block moved.
+# ---------------------------------------------------------------------------
+"$PYBIN" - "$JS" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    s = f.read()
+
+anchor = (
+'                      } else {\n'
+'                        statsDiv.innerHTML =\n'
+'                          "<span style=\'color:#ff5c5c;\'>" +\n'
+'                          lt("Invalid or rejected key") +\n'
+'                          "</span>";\n'
+'                      }\n'
+)
+
+replacement = (
+'                      } else if (res && res.errorType === "rejected") {\n'
+'                        statsDiv.innerHTML =\n'
+'                          "<span style=\'color:#ff5c5c;\'>" +\n'
+'                          lt("Invalid or rejected key") +\n'
+'                          "</span>";\n'
+'                      } else {\n'
+'                        // slsteammoon: not a rejection — the request never got\n'
+'                        // a usable answer (offline, DNS/TLS, server down/busy).\n'
+'                        // Show the real problem (amber), not a bad-key message.\n'
+'                        statsDiv.innerHTML =\n'
+'                          "<span style=\'color:#f0ad4e;\'>" +\n'
+'                          lt("Couldn\'t reach the key server. Check your connection.") +\n'
+'                          "</span>";\n'
+'                      }\n'
+)
+
+n = s.count(anchor)
+if n != 1:
+    sys.stderr.write(
+        "[patch-frontend] MORRENUS STATS ANCHOR FAILED: found %d matches (need 1).\n"
+        "The Morrenus key-status block moved upstream; update "
+        "scripts/patch-frontend.sh.\n" % n)
+    sys.exit(3)
+
+s = s.replace(anchor, replacement, 1)
+with open(path, "w", encoding="utf-8") as f:
+    f.write(s)
+print("[patch-frontend] Morrenus key-status message split (rejected vs unreachable)")
+PY
+
+# ---------------------------------------------------------------------------
 # Remove the Millennium disclaimer modal trigger.
 #
 # This fork (lumen-beta) runs on Lumen, not Millennium — the modal warning
