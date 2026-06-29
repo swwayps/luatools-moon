@@ -638,6 +638,39 @@ REPL_EOF
 )"
 patch_replace "$OUT/backend/steam_utils.lua" "$LIB_NEEDLE" "$LIB_REPL"
 
+# 3g-ter. main.lua — GetMorrenusStats: tell a rejected key apart from a
+#     connectivity failure. Upstream collapses EVERY non-200 (timeout, DNS/TLS,
+#     connection refused, 5xx, Cloudflare/WAF block, ...) into a single
+#     "request failed", so the settings UI shows "Invalid or rejected key" even
+#     when the key is fine and the user simply can't reach hubcapmanifest.com.
+#     Return a structured errorType so the frontend can show the REAL problem:
+#     no HTTP answer or 5xx -> "unreachable"; only 401/403 -> "rejected".
+patch_replace "$OUT/backend/main.lua" \
+'    local endpoint = "https://hubcapmanifest.com/api/v1/user/stats?api_key=" .. api_key
+    local ok, resp = pcall(http_client.get, endpoint, { timeout = 10 })
+    if ok and resp and resp.status == 200 then
+        return resp.body -- already JSON string
+    end
+    return json_err("request failed")' \
+'    local endpoint = "https://hubcapmanifest.com/api/v1/user/stats?api_key=" .. api_key
+    local ok, resp = pcall(http_client.get, endpoint, { timeout = 10 })
+    -- http_client.get returns (nil, err) when the request never reached the
+    -- server (DNS/TLS/timeout/refused); a returned table carries the HTTP
+    -- status. A valid key answers 200; only 401/403 mean the server actively
+    -- rejected the key. Anything else (no response, 5xx, 429, ...) is
+    -- "couldn'"'"'t verify", NOT "your key is bad" -- surface that distinction so
+    -- the UI can show the real problem instead of always blaming the key.
+    if not ok or type(resp) ~= "table" then
+        return json_ok({ success = false, errorType = "unreachable" })
+    end
+    if resp.status == 200 then
+        return resp.body -- already JSON string
+    end
+    if resp.status == 401 or resp.status == 403 then
+        return json_ok({ success = false, errorType = "rejected", status = resp.status })
+    end
+    return json_ok({ success = false, errorType = "unreachable", status = resp.status })'
+
 # 3h. main.lua — SpaceFix (AIO button). On Linux the "All-In-One Fixes"
 #     fix is not the Windows Unsteam emulator (Proton ignores the dropped
 #     DLLs); instead we enable slsteam-moon's native FakeAppIds map so the
