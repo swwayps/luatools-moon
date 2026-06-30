@@ -5,17 +5,17 @@
 Set up slsteam-moon, Millennium and the LuaTools plugin automatically with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/millennium/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/millennium/install.sh | bash
 ```
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
 > manager. Flatpak and Snap Steam are not supported — Millennium does not work with them.
 >
-> **Heads up:** this `millennium` branch isn't fully supported and is kept mainly for Steam theme support. For the best experience use the [`main` branch (Lumen)](https://github.com/luatools-linux/luatools-moon/tree/main).
+> **Heads up:** this `millennium` branch isn't fully supported and is kept mainly for Steam theme support. For the best experience use the [`main` branch (Lumen)](https://github.com/swwayps/luatools-moon/tree/main).
 
 ---
 
-Linux port of the `ltsteamplugin` Millennium plugin, built exclusively for the [slsteam-moon](https://github.com/luatools-linux/slsteam-moon) project. It serves as an integration layer that fetches manifest packs and installs them for slsteam-moon to consume natively on Linux.
+Linux port of the `ltsteamplugin` Millennium plugin, built exclusively for the [slsteam-moon](https://github.com/swwayps/slsteam-moon) project. It serves as an integration layer that fetches manifest packs and installs them for slsteam-moon to consume natively on Linux.
 
 ## Credits
 
@@ -36,12 +36,12 @@ Reference material:
 
 ## Support
 
-Open an issue: https://github.com/luatools-linux/luatools-moon/issues
+Open an issue: https://github.com/swwayps/luatools-moon/issues
 
 ## Uninstall
 
 Want to remove everything? Run:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/main/uninstall.sh | bash
 ```
