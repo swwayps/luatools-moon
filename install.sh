@@ -4,7 +4,7 @@
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/millennium/install.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/millennium/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -32,20 +32,20 @@ OPT_BAD_ARG=""
 # ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
-SLS_REPO="luatools-linux/slsteam-moon"
+SLS_REPO="swwayps/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
 # Millennium line: pick the newest release whose asset is the stock wrapper
 # build (slsteam-moon-linux-<ver>.zip, never the -lumen one). Convention-based,
 # so publishing a new version (e.g. v2.5) needs no installer edit.
 SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-[0-9][0-9.]*\\.zip$"
 
-PLUGIN_REPO="luatools-linux/luatools-moon"
+PLUGIN_REPO="swwayps/luatools-moon"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
 # CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
 # repo now; we fetch the prebuilt hook straight from its raw branch.
-CR_MOON_REPO="luatools-linux/cloudredirect-moon"
+CR_MOON_REPO="swwayps/cloudredirect-moon"
 
 MILLENNIUM_INSTALL_URL="https://steambrew.app/install.sh"
 

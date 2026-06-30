@@ -5,7 +5,7 @@
 #  Gathers the stack's logs, strips person-identifying data, bundles them into
 #  a .tar.gz and uploads the bundle to a public paste, printing ONLY the link.
 #
-#    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/diagnose.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/main/diagnose.sh | bash
 #
 #  The link points at a gzip tarball of the COMPLETE logs (one file each),
 #  fetched + read with:

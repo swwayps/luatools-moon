@@ -722,7 +722,7 @@ end'
 cat > "$OUT/backend/update.json" <<'EOF'
 {
   "github": {
-    "owner": "luatools-linux",
+    "owner": "swwayps",
     "repo": "luatools-moon",
     "asset_name": "luatools-linux.zip"
   }
