@@ -4,7 +4,7 @@
 # ============================================================================
 #  Installs the full stack in a single command:
 #
-#    curl -fsSL https://raw.githubusercontent.com/luatools-linux/luatools-moon/main/install.sh | bash
+#    curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/main/install.sh | bash
 #
 #  Pipeline:
 #    1. Pre-flight checks (not-root, x86_64, internet, NATIVE Steam).
@@ -31,24 +31,24 @@ OPT_BAD_ARG=""
 # ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
-SLS_REPO="luatools-linux/slsteam-moon"
+SLS_REPO="swwayps/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
 # Lumen line: pick the newest release whose asset is the Lumen wrapper build
 # (named slsteam-moon-linux-<ver>-lumen.zip). Convention-based, so publishing a
 # new version (e.g. v2.5-lumen) needs no installer edit.
 SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-.*-lumen\\.zip$"
 
-PLUGIN_REPO="luatools-linux/luatools-moon"
+PLUGIN_REPO="swwayps/luatools-moon"
 PLUGIN_ASSET="luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
-LUMEN_REPO="luatools-linux/lumen"
+LUMEN_REPO="swwayps/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
 # CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
 # repo now; we fetch the prebuilt hook straight from its raw branch.
-CR_MOON_REPO="luatools-linux/cloudredirect-moon"
+CR_MOON_REPO="swwayps/cloudredirect-moon"
 
 # CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
 # user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
