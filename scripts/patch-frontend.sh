@@ -602,130 +602,131 @@ anchor = r'''    const onlineStatus = data.onlineFix.status;
       onlineSection.style.cursor = "not-allowed";
     }'''
 
-replacement = r'''    // slsteammoon: source Online Fix from the perondepot mirror (the luatools
-    // index is rate-limited). Always available when installed; resolved by
-    // game name on click.
-    const onlineSection = createFixButton(
-      lt("Online Fix"),
-      lt("Multiplayer fix via peron online-fix.me mirror"),
-      "fa-globe",
-      null,
-      function (e) {
-        e.preventDefault();
-        if (!isGameInstalled) return;
-        if (!window.__LuaToolsGameInstallPath) {
-          ShowLuaToolsAlert("LuaTools", lt("Game install path not found"));
-          return;
-        }
-        // slsteammoon: an online fix is a bundle of Windows DLLs that only
-        // loads under Proton/Wine. A title that ships a native Linux build runs
-        // WITHOUT Proton by default, so the fix would do nothing. Allow it only
-        // when the user has forced a Proton compatibility tool; otherwise
-        // explain how to turn that on. Windows-only titles (no native build)
-        // always run under Proton, so they skip the check.
-        function __ofLooksNativeLinux() {
-          try {
-            if (
-              document.querySelector(
-                ".platform_img.linux, .platform_img.steamos, .sysreq_tab[data-os='linux']",
-              )
-            )
-              return true;
-            var tabs = document.querySelectorAll(
-              ".sysreq_tabs .sysreq_tab, .game_area_sys_req_full",
-            );
-            for (var i = 0; i < tabs.length; i++) {
-              var txt = (tabs[i].textContent || "").toLowerCase();
-              if (txt.indexOf("linux") !== -1 || txt.indexOf("steamos") !== -1)
-                return true;
-            }
-          } catch (_) {}
-          return false;
-        }
-        function __ofBlockNative() {
-          ShowLuaToolsAlert(
-            "LuaTools",
-            lt(
-              "This game has a native Linux version, so Steam runs it without Proton. Online fixes are Windows files that only work under Proton. To use one, open the game's Properties → Compatibility, turn on “Force the use of a specific Steam Play compatibility tool”, pick a Proton version, then try Online Fix again.",
-            ),
-          );
-        }
-        function __ofProceed() {
+replacement = r'''    // slsteammoon: Online Fix availability is resolved UP FRONT from the
+    // perondepot mirror (like Crack/Bypass), not on click. We render a dimmed
+    // "checking" button, then replace it with an enabled button (a fix exists)
+    // or keep it dimmed/disabled (none) -- mirroring the crack button, so the
+    // user sees availability without having to click and wait.
+    //
+    // Native/Proton gate + apply, run on click of an AVAILABLE Online Fix.
+    function __ofApply(url) {
+      if (!window.__LuaToolsGameInstallPath) {
+        ShowLuaToolsAlert("LuaTools", lt("Game install path not found"));
+        return;
+      }
+      // An online fix is a bundle of Windows DLLs that only loads under
+      // Proton/Wine. A title that ships a native Linux build runs WITHOUT Proton
+      // by default, so the fix would do nothing. Allow it only when the user has
+      // forced a Proton compatibility tool; otherwise explain how. Windows-only
+      // titles (no native build) always run under Proton, so they skip the check.
+      function __ofLooksNativeLinux() {
         try {
-          overlay.remove();
+          if (
+            document.querySelector(
+              ".platform_img.linux, .platform_img.steamos, .sysreq_tab[data-os='linux']",
+            )
+          )
+            return true;
+          var tabs = document.querySelectorAll(
+            ".sysreq_tabs .sysreq_tab, .game_area_sys_req_full",
+          );
+          for (var i = 0; i < tabs.length; i++) {
+            var txt = (tabs[i].textContent || "").toLowerCase();
+            if (txt.indexOf("linux") !== -1 || txt.indexOf("steamos") !== -1)
+              return true;
+          }
         } catch (_) {}
-        // slsteammoon: lightweight loading indicator while we resolve the fix
-        // (fetching + matching the mirror index takes a moment).
-        var __ofLoad = document.createElement("div");
-        __ofLoad.className = "luatools-overlay";
-        __ofLoad.style.cssText =
-          "position:fixed;inset:0;background:rgba(0,0,0,0.8);backdrop-filter:blur(12px);z-index:99999;display:flex;align-items:center;justify-content:center;";
-        var __ofColors = getThemeColors();
-        __ofLoad.innerHTML =
-          '<div style="background:' + __ofColors.modalBg + ';color:' + __ofColors.text +
-          ';border:1px solid ' + __ofColors.border +
-          ';border-radius:16px;padding:24px 30px;font-size:15px;display:flex;align-items:center;gap:12px;">' +
-          '<i class="fa-solid fa-spinner fa-spin"></i><span>' +
-          lt("Looking for an online fix…") + "</span></div>";
-        document.body.appendChild(__ofLoad);
-        var __ofClose = function () { try { __ofLoad.remove(); } catch (_) {} };
-        Millennium.callServerMethod("luatools", "ResolveOnlineFix", {
+        return false;
+      }
+      function __ofBlockNative() {
+        ShowLuaToolsAlert(
+          "LuaTools",
+          lt(
+            "This game has a native Linux version, so Steam runs it without Proton. Online fixes are Windows files that only work under Proton. To use one, open the game's Properties → Compatibility, turn on “Force the use of a specific Steam Play compatibility tool”, pick a Proton version, then try Online Fix again.",
+          ),
+        );
+      }
+      function __ofProceed() {
+        applyFix(data.appid, url, lt("Online Fix"), data.gameName, overlay);
+      }
+      if (__ofLooksNativeLinux()) {
+        Millennium.callServerMethod("luatools", "IsCompatToolForced", {
           appid: data.appid,
-          gameName: data.gameName || "",
           contentScriptQuery: "",
         })
           .then(function (res) {
-            __ofClose();
-            const payload = typeof res === "string" ? JSON.parse(res) : res;
-            if (payload && payload.success && payload.found && payload.url) {
-              applyFix(data.appid, payload.url, lt("Online Fix"), data.gameName, null);
-            } else if (payload && payload.success && !payload.found) {
-              ShowLuaToolsAlert(
-                "LuaTools",
-                lt("No online fix found for this game."),
-              );
+            var p = typeof res === "string" ? JSON.parse(res) : res;
+            if (p && p.success && p.forced) {
+              __ofProceed();
             } else {
-              const e2 =
-                payload && payload.error
-                  ? String(payload.error)
-                  : lt("Error starting Online Fix");
-              ShowLuaToolsAlert("LuaTools", e2);
+              __ofBlockNative();
             }
           })
           .catch(function (err) {
-            __ofClose();
-            backendLog("LuaTools: ResolveOnlineFix error: " + err);
-            ShowLuaToolsAlert("LuaTools", lt("Error starting Online Fix"));
+            backendLog("LuaTools: IsCompatToolForced error: " + err);
+            __ofBlockNative();
           });
-        }
-        if (__ofLooksNativeLinux()) {
-          // Native build present: only allow the fix when a Proton/compat tool
-          // is forced for this game; otherwise guide the user to enable one.
-          Millennium.callServerMethod("luatools", "IsCompatToolForced", {
-            appid: data.appid,
-            contentScriptQuery: "",
-          })
-            .then(function (res) {
-              var p = typeof res === "string" ? JSON.parse(res) : res;
-              if (p && p.success && p.forced) {
-                __ofProceed();
-              } else {
-                __ofBlockNative();
-              }
-            })
-            .catch(function (err) {
-              backendLog("LuaTools: IsCompatToolForced error: " + err);
-              __ofBlockNative();
-            });
-        } else {
-          // No native build -> the title runs under Proton anyway, fix applies.
-          __ofProceed();
-        }
+      } else {
+        __ofProceed();
+      }
+    }
+    // Placeholder: dimmed "checking" button (isSuccess=false => no hover).
+    var onlineSection = createFixButton(
+      lt("Online Fix"),
+      lt("Multiplayer fix via peron online-fix.me mirror"),
+      "fa-globe",
+      false,
+      function (e) {
+        e.preventDefault();
       },
     );
     columnsContainer.appendChild(onlineSection);
-
-    if (!isGameInstalled) {
+    // Replace the placeholder with the resolved-state button (keeps position).
+    function __ofReplace(isSuccess, onClick) {
+      var t2 = createFixButton(
+        lt("Online Fix"),
+        lt("Multiplayer fix via peron online-fix.me mirror"),
+        "fa-globe",
+        isSuccess,
+        onClick,
+      );
+      if (onlineSection.parentNode)
+        onlineSection.parentNode.replaceChild(t2, onlineSection);
+      onlineSection = t2;
+      if (!isGameInstalled) {
+        onlineSection.style.opacity = "0.5";
+        onlineSection.style.cursor = "not-allowed";
+      }
+    }
+    if (isGameInstalled) {
+      Millennium.callServerMethod("luatools", "ResolveOnlineFix", {
+        appid: data.appid,
+        gameName: data.gameName || "",
+        contentScriptQuery: "",
+      })
+        .then(function (res) {
+          var payload = typeof res === "string" ? JSON.parse(res) : res;
+          if (payload && payload.success && payload.found && payload.url) {
+            var url = payload.url;
+            __ofReplace(null, function (e) {
+              e.preventDefault();
+              if (!isGameInstalled) return;
+              __ofApply(url);
+            });
+          } else {
+            // No online fix -> dimmed/disabled, exactly like an unavailable crack.
+            __ofReplace(false, function (e) {
+              e.preventDefault();
+            });
+          }
+        })
+        .catch(function (err) {
+          backendLog("LuaTools: ResolveOnlineFix error: " + err);
+          __ofReplace(false, function (e) {
+            e.preventDefault();
+          });
+        });
+    } else {
       onlineSection.style.opacity = "0.5";
       onlineSection.style.cursor = "not-allowed";
     }'''
