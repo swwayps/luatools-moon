@@ -173,6 +173,61 @@ prompt_yes_no() {
 	done
 }
 
+# ── Deferred/optional prompts (Deck on-screen-keyboard friendly) ────────────
+# On SteamOS / Bazzite and derivatives the on-screen keyboard needs Steam
+# RUNNING to type into a terminal. But main() stops Steam early — before the
+# CloudRedirect yes/no prompt — so a Deck user with no physical keyboard
+# couldn't answer it. On those systems we ask up front, while Steam is still
+# open (preask_prompts, called before stop_steam), and cache the answer here;
+# the install step reuses it via resolve_yesno instead of prompting after Steam
+# is gone. Desktop (mutable) installs are unaffected and keep prompting inline.
+# (No Game Mode question on the millennium line — Game Mode isn't installed
+# here.)
+Q_CLOUD_EN="Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves."
+Q_CLOUD_PT="Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves."
+
+PREASK_CLOUD=""
+
+# resolve_yesno CACHE_VAR "q_en" "q_pt" def -> 0 (yes) / 1 (no). Uses a cached
+# y/n answer (by variable name) if present; otherwise prompts now and stores it.
+resolve_yesno() {
+	local -n __cache="$1"
+	local q_en="$2" q_pt="$3" def="$4"
+	case "$__cache" in
+		y) return 0 ;;
+		n) return 1 ;;
+	esac
+	if prompt_yes_no "$q_en" "$q_pt" "$def"; then __cache="y"; return 0; fi
+	__cache="n"; return 1
+}
+
+# Ask the optional yes/no question(s) and pre-warm sudo BEFORE Steam is stopped,
+# on immutable/Deck-class systems only. No-op on mutable desktops and on
+# non-interactive runs (those keep the inline prompts / defaults).
+preask_prompts() {
+	is_immutable_distro || return 0
+	{ [ -e /dev/tty ] && { : >/dev/tty; } 2>/dev/null; } || return 0
+
+	print_section "$(L "A couple of questions (answer now, before Steam closes)" \
+	                   "Algumas perguntas (responda agora, antes de a Steam fechar)")"
+	log_info "$(L "On Steam Deck / SteamOS the on-screen keyboard needs Steam open, so we ask this before stopping it." \
+	             "No Steam Deck / SteamOS o teclado virtual precisa da Steam aberta, então perguntamos isto antes de fechá-la.")"
+
+	resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n" || true
+
+	preask_sudo
+}
+
+# Pre-warm sudo while Steam (and the on-screen keyboard) is still up, so a later
+# sudo step's password prompt doesn't land after Steam is gone. Best-effort.
+preask_sudo() {
+	[ "$(id -u)" -ne 0 ] || return 0
+	command -v sudo >/dev/null 2>&1 || return 0
+	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
+	sudo_hint
+	sudo -v </dev/tty >/dev/tty 2>&1 || true
+}
+
 # ============================================================================
 # Distro detection
 # ============================================================================
@@ -296,11 +351,36 @@ has_gamescope_session() {
 	return 1
 }
 
-# Privilege-escalation prefix for system package operations.
+# Print a one-time "type your password" hint right before sudo actually asks
+# for one. Guarded: shown at most once, and ONLY when a password will really be
+# requested (not root, sudo present, credential not already cached/passwordless).
+# Writes to the terminal (not stdout) so it's safe to call from inside
+# sudo_prefix's command substitution.
+_SUDO_HINT_SHOWN=0
+sudo_hint() {
+	[ "$_SUDO_HINT_SHOWN" = 1 ] && return 0
+	[ "$(id -u)" -ne 0 ] || return 0
+	command -v sudo >/dev/null 2>&1 || return 0
+	sudo -n true 2>/dev/null && return 0   # cached / passwordless: no prompt coming
+	_SUDO_HINT_SHOWN=1
+	local msg
+	msg="$(L "Enter your password below (administrator access is needed)." \
+	         "Digite sua senha abaixo (é necessário acesso de administrador).")"
+	if [ -e /dev/tty ] && { : >/dev/tty; } 2>/dev/null; then
+		printf '%s\n' "$msg" >/dev/tty
+	else
+		printf '%s\n' "$msg" >&2
+	fi
+}
+
+# Privilege-escalation prefix for system package operations. Emits the password
+# hint (to the tty) the first time it hands back a real "sudo", so every sudo
+# site gets the instruction without duplicating it.
 sudo_prefix() {
 	if [ "$(id -u)" -eq 0 ]; then
 		echo ""
 	elif command -v sudo >/dev/null 2>&1; then
+		sudo_hint
 		echo "sudo"
 	else
 		echo ""
@@ -1796,10 +1876,7 @@ install_cloudredirect() {
 	# Cloud saves are optional, so ask first. CloudRedirect (the .so hook plus
 	# the flatpak login app) only matters to people who want Steam Cloud saves
 	# to work for these games; skip the whole step if they say no.
-	if ! prompt_yes_no \
-		"Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves." \
-		"Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves." \
-		"n"; then
+	if ! resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n"; then
 		log_info "$(L "Skipping cloud saves (CloudRedirect)." \
 		             "Pulando os cloud saves (CloudRedirect).")"
 		# Match the config to the hook's real state: if no hook is present,
@@ -1915,12 +1992,11 @@ EOF
 }
 
 # should_autolaunch — true when we should open Steam through the wrapper at the
-# end of install. The installer only ever runs in a normal DESKTOP session (a
-# gamescope Game Mode session has no terminal to run `curl | bash`; Game Mode is
-# covered separately by install_gamemode_hook), so there is no Game Mode case to
-# guard here. We only skip when the user opted out or there is no graphical
-# session (e.g. a headless/SSH install). Reads OPT_NOLAUNCH (parse_args) + env,
-# so it is unit-testable.
+# end of install. The installer only ever runs in a normal DESKTOP session, so
+# there is no Game Mode case to guard here (and the millennium line ships no
+# Game Mode support). We only skip when the user opted out or there is no
+# graphical session (e.g. a headless/SSH install). Reads OPT_NOLAUNCH
+# (parse_args) + env, so it is unit-testable.
 should_autolaunch() {
 	[ "${OPT_NOLAUNCH:-0}" = 1 ] && return 1
 	[ -n "${SLS_NO_LAUNCH:-}" ] && return 1
@@ -1988,6 +2064,11 @@ main() {
 	check_steam_native
 	check_steam_bootstrapped
 
+	# On SteamOS / Bazzite and derivatives the on-screen keyboard needs Steam
+	# running, so ask the optional yes/no question (and pre-warm sudo) NOW,
+	# before we stop Steam. No-op on mutable desktops / non-interactive runs.
+	preask_prompts
+
 	print_section "$(L "Stopping Steam" "Parando a Steam")"
 	stop_steam
 
@@ -2013,10 +2094,10 @@ main() {
 		install_plugin
 	fi
 
-	# Game Mode is opt-in and gamescope-only. It prints its own section header
-	# (and prompts) ONLY when a gamescope session exists, so normal desktop
-	# installs see nothing here.
-	install_gamemode_hook
+	# No Game Mode setup on the millennium line: Millennium doesn't install
+	# correctly on the immutable distros where Game Mode lives (SteamOS/Bazzite)
+	# without workarounds, and its DOM/CSS injection doesn't reach gamepadui
+	# anyway. Game Mode is a Lumen-only feature (see the main branch).
 
 	print_section "$(L "Setting up cloud saves (CloudRedirect)" "Configurando cloud saves (CloudRedirect)")"
 	install_cloudredirect
