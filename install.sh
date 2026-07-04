@@ -1714,22 +1714,24 @@ flatpak_tty() {
 # flatpak is present. Best-effort: failure just means the user finishes setup
 # manually (the .so is already in place).
 install_cloudredirect_flatpak() {
-	local url tmp bundle
+	local url tmp bundle already
 
-	# Already installed? Nothing to do.
-	if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
-		log_success "$(L "CloudRedirect app already installed" "App CloudRedirect já instalado")"
-		CR_FLATPAK_INSTALLED=1
-		return 0
-	fi
-
-	log_info "$(L "Resolving CloudRedirect companion app (flatpak)" \
-	             "Buscando o app companheiro do CloudRedirect (flatpak)")"
-	# The newest CloudRedirect tag may ship no flatpak (e.g. 2.1.7), and recent
-	# ones name it cloudredirect-<ver>.flatpak rather than cloudredirect.flatpak.
-	# Scan all releases for the first matching bundle, excluding .sha256 sidecars.
+	# ALWAYS resolve the newest available flatpak and (re)install it, so an
+	# already-installed but out-of-date app gets refreshed. Selectively11 doesn't
+	# attach a .flatpak to every release, so we scan releases newest-first and
+	# take the first that carries a cloudredirect*.flatpak (any_release_asset_url)
+	# — the latest release that actually ships the app. No version is hard-coded.
+	log_info "$(L "Resolving the latest CloudRedirect app (flatpak)" \
+	             "Buscando o app CloudRedirect mais recente (flatpak)")"
 	url="$(any_release_asset_url "$CR_REPO" "^cloudredirect.*\\.flatpak$" github)"
 	if [ -z "$url" ]; then
+		# No flatpak in any visible release. Keep an existing install if present.
+		if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
+			log_success "$(L "Keeping the installed CloudRedirect app (no newer flatpak found)" \
+			             "Mantendo o app CloudRedirect instalado (nenhum flatpak mais novo encontrado)")"
+			CR_FLATPAK_INSTALLED=1
+			return 0
+		fi
 		log_warn "$(L "Could not find the CloudRedirect flatpak bundle; skipping the login app." \
 		             "Não foi possível encontrar o bundle flatpak do CloudRedirect; pulando o app de login.")"
 		return 1
@@ -1740,6 +1742,10 @@ install_cloudredirect_flatpak() {
 
 	log_info "$(L "Downloading CloudRedirect app" "Baixando o app CloudRedirect")"
 	if ! curl -fL "$url" -o "$bundle"; then
+		# Download failed: keep an existing install if there is one.
+		if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
+			CR_FLATPAK_INSTALLED=1; return 0
+		fi
 		log_warn "$(L "Download of the CloudRedirect app failed; you can install it later." \
 		             "Falha ao baixar o app CloudRedirect; você pode instalá-lo depois.")"
 		return 1
@@ -1760,13 +1766,27 @@ install_cloudredirect_flatpak() {
 	             "Instalando o runtime KDE (exigido pelo app, ~400 MB)")"
 	flatpak_tty install --user -y flathub "$CR_KDE_RUNTIME" || true
 
-	log_info "$(L "Installing the CloudRedirect app" "Instalando o app CloudRedirect")"
-	if flatpak_tty install --user -y --bundle "$bundle"; then
-		log_success "$(L "CloudRedirect app installed" "App CloudRedirect instalado")"
+	# Install, or reinstall over an existing copy so it updates to this bundle.
+	# --reinstall needs the app to be present, so gate it on that.
+	already=""
+	if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
+		already="--reinstall"
+		log_info "$(L "Updating the CloudRedirect app to the latest version" \
+		             "Atualizando o app CloudRedirect para a versão mais recente")"
+	else
+		log_info "$(L "Installing the CloudRedirect app" "Instalando o app CloudRedirect")"
+	fi
+	if flatpak_tty install --user -y $already --bundle "$bundle"; then
+		log_success "$(L "CloudRedirect app installed/updated" "App CloudRedirect instalado/atualizado")"
 		CR_FLATPAK_INSTALLED=1
 		return 0
 	fi
 
+	# A same-version reinstall can report failure; treat an installed app as OK.
+	if flatpak list 2>/dev/null | grep -q "$CR_FLATPAK_APP_ID"; then
+		CR_FLATPAK_INSTALLED=1
+		return 0
+	fi
 	log_warn "$(L "Could not install the CloudRedirect app automatically; you can install it later." \
 	             "Não foi possível instalar o app CloudRedirect automaticamente; você pode instalá-lo depois.")"
 	return 1
