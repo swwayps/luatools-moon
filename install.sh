@@ -50,11 +50,13 @@ LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 # repo now; we fetch the prebuilt hook straight from its raw branch.
 CR_MOON_REPO="swwayps/cloudredirect-moon"
 
-# CloudRedirect (optional) — redirects Steam Cloud for unowned games to the
+# CloudRedirect (optional) — redirects Steam Cloud for added games to the
 # user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
 # hook (cloud_redirect.so) from the cloudredirect-moon repo and load it via the
-# Steam wrapper's LD_PRELOAD; the flatpak companion app provides the
-# cloud-provider login UI.
+# Steam wrapper's LD_PRELOAD. Provider sign-in lives in Lumen Settings → Cloud
+# Saves (the Lumen backend runs the OAuth flow and writes the hook's config
+# directly), so the main line needs no flatpak login app. The flatpak helpers
+# below are retained for the millennium fallback branch only.
 #
 # Why a patched build instead of an upstream release asset: no upstream release
 # ships both fixes we need. 2.0.4 (the `linux` LD_AUDIT tag) attaches reliably
@@ -63,8 +65,7 @@ CR_MOON_REPO="swwayps/cloudredirect-moon"
 # polls steamclient.so for only 10s and then gives up, so on slower-bootstrap
 # distros (Arch/CachyOS) it never attaches. Our branch keeps the 120s wait, the
 # CAS-path healing, and worker-thread crash containment on top of upstream.
-# Built for an old-enough glibc to load in the Steam runtime. The companion
-# flatpak app is still fetched from upstream releases.
+# Built for an old-enough glibc to load in the Steam runtime.
 CR_MOON_RAW_BASE="https://raw.githubusercontent.com/${CR_MOON_REPO}/master"
 CR_SO_URL="${CR_MOON_RAW_BASE}/cloud_redirect.so"
 CR_REPO="Selectively11/CloudRedirect"
@@ -1405,15 +1406,17 @@ install_steamos_gamemode_dropin() {
 #      worker-thread crash containment). The Steam wrapper injects it via
 #      LD_PRELOAD when present (NOT LD_AUDIT — 2.1.x corrupts the client heap if
 #      loaded as an auditor).
-#   2. The flatpak companion app — the cloud-provider login UI (Google Drive /
-#      OneDrive). We install it ONLY if the user already has flatpak; we never
-#      install flatpak itself (too invasive). Without it the .so still loads but
-#      there is nowhere to sync to, so we just tell the user how to finish.
+#   2. Provider sign-in — done in Lumen Settings → Cloud Saves. The Lumen
+#      backend runs the OAuth flow and writes the hook's ~/.config/CloudRedirect
+#      config + token file directly, so the main line needs no flatpak login
+#      app. (The flatpak helpers below are kept for the millennium fallback
+#      branch, which has no Lumen menu to host the tab.)
 #
 # We also flip SLSsteam's DisableCloud to "no" so the cloud RPCs reach
 # CloudRedirect instead of being suppressed for AddedApps.
 
-# Track, for the final notice, whether the login app got installed.
+# Track, for the final notice, whether the flatpak login app got installed
+# (millennium branch only; always 0 on the main line).
 CR_FLATPAK_INSTALLED=0
 
 # Deploy the bundled, patched 32-bit cloud_redirect.so (2.1.5 + 120s
@@ -1653,10 +1656,22 @@ install_cloudredirect_flatpak() {
 	return 1
 }
 
+# Ensure a default CloudRedirect config.json exists so the hook starts in a
+# well-defined local-only state until the user signs in from Lumen Settings →
+# Cloud Saves. Never clobbers an existing config the hook/user already wrote.
+ensure_cloudredirect_config() {
+	local cfg="$HOME/.config/CloudRedirect/config.json"
+	[ -f "$cfg" ] && return 0
+	mkdir -p "$(dirname "$cfg")" 2>/dev/null || return 0
+	printf '{"provider":"local"}\n' > "$cfg" 2>/dev/null || return 0
+	return 0
+}
+
 install_cloudredirect() {
-	# Cloud saves are optional, so ask first. CloudRedirect (the .so hook plus
-	# the flatpak login app) only matters to people who want Steam Cloud saves
-	# to work for these games; skip the whole step if they say no.
+	# Cloud saves are optional, so ask first. CloudRedirect (the .so hook) only
+	# matters to people who want Steam Cloud saves to work for these games; skip
+	# the whole step if they say no. Sign-in now lives in Lumen Settings → Cloud
+	# Saves (no flatpak login app on the main line).
 	if ! prompt_yes_no \
 		"Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves." \
 		"Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves." \
@@ -1672,7 +1687,7 @@ install_cloudredirect() {
 	fi
 
 	# The .so is the core piece — always install it (and enable cloud in the
-	# SLSsteam config) regardless of flatpak.
+	# SLSsteam config).
 	if ! install_cloudredirect_so; then
 		# No hook → no cloud saves; align the config with what's on disk.
 		sync_cloud_config_with_hook
@@ -1681,18 +1696,13 @@ install_cloudredirect() {
 
 	set_disable_cloud no
 
+	# Start the hook in a defined local-only state; the user picks a provider
+	# and signs in from Lumen Settings → Cloud Saves.
+	ensure_cloudredirect_config
+
 	# Heal any saves left in the legacy CAS-corrupt directory layout so Steam
 	# stops reporting "Steam Cloud Error" for them.
 	repair_cas_save_layout
-
-	# The login UI is a flatpak. Only install it if the user already has
-	# flatpak — we never install flatpak itself.
-	if command -v flatpak >/dev/null 2>&1; then
-		install_cloudredirect_flatpak
-	else
-		log_warn "$(L "flatpak not found — installing the cloud hook only." \
-		             "flatpak não encontrado — instalando apenas o hook de cloud.")"
-	fi
 }
 
 # ============================================================================
@@ -1717,28 +1727,15 @@ print_complete() {
 	fi
 	echo ""
 
-	# Cloud-save guidance: the .so is installed but the user still needs the
-	# login app + a provider sign-in before saves actually sync.
+	# Cloud-save guidance: the .so is installed; the user picks a provider and
+	# signs in from Lumen Settings → Cloud Saves (no separate login app).
 	if [ -f "$CR_SO_PATH" ]; then
-		if [ "$CR_FLATPAK_INSTALLED" = 1 ]; then
-			echo -e "  ${MOON}$(L "Cloud saves:" "Cloud saves:")${NC}"
-			echo -e "    $(L "Open the CloudRedirect app and sign in to a provider" \
-			               "Abra o app CloudRedirect e faça login em um provedor")"
-			echo -e "    $(L "(Google Drive / OneDrive), then restart Steam." \
-			               "(Google Drive / OneDrive), depois reinicie a Steam.")"
-			echo ""
-		else
-			echo -e "  ${YELLOW}$(L "Cloud saves (optional):" "Cloud saves (opcional):")${NC}"
-			echo -e "    $(L "The cloud hook is installed, but you need the login app to sync." \
-			               "O hook de cloud está instalado, mas você precisa do app de login para sincronizar.")"
-			echo -e "    $(L "1) Install flatpak (from your package manager)." \
-			               "1) Instale o flatpak (pelo seu gerenciador de pacotes).")"
-			echo -e "    $(L "2) Re-run this installer, or install the CloudRedirect flatpak yourself." \
-			               "2) Rode este instalador de novo, ou instale o flatpak do CloudRedirect manualmente.")"
-			echo -e "    $(L "3) Open the app, sign in to a provider, then restart Steam." \
-			               "3) Abra o app, faça login em um provedor, depois reinicie a Steam.")"
-			echo ""
-		fi
+		echo -e "  ${MOON}$(L "Cloud saves:" "Cloud saves:")${NC}"
+		echo -e "    $(L "Open Steam → Lumen Settings → Cloud Saves to pick a provider" \
+		               "Abra a Steam → Configurações do Lumen → Saves na Nuvem para escolher um provedor")"
+		echo -e "    $(L "(Google Drive / OneDrive) and sign in." \
+		               "(Google Drive / OneDrive) e fazer login.")"
+		echo ""
 	fi
 
 	if [ "$OPT_NOPLUGIN" = 1 ]; then
