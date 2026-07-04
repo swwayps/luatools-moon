@@ -48,13 +48,22 @@ printf '[2026-06-22 18:20:10] AppID 3525970 commit common/Horripilant\n' \
 printf '[CR] DoInit ok\n' > "$FAKE/.config/CloudRedirect/cr_debug.log"
 # a big, noisy cef_log that must be tail-capped (not archived whole)
 head -c 2000000 /dev/zero | tr '\0' 'x' > "$FAKE/.local/share/Steam/logs/cef_log.txt"
-# .desktop launchers (show the LD_AUDIT wrapper Exec line)
-mkdir -p "$FAKE/.local/share/applications" "$FAKE/usr-share-applications"
+# .desktop launchers (show the LD_AUDIT wrapper Exec line). Several *steam*
+# variants scattered across app/autostart dirs — all must be collected into the
+# single steam-desktops.txt file with BEGIN/END separators.
+mkdir -p "$FAKE/.local/share/applications" "$FAKE/usr-share-applications" \
+         "$FAKE/.config/autostart" "$FAKE/flatpak-applications"
 printf '[Desktop Entry]\nExec=/home/peeblyweeb/.local/share/SLSsteam/path/steam %%U\n' \
 	> "$FAKE/.local/share/applications/steam.desktop"
 printf '[Desktop Entry]\nExec=/usr/bin/steam %%U\n' \
 	> "$FAKE/usr-share-applications/steam.desktop"
-export DIAG_DESKTOP_SYSTEM="$FAKE/usr-share-applications/steam.desktop"
+printf '[Desktop Entry]\nExec=steam steam://rungameid/730\nName=Steam CS2\n' \
+	> "$FAKE/.local/share/applications/steam-cs2.desktop"
+printf '[Desktop Entry]\nExec=steam -silent %%U\nX-SLSteamMoon-Patched=true\n' \
+	> "$FAKE/.config/autostart/steam.desktop"
+printf '[Desktop Entry]\nExec=flatpak run com.valvesoftware.Steam\nName=Steam (Flatpak)\n' \
+	> "$FAKE/flatpak-applications/com.valvesoftware.Steam.desktop"
+export DIAG_DESKTOP_DIRS="$FAKE/.local/share/applications:$FAKE/usr-share-applications:$FAKE/.config/autostart:$FAKE/flatpak-applications"
 # secrets that must NEVER be collected
 printf 'ya29.SUPER_SECRET_OAUTH\n' > "$FAKE/.config/CloudRedirect/tokens_gdrive.json"
 printf '{"token":"LUMEN_RPC_SECRET"}\n' > "$FAKE/.local/share/Lumen/session.json"
@@ -73,8 +82,7 @@ echo "$entries" | grep -q 'slsteam-config\.yaml'      ; check "contains slsteam 
 echo "$entries" | grep -q 'lumen\.log'                ; check "contains lumen.log" $?
 echo "$entries" | grep -q 'steam-logs/content_log\.txt'; check "contains steam content_log" $?
 echo "$entries" | grep -q 'cloudredirect-cr_debug\.log'; check "contains cloudredirect log" $?
-echo "$entries" | grep -q 'steam.desktop-user'  ; check "contains user steam.desktop" $?
-echo "$entries" | grep -q 'steam.desktop-system'; check "contains system steam.desktop" $?
+echo "$entries" | grep -q 'steam-desktops\.txt'; check "contains steam-desktops.txt" $?
 
 # secrets must be absent from the listing
 if echo "$entries" | grep -qiE 'token|session\.json'; then check "no credential files in bundle" 1
@@ -101,6 +109,21 @@ no_leak "no .desktop home leak" 'peeblyweeb'
 keeps   "keeps .desktop exec"  'SLSsteam/path/steam'
 keeps   "keeps appid"          '2830030'
 keeps   "keeps game name"      'Horripilant'
+
+# every *steam*.desktop across the search roots is collected into the one file,
+# each wrapped in BEGIN/END separators (patched autostart + unpatched alike).
+desk="$(cat "$EXTRACT/steam-desktops.txt" 2>/dev/null)"
+in_desk() { if grep -qF "$2" <<<"$desk"; then check "$1" 0; else check "$1" 1; fi; }
+in_desk "desktops: has BEGIN separator" '===== BEGIN '
+in_desk "desktops: has END separator"   '===== END '
+in_desk "desktops: user launcher"       'SLSsteam/path/steam'
+in_desk "desktops: system launcher"     '/usr/bin/steam'
+in_desk "desktops: extra steam-cs2"     'Steam CS2'
+in_desk "desktops: autostart launcher"  'X-SLSteamMoon-Patched=true'
+in_desk "desktops: flatpak launcher"    'com.valvesoftware.Steam'
+# separator path headers are scrubbed too (no raw home/username)
+if grep -qF '/home/USER/' <<<"$desk"; then check "desktops: separator path scrubbed" 0
+else check "desktops: separator path scrubbed" 1; fi
 
 # cef_log archived but tail-capped (< its original 2 MB; bounded by DIAG_CEF_CAP)
 cef_sz="$(wc -c < "$EXTRACT/steam-logs/cef_log.txt" 2>/dev/null || echo 999999999)"

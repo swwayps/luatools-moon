@@ -141,6 +141,62 @@ _stage_file() { # $1 stage-dir  $2 dest-relpath  $3 src  $4 cap(bytes,0=full)
 
 DIAG_STAGE=""   # current staging dir (for cleanup on interrupt)
 
+# Collect EVERY *steam*.desktop launcher anywhere on the machine (patched AND
+# unpatched — a stray launcher install.sh never touched is exactly what we want
+# to see) into one scrubbed file, each entry wrapped in BEGIN/END separators
+# that name its source path (the header is scrubbed too, so the home/username
+# never leaks).
+#
+# The search walks the whole filesystem from '/', pruning pseudo/virtual mounts
+# (/proc, /sys, /dev, /run) for speed and to avoid noise, and is wrapped in a
+# timeout so a pathological disk can't hang the run. Search roots and the
+# per-root find depth are overridable for tests via DIAG_DESKTOP_DIRS (a
+# ':'-separated list) and DIAG_DESKTOP_MAXDEPTH.
+# $1 stage-dir  $2 cap(bytes,0=full).
+_collect_desktops() {
+	local stage="$1" cap="${2:-0}"
+	local dest="$stage/steam-desktops.txt"
+
+	local -a roots=()
+	if [ -n "${DIAG_DESKTOP_DIRS:-}" ]; then
+		local IFS=':'; read -r -a roots <<< "$DIAG_DESKTOP_DIRS"
+	else
+		roots=("/")
+	fi
+
+	# find prelude: prune pseudo-filesystems (only meaningful for a '/' walk).
+	local -a prune=( '(' -path /proc -o -path /sys -o -path /dev -o -path /run ')' -prune -o )
+	local -a depth=()
+	[ -n "${DIAG_DESKTOP_MAXDEPTH:-}" ] && depth=( -maxdepth "$DIAG_DESKTOP_MAXDEPTH" )
+	# Bound the walk so a huge/slow disk can't stall the diagnostic.
+	local -a to=()
+	command -v timeout >/dev/null 2>&1 && to=( timeout "${DIAG_DESKTOP_TIMEOUT:-90}" )
+
+	local raw; raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-desk.XXXXXX")" || return 0
+	local -A seen=()
+	local found=0 r f rp
+	for r in "${roots[@]}"; do
+		[ -d "$r" ] || continue
+		while IFS= read -r -d '' f; do
+			rp="$(readlink -f -- "$f" 2>/dev/null || printf '%s' "$f")"
+			[ -n "${seen[$rp]:-}" ] && continue
+			seen[$rp]=1
+			[ -r "$f" ] || continue
+			found=1
+			{
+				printf '===== BEGIN %s =====\n' "$f"
+				if [ "$cap" -gt 0 ]; then tail -c "$cap" -- "$f" 2>/dev/null
+				else cat -- "$f" 2>/dev/null; fi
+				printf '\n===== END %s =====\n\n' "$f"
+			} >> "$raw"
+		done < <("${to[@]}" find "$r" "${depth[@]}" "${prune[@]}" \
+			-iname '*steam*.desktop' -type f -print0 2>/dev/null)
+	done
+
+	[ "$found" -eq 1 ] && scrub < "$raw" > "$dest"
+	rm -f "$raw"
+}
+
 # Build the diagnostics tarball at $1. $2 = global tail cap in bytes (0 = full
 # logs, cef_log still capped). Only explicit log files are read — never whole
 # config dirs (CloudRedirect holds OAuth tokens; Lumen holds a session token).
@@ -175,10 +231,10 @@ collect() {
 	_stage_file "$stage" "slsteam-config.yaml" "$HOME/.config/SLSsteam/config.yaml"  "$cap"
 	_stage_file "$stage" "lumen.log"          "$HOME/.lumen.log"                     "$cap"
 
-	# Steam .desktop launchers — show the LD_AUDIT wrapper Exec line (key for
-	# launch issues). System path is overridable for tests.
-	_stage_file "$stage" "steam.desktop-user"   "$HOME/.local/share/applications/steam.desktop" "$cap"
-	_stage_file "$stage" "steam.desktop-system" "${DIAG_DESKTOP_SYSTEM:-/usr/share/applications/steam.desktop}" "$cap"
+	# Steam .desktop launchers — every *steam*.desktop across the standard XDG
+	# app/autostart dirs (shows the LD_AUDIT wrapper Exec line, key for launch
+	# issues), bundled into one scrubbed file with per-file BEGIN/END separators.
+	_collect_desktops "$stage" "$cap"
 	_stage_file "$stage" "cloudredirect-cr_debug.log"     "$HOME/.config/CloudRedirect/cr_debug.log"     "$cap"
 	_stage_file "$stage" "cloudredirect-cloud_redirect.log" "$HOME/.config/CloudRedirect/cloud_redirect.log" "$cap"
 
