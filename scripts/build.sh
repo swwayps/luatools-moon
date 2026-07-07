@@ -189,6 +189,25 @@ patch_replace "$OUT/backend/downloads.lua" \
 end' \
 '    pcall(fs.remove_all, extract_dir)
     pcall(fs.remove, dest_path)
+    -- slsteammoon: a successful add REQUIRES the game .lua (with depot keys) to
+    -- have landed in stplug-in. A package with no usable <appid>.lua would
+    -- otherwise install as 0 B (every depot pruned for want of a key) yet still
+    -- be registered as owned -- the "ghost" a user hit. Gate success on the
+    -- .lua being on disk: only then register the appid and report done;
+    -- otherwise fail with a clear, user-facing reason and register nothing.
+    if not fs.exists(target_lua) then
+        logger.warn("LuaTools: finalize appid=" .. tostring(appid)
+            .. " api=" .. tostring(api_name)
+            .. " -> NO .lua in downloaded package (no game data); not registering")
+        _set_download_state(appid, {
+            status = "failed",
+            error = "The download from " .. tostring(api_name)
+                .. " did not include this game data. Try another source.",
+        })
+        return
+    end
+    logger.log("LuaTools: finalize appid=" .. tostring(appid)
+        .. " api=" .. tostring(api_name) .. " -> installed " .. tostring(target_lua))
     -- slsteammoon: register the appid in SLSsteam'"'"'s AdditionalApps so
     -- slsteam-moon establishes ownership (depot keys from the .lua are
     -- not enough; config.yaml must list the appid). Non-fatal.
@@ -228,6 +247,16 @@ patch_replace "$OUT/backend/downloads.lua" \
                     pcall(m_utils.write_file, fs.join(sls_store, entry.name), content)
                 end
             end'
+
+# 3a-octies. downloads.lua — send the manual-add worker's output to ~/.lumen.log
+#     (was /dev/null, which hid every download/extract line -> a failed add left
+#     NOTHING in the log; the only signal was the game silently not appearing).
+#     downloader.sh now emits ISO-8601 diagnostics; capture them in the same log
+#     as the rest of the plugin (mirrors the smart path). ${HOME} expands at
+#     shell time; the /tmp fallback matches lumen/lua/logger.lua.
+patch_replace "$OUT/backend/downloads.lua" \
+'nohup bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &' \
+'nohup bash "%s" "%s" "%s" "%s" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &'
 
 # 3a-bis. downloads.lua — inline the smart source selector functions
 #     (start_add_via_luatools_smart + _launch_smart_download) just before the
@@ -469,7 +498,8 @@ patch_replace "$OUT/backend/auto_update.lua" \
 #     strip those env vars so system curl/unzip load system libs.
 patch_replace "$OUT/backend/auto_update.lua" \
 '        cmd = string.format('"'"'curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())' \
-'        cmd = string.format('"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())'
+'        logger.log("LuaTools: self-update downloading " .. tostring(zip_url))
+        cmd = string.format('"'"'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; { curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"; } >> "${HOME:-/tmp}/.lumen.log" 2>&1'"'"', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())'
 
 # 3e. main.lua — OpenExternalUrl (Discord button + other external links).
 #     TWO upstream bugs on Linux:
@@ -778,7 +808,7 @@ end'
 #     downloads keep the default (no nested pass). Linux branch only.
 patch_replace "$OUT/backend/fixes.lua" \
 'nohup bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &' \
-'nohup env MAX_TIME=0 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" > /dev/null 2>&1 &'
+'nohup env MAX_TIME=0 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &'
 
 # 3k. main.lua — GetFixLaunchOptions RPC. After an online/generic fix is
 #     applied, the frontend reads the app's live launch options + compat tool
@@ -1010,7 +1040,7 @@ if command -v luajit >/dev/null 2>&1; then
   fi
 
   # Pure-helper unit tests: online-fix matcher + WINEDLLOVERRIDES builder.
-  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts test-crackfix test-launcherfix test-smart-dedup; do
+  for t in test-onlinefix test-fix-overlays test-steamlang test-protoncompat test-launchopts test-crackfix test-launcherfix test-smart-dedup test-finalize-register; do
     if [[ -f "$ROOT/scripts/$t.lua" ]]; then
       if ! ( cd "$ROOT" && luajit "scripts/$t.lua" >/dev/null 2>&1 ); then
         echo "[build] $t unit tests FAILED" >&2

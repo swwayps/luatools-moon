@@ -35,6 +35,17 @@ MAX_TIME="${MAX_TIME:-25}"
 SPEED_LIMIT="${SPEED_LIMIT:-20000}"
 SPEED_TIME="${SPEED_TIME:-5}"
 
+# Diagnostics. The plugin launches this worker with stdout+stderr appended to
+# ~/.lumen.log (see downloads.lua::_launch_async_download and fixes.lua's
+# apply path), so these lines land in the same log as the rest of the plugin —
+# every download (add-via-LuaTools AND the fixes menu) is now traceable. The
+# ISO-8601 UTC prefix mirrors smart_download.sh/logger.lua; the state-file stem
+# (e.g. "2830030_state" or "fix_2830030_state") + pid tie interleaved lines
+# back to their run.
+LUMEN_TAG="$(basename "${STATE_FILE:-download}" 2>/dev/null | sed 's/\.json$//')"
+slog() { printf '%s INFO downloader[%s pid %s]: %s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${LUMEN_TAG:-?}" "$$" "$*"; }
+
 write_state() {
   # write_state <status> [bytesRead] [totalBytes]
   [ -n "$STATE_FILE" ] || return 0
@@ -43,11 +54,19 @@ write_state() {
     "$status" "$br" "$tb" > "$STATE_FILE"
 }
 
+# json_escape <str> : escape backslash + double-quote so a reason with quotes
+# can't break the state JSON the frontend parses.
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 write_failed() {
+  # write_failed <human-readable reason>. The reason is shown to the user
+  # verbatim ("Failed: <reason>"), so keep it plain and non-technical.
+  slog "FAILED: $1"
   [ -n "$STATE_FILE" ] || return 0
-  printf '{"status": "failed", "error": "%s"}\n' "$1" > "$STATE_FILE"
+  printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$1")" > "$STATE_FILE"
 }
 
+slog "worker start: url=$URL dest=$DEST_PATH extract=$EXTRACT_DIR"
 write_state "downloading" 0 0
 
 # Best-effort total size for a real progress bar.
@@ -74,9 +93,15 @@ wait "$CURL_PID"
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
-  write_failed "curl failed"
+  slog "download failed (curl rc=$rc)"
+  if [ "$rc" -eq 28 ]; then
+    write_failed "Download timed out — the source was too slow or stopped responding. Try another source."
+  else
+    write_failed "Download failed — the source didn't respond or the connection was interrupted. Try another source."
+  fi
   exit 1
 fi
+slog "download ok ($(stat -c %s "$DEST_PATH" 2>/dev/null || echo '?') bytes)"
 
 if [ -n "$EXTRACT_DIR" ]; then
   write_state "extracting" "$TOTAL" "$TOTAL"
@@ -91,9 +116,11 @@ if [ -n "$EXTRACT_DIR" ]; then
     unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
   fi
   if [ $? -ne 0 ]; then
-    write_failed "extract failed"
+    slog "extract failed"
+    write_failed "The downloaded file could not be opened — it may be corrupt or incomplete. Try another source."
     exit 1
   fi
+  slog "extract ok -> $EXTRACT_DIR"
 
   # Nested-archive pass (fix-apply path only; EXTRACT_NESTED=1). Some fixes
   # ship the actual crack as a .rar / multi-part .rar INSIDE the zip (the
@@ -189,7 +216,9 @@ if [ -n "$EXTRACT_DIR" ]; then
     [ -n "$LAUNCHER_ACC" ] && rm -f "$LAUNCHER_ACC"
   fi
 
+  slog "extracted -> handing off to finalize"
   write_state "extracted" "$TOTAL" "$TOTAL"
 else
+  slog "done (no extract requested)"
   write_state "done" "$TOTAL" "$TOTAL"
 fi
