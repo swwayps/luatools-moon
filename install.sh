@@ -431,6 +431,20 @@ sudo_prefix() {
 	fi
 }
 
+# Acquire a valid sudo credential or ABORT the install. Call this right before
+# any step that actually needs root, so the user is never left with a partial
+# install when they decline the password. No-op as root, when sudo is absent
+# (the caller handles that fallback), or when the credential is already cached.
+ensure_sudo() {
+	[ "$(id -u)" -ne 0 ] || return 0
+	command -v sudo >/dev/null 2>&1 || return 0
+	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
+	sudo_hint
+	sudo -v </dev/tty >/dev/tty 2>&1 || fail "$(L \
+		"Administrator password not provided; installation cancelled." \
+		"Senha de administrador não fornecida; instalação cancelada.")"
+}
+
 # ============================================================================
 # Pre-flight checks
 # ============================================================================
@@ -622,6 +636,7 @@ pkg_for() {
 
 pm_install() {
 	local family="$1"; shift
+	ensure_sudo
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 	case "$family" in
 		debian)
@@ -981,6 +996,7 @@ cleanup_previous_install() {
 		local pkgs
 		pkgs="$(pacman -Qq 2>/dev/null | grep -E '^slssteam(-git)?$' || true)"
 		if [ -n "$pkgs" ]; then
+			ensure_sudo
 			local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 			log_step "$(L "Removing conflicting system package(s): $pkgs" \
 			             "Removendo pacote(s) de sistema conflitante(s): $pkgs")"
@@ -1046,6 +1062,7 @@ remove_millennium_framework() {
 	# System-side dirs (Millennium's loader). Needs sudo.
 	if [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ]; then
 		if [ -n "$sudo_cmd" ] || [ "$(id -u)" -eq 0 ]; then
+			[ -n "$sudo_cmd" ] && ensure_sudo
 			$sudo_cmd rm -rf /usr/lib/millennium /usr/share/millennium 2>/dev/null || true
 		else
 			log_warn "$(L "sudo unavailable; remove /usr/lib/millennium manually so Lumen can attach" \
