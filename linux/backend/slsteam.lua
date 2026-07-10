@@ -96,8 +96,7 @@ local function scan_block(lines, header_idx)
       -- zero indent is valid YAML under a mapping key). Requiring a leading
       -- space made a zero-indent list break the scan on its first item, so the
       -- new entry was inserted at the fallback 2-space indent right after the
-      -- header -> mixed indentation that yaml-cpp rejects, bricking Steam at
-      -- startup (see .kiro/config_parse_abort_analysis.md).
+      -- header -> mixed indentation that yaml-cpp rejects, causing parser failures.
       local entry_indent, rest = line:match("^(%s*)%-%s+(.*)$")
       if not entry_indent then break end  -- next top-level key
       indent = entry_indent
@@ -343,9 +342,8 @@ function slsteam.purge_store_for_lua(lua_path)
 end
 
 
--- Purge this app's pins from slsteam-moon's ManifestPins map in config.yaml
--- (game-updates-pinning design §1 Cleanup / §4.4). ManifestPins is a nested
--- block map:
+-- Purge this app's pins from slsteam-moon's ManifestPins map in config.yaml.
+-- ManifestPins is a nested block map:
 --   ManifestPins:
 --     <appid>:
 --       locked: <bool>
