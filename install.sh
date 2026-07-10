@@ -387,6 +387,20 @@ sudo_prefix() {
 	fi
 }
 
+# Acquire a valid sudo credential or ABORT the install. Call this right before
+# any step that actually needs root, so the user is never left with a partial
+# install when they decline the password. No-op as root, when sudo is absent
+# (the caller handles that fallback), or when the credential is already cached.
+ensure_sudo() {
+	[ "$(id -u)" -ne 0 ] || return 0
+	command -v sudo >/dev/null 2>&1 || return 0
+	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
+	sudo_hint
+	sudo -v </dev/tty >/dev/tty 2>&1 || fail "$(L \
+		"Administrator password not provided; installation cancelled." \
+		"Senha de administrador não fornecida; instalação cancelada.")"
+}
+
 # ============================================================================
 # Pre-flight checks
 # ============================================================================
@@ -578,6 +592,7 @@ pkg_for() {
 
 pm_install() {
 	local family="$1"; shift
+	ensure_sudo
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 	case "$family" in
 		debian)
@@ -690,6 +705,7 @@ install_dependencies() {
 # libssl-dev:i386, asking the user to add the i386 architecture first.
 # We do it for them.
 install_libssl_i386() {
+	ensure_sudo
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 
 	if dpkg -s libssl-dev:i386 2>/dev/null | grep -q '^Status:.*installed'; then
@@ -1059,6 +1075,7 @@ cleanup_previous_install() {
 		local pkgs
 		pkgs="$(pacman -Qq 2>/dev/null | grep -E '^slssteam(-git)?$' || true)"
 		if [ -n "$pkgs" ]; then
+			ensure_sudo
 			local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 			log_step "$(L "Removing conflicting system package(s): $pkgs" \
 			             "Removendo pacote(s) de sistema conflitante(s): $pkgs")"
@@ -1309,6 +1326,7 @@ install_millennium_deps() {
 		return 0
 	fi
 
+	ensure_sudo
 	sudo_cmd="$(sudo_prefix)"
 	log_info "$(L "Installing Millennium's 32-bit OpenSSL dependency ($pkg)" \
 	             "Instalando a dependência OpenSSL 32-bit do Millennium ($pkg)")"
