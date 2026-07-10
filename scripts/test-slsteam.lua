@@ -164,9 +164,8 @@ ok, msg = slsteam.unset_fake_appid(99999)
 check("F7 absent -> not_present", ok == true and msg == "not_present")
 
 -- ---------------------------------------------------------------------------
--- ManifestPins purge: purge_pins_for_app removes one app's nested pin block
--- (game-updates-pinning design §1 Cleanup / §4.4). ManifestPins is a nested
--- map: "ManifestPins:" -> "  <appid>:" -> { locked:, depots: { <depot>: gid } }.
+-- ManifestPins purge: purge_pins_for_app removes one app's nested pin block.
+-- ManifestPins is a nested map: "ManifestPins:" -> "  <appid>:" -> { locked:, depots: { <depot>: gid } }.
 -- ---------------------------------------------------------------------------
 
 -- P1: two pinned apps; purge one keeps the other + the header + sibling keys.
