@@ -226,19 +226,14 @@ preask_prompts() {
 		resolve_yesno PREASK_GAMEMODE "$Q_GAMEMODE_EN" "$Q_GAMEMODE_PT" "n" || true
 	fi
 	resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n" || true
-
-	preask_sudo
 }
 
-# Pre-warm sudo while Steam (and the on-screen keyboard) is still up. A later
-# step — the system steam.desktop / autostart patch in slsteam-moon's setup.sh —
-# needs root, and its password prompt would otherwise land AFTER Steam is stopped
-# (no OSK on a Deck). Caching the credential here (sudo -v) means the child
-# setup.sh, sharing this tty within sudo's timeout, won't prompt again. Skipped
-# when root, when sudo is absent, or when the credential is already valid /
-# passwordless. Best-effort: a cancelled/failed prompt never aborts the install
-# (the patch is itself best-effort and sudo-gated).
+# Mutable-system compatibility helper. Immutable systems return before probing
+# sudo; their desktop integration and dependency flow are entirely user-scoped.
+# Kept as a callable helper for old/internal callers, although preask_prompts no
+# longer invokes it.
 preask_sudo() {
+	is_immutable_distro && return 0
 	[ "$(id -u)" -ne 0 ] || return 0
 	command -v sudo >/dev/null 2>&1 || return 0
 	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
@@ -402,6 +397,7 @@ has_steamos_gamescope() {
 # sudo_prefix's command substitution.
 _SUDO_HINT_SHOWN=0
 sudo_hint() {
+	is_immutable_distro && return 0
 	[ "$_SUDO_HINT_SHOWN" = 1 ] && return 0
 	[ "$(id -u)" -ne 0 ] || return 0
 	command -v sudo >/dev/null 2>&1 || return 0
@@ -421,7 +417,9 @@ sudo_hint() {
 # hint (to the tty) the first time it hands back a real "sudo", so every sudo
 # site gets the instruction without duplicating it.
 sudo_prefix() {
-	if [ "$(id -u)" -eq 0 ]; then
+	if is_immutable_distro; then
+		echo ""
+	elif [ "$(id -u)" -eq 0 ]; then
 		echo ""
 	elif command -v sudo >/dev/null 2>&1; then
 		sudo_hint
@@ -436,6 +434,7 @@ sudo_prefix() {
 # install when they decline the password. No-op as root, when sudo is absent
 # (the caller handles that fallback), or when the credential is already cached.
 ensure_sudo() {
+	is_immutable_distro && return 0
 	[ "$(id -u)" -ne 0 ] || return 0
 	command -v sudo >/dev/null 2>&1 || return 0
 	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
@@ -636,6 +635,7 @@ pkg_for() {
 
 pm_install() {
 	local family="$1"; shift
+	is_immutable_distro && return 1
 	ensure_sudo
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 	case "$family" in
@@ -988,11 +988,14 @@ cleanup_previous_install() {
 	if [ -d "$HOME/.local/share/SLSsteam" ]; then
 		log_step "$(L "Removing old SLSsteam install (~/.local/share/SLSsteam)" \
 		             "Removendo instalação antiga do SLSsteam (~/.local/share/SLSsteam)")"
-		rm -rf "$HOME/.local/share/SLSsteam" 2>/dev/null || true
+		# setup.sh owns the desktop backup lifecycle. Preserve only that directory
+		# while replacing old binaries/wrapper; no .desktop is read or changed here.
+		find "$HOME/.local/share/SLSsteam" -mindepth 1 -maxdepth 1 \
+			! -name backup -exec rm -rf -- {} + 2>/dev/null || true
 	fi
 
 	# --- Arch: system slssteam package conflicts with the local install ---
-	if [ "$(get_distro_family)" = "arch" ] && command -v pacman >/dev/null 2>&1; then
+	if ! is_immutable_distro && [ "$(get_distro_family)" = "arch" ] && command -v pacman >/dev/null 2>&1; then
 		local pkgs
 		pkgs="$(pacman -Qq 2>/dev/null | grep -E '^slssteam(-git)?$' || true)"
 		if [ -n "$pkgs" ]; then
@@ -1955,8 +1958,8 @@ main() {
 	check_steam_bootstrapped
 
 	# On SteamOS / Bazzite and derivatives the on-screen keyboard needs Steam
-	# running, so ask the optional yes/no questions (and pre-warm sudo) NOW,
-	# before we stop Steam. No-op on mutable desktops / non-interactive runs.
+	# running, so ask the optional yes/no questions NOW, before we stop Steam.
+	# No privilege prompt is made on immutable systems.
 	preask_prompts
 
 	print_section "$(L "Stopping Steam" "Parando a Steam")"

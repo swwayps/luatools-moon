@@ -112,9 +112,48 @@ check_not_root() {
 	fi
 }
 
+# Keep the standalone uninstaller's privilege policy aligned with install.sh:
+# image-based/atomic systems are user-scoped and must never prompt for sudo.
+OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
+is_immutable_distro() {
+	local id="" like="" variant=""
+	if [ -r "$OS_RELEASE_FILE" ]; then
+		id="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${ID:-}"
+		)"
+		like="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${ID_LIKE:-}"
+		)"
+		variant="$(
+			# shellcheck disable=SC1090
+			. "$OS_RELEASE_FILE" >/dev/null 2>&1
+			printf '%s' "${VARIANT_ID:-}"
+		)"
+	fi
+	id="${id,,}"; like="${like,,}"; variant="${variant,,}"
+	case " $id $like " in
+		*" bazzite "*|*" steamos "*|*" steamdeck "*|*" holoiso "*|\
+		*" silverblue "*|*" kinoite "*|*" sericea "*|*" onyx "*|\
+		*" bluefin "*|*" aurora "*|*" ucore "*) return 0 ;;
+	esac
+	case "$variant" in silverblue|kinoite|sericea|onyx|*atomic*) return 0 ;; esac
+	command -v rpm-ostree >/dev/null 2>&1 && return 0
+	command -v steamos-readonly >/dev/null 2>&1 && return 0
+	if command -v findmnt >/dev/null 2>&1; then
+		case ",$(findmnt -no OPTIONS / 2>/dev/null)," in *,ro,*) return 0 ;; esac
+	fi
+	return 1
+}
+
 # Privilege-escalation prefix for system-wide removals.
 sudo_prefix() {
-	if [ "$(id -u)" -eq 0 ]; then
+	if is_immutable_distro; then
+		echo ""
+	elif [ "$(id -u)" -eq 0 ]; then
 		echo ""
 	elif command -v sudo >/dev/null 2>&1; then
 		echo "sudo"
@@ -219,26 +258,48 @@ restore_steam_sh() {
 }
 
 # ============================================================================
-# Restore a Steam .desktop entry that slsteam-moon's setup.sh patched.
-# The setup.sh stores its backup as <desktop>.slsteam-bak.
+# Restore a Steam .desktop entry that slsteam-moon's setup.sh patched. Current
+# installs mirror originals below ~/.local/share/SLSsteam/backup; the adjacent
+# suffixes are migration-only compatibility with older releases.
 # ============================================================================
+desktop_backup_path() {
+	local f="$1"
+	printf '%s/%s\n' "$HOME/.local/share/SLSsteam/backup" "${f#/}"
+}
+
 restore_or_remove_desktop() {
 	local f="$1" use_sudo="${2:-}"
-	local backup="${f}.slsteam-bak"
+	local backup legacy
+	backup="$(desktop_backup_path "$f")"
 	local sudo_cmd=""
 	[ "$use_sudo" = "sudo" ] && sudo_cmd="sudo"
 
 	[ -f "$f" ] || return 0
+	# Centralize an old adjacent backup before doing anything to the active file.
+	if [ ! -f "$backup" ]; then
+		for legacy in "${f}.slssteam-backup" "${f}.slsteam-bak"; do
+			[ -f "$legacy" ] || continue
+			mkdir -p "$(dirname "$backup")" 2>/dev/null || break
+			if [ -n "$sudo_cmd" ]; then
+				$sudo_cmd cat -- "$legacy" > "$backup" 2>/dev/null || { rm -f "$backup"; break; }
+			else
+				cp -- "$legacy" "$backup" 2>/dev/null || { rm -f "$backup"; break; }
+			fi
+			$sudo_cmd rm -f -- "$legacy" 2>/dev/null || true
+			break
+		done
+	fi
 	# Only act if the file shows our patch (Exec= mentions SLSsteam) or
-	# a backup exists alongside it.
+	# a central backup exists.
 	if ! grep -q "SLSsteam" "$f" 2>/dev/null && [ ! -f "$backup" ]; then
 		return 0
 	fi
 
 	if [ -f "$backup" ]; then
 		log_step "$(L "Restoring $f from backup" "Restaurando $f a partir do backup")"
-		$sudo_cmd cp -- "$backup" "$f" 2>/dev/null || true
-		$sudo_cmd rm -- "$backup" 2>/dev/null || true
+		if $sudo_cmd cp -- "$backup" "$f" 2>/dev/null; then
+			rm -f -- "$backup" 2>/dev/null || true
+		fi
 	else
 		log_step "$(L "Removing patched $f (no backup found)" \
 		             "Removendo $f modificado (sem backup)")"
@@ -253,6 +314,7 @@ uninstall_slsteam_moon() {
 	local USER_APPS="$HOME/.local/share/applications"
 	local USER_DESKTOP="$USER_APPS/steam.desktop"
 	local SYS_DESKTOP="/usr/share/applications/steam.desktop"
+	local coverage_restored=0
 
 	# Wrapper PATH entry in shell rc files.
 	local rc
@@ -266,29 +328,39 @@ uninstall_slsteam_moon() {
 		fi
 	done
 
-	# User-local .desktop.
-	restore_or_remove_desktop "$USER_DESKTOP"
+	# Prefer the installed coverage helper: it restores every patched launcher,
+	# shortcut and autostart entry from the central mirrored backup tree.
+	local coverage_lib="$HOME/.local/share/SLSsteam/desktop-coverage.lib.sh"
+	if [ -f "$coverage_lib" ]; then
+		DC_HOME="$HOME"
+		DC_BACKUP_ROOT="$HOME/.local/share/SLSsteam/backup"
+		DC_TAG="X-SLSteamMoon-Patched=true"
+		WRAPPER="$HOME/.local/share/SLSsteam/path/steam"
+		# shellcheck source=/dev/null
+		. "$coverage_lib"
+		DC_SUDO=""
+		! is_immutable_distro && command -v sudo >/dev/null 2>&1 && DC_SUDO="sudo"
+		dc_restore_all
+		coverage_restored=1
+	fi
+
+	# Compatibility fallback for an incomplete/old SLSsteam installation whose
+	# helper is missing. These still consume the same central backup paths.
+	if [ "$coverage_restored" = 0 ]; then
+		restore_or_remove_desktop "$USER_DESKTOP"
+		local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
+		restore_or_remove_desktop "$autostart"
+	fi
 	if command -v update-desktop-database >/dev/null 2>&1; then
 		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 	fi
 
-	# Autostart override (SteamOS/Bazzite desktop auto-launch). Only ours.
-	local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
-	if [ -f "$autostart" ] && grep -qE 'X-SLSteamMoon-Patched=true|SLSsteam/path' "$autostart" 2>/dev/null; then
-		if [ -f "$autostart.slssteam-backup" ]; then
-			log_step "$(L "Restoring Steam autostart from backup" \
-			             "Restaurando autostart da Steam a partir do backup")"
-			mv -- "$autostart.slssteam-backup" "$autostart" 2>/dev/null || true
-		else
-			log_step "$(L "Removing Steam autostart override" \
-			             "Removendo override de autostart da Steam")"
-			rm -f "$autostart" 2>/dev/null || true
-		fi
-	fi
-
 	# System-wide .desktop (only if we actually patched it).
-	if [ -f "$SYS_DESKTOP" ] && grep -q "SLSsteam" "$SYS_DESKTOP" 2>/dev/null; then
-		if command -v sudo >/dev/null 2>&1; then
+	if [ "$coverage_restored" = 0 ] && [ -f "$SYS_DESKTOP" ] && grep -q "SLSsteam" "$SYS_DESKTOP" 2>/dev/null; then
+		if is_immutable_distro; then
+			log_warn "$(L "Immutable system; read-only system .desktop left untouched" \
+			             "Sistema imutável; .desktop de sistema somente-leitura mantido")"
+		elif command -v sudo >/dev/null 2>&1; then
 			log_info "$(L "Restoring system .desktop (requires sudo)" \
 			             "Restaurando .desktop do sistema (requer sudo)")"
 			restore_or_remove_desktop "$SYS_DESKTOP" sudo
@@ -302,7 +374,7 @@ uninstall_slsteam_moon() {
 	fi
 
 	# Legacy /usr/games/steam patch from older installs.
-	if [ -f "/usr/games/steam" ] && grep -q "SLSsteam" "/usr/games/steam" 2>/dev/null; then
+	if ! is_immutable_distro && [ -f "/usr/games/steam" ] && grep -q "SLSsteam" "/usr/games/steam" 2>/dev/null; then
 		log_step "$(L "Found legacy /usr/games/steam modification" \
 		             "Modificação legada em /usr/games/steam encontrada")"
 		if [ -f "/usr/games/steam.slsteam-backup" ]; then
@@ -549,7 +621,7 @@ cleanup_old_port_leftovers() {
 	fi
 
 	# Arch: system slssteam package conflicts with the local install.
-	if command -v pacman >/dev/null 2>&1; then
+	if ! is_immutable_distro && command -v pacman >/dev/null 2>&1; then
 		local pkgs
 		pkgs="$(pacman -Qq 2>/dev/null | grep -E '^slssteam(-git)?$' || true)"
 		if [ -n "$pkgs" ]; then
