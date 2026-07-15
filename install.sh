@@ -27,12 +27,16 @@ set -uo pipefail
 OPT_NOPLUGIN=0
 OPT_HELP=0
 OPT_BAD_ARG=""
+OPT_SLS_CHANNEL="stable"
+OPT_PLUGIN_CHANNEL="stable"
+OPT_LUMEN_CHANNEL="stable"
 
 # ----------------------------------------------------------------------------
 # Repositories / release sources
 # ----------------------------------------------------------------------------
 SLS_REPO="swwayps/slsteam-moon"
 SLS_ASSET_PREFIX="slsteam-moon-linux"          # asset is slsteam-moon-linux-<ver>.zip
+SLS_BETA_PATH="dist/slsteam-moon-linux.zip"
 # Lumen line: pick the newest release whose asset is the Lumen wrapper build
 # (named slsteam-moon-linux-<ver>-lumen.zip). Convention-based, so publishing a
 # new version (e.g. v2.5-lumen) needs no installer edit.
@@ -40,10 +44,12 @@ SLS_ASSET_GLOB="^${SLS_ASSET_PREFIX}-.*-lumen\\.zip$"
 
 PLUGIN_REPO="swwayps/luatools-moon"
 PLUGIN_ASSET="luatools-linux.zip"
+PLUGIN_BETA_PATH="dist/luatools-linux.zip"
 PLUGIN_NAME="luatools"                          # plugin.json "name"
 
 LUMEN_REPO="swwayps/lumen"
 LUMEN_ASSET="lumen-linux.zip"
+LUMEN_BETA_PATH="dist/lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 
 # CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
@@ -1161,6 +1167,62 @@ release_asset_info() {
 	fi
 }
 
+# Read a component's Beta package metadata directly from its beta branch. Beta
+# builds deliberately live in dist/ rather than GitHub Releases, so a branch
+# can be published or withdrawn independently of Stable. A missing branch or
+# package is not fatal: callers fall back to Stable for that component only.
+beta_asset_info() {
+	local repo="$1" path="$2" api meta info
+	api="https://api.github.com/repos/${repo}/contents/${path}?ref=beta"
+	meta="$(api_get "$api")" || return 1
+	info="$(printf '%s' "$meta" | jq -c '
+		if (.sha | type) == "string" and .sha != "" and
+		   (.download_url | type) == "string" and .download_url != "" then
+			{tag:"beta", channel:"beta", id:.sha,
+			 size:(.size // null), download_url:.download_url}
+		else empty end' 2>/dev/null)" || return 1
+	[ -n "$info" ] || return 1
+	printf '%s' "$info"
+}
+
+# Resolve one component according to its requested channel. Results are placed
+# in RESOLVED_ASSET_URL / RESOLVED_ASSET_INFO so callers retain normal logging
+# on stdout. Stable resolution supports both the latest release and the first
+# matching asset across releases (used by slsteam-moon). Return 2 means the
+# Stable forge was unreachable; return 3 means no Stable asset exists.
+resolve_component_asset() {
+	local channel="$1" repo="$2" beta_path="$3" stable_glob="$4"
+	local stable_mode="${5:-latest}" beta_info="" stable_info="" url=""
+	RESOLVED_ASSET_URL=""
+	RESOLVED_ASSET_INFO="{}"
+
+	if [ "$channel" = "beta" ]; then
+		beta_info="$(beta_asset_info "$repo" "$beta_path")" || beta_info=""
+		if [ -n "$beta_info" ]; then
+			url="$(printf '%s' "$beta_info" | jq -r '.download_url // empty' 2>/dev/null)"
+			if [ -n "$url" ]; then
+				RESOLVED_ASSET_URL="$url"
+				RESOLVED_ASSET_INFO="$(printf '%s' "$beta_info" | jq -c 'del(.download_url)')"
+				return 0
+			fi
+		fi
+		log_warn "$(L "Beta is unavailable for ${repo}; falling back to Stable." \
+		                 "O Beta não está disponível para ${repo}; usando Stable.")"
+	fi
+
+	if [ "$stable_mode" = "any" ]; then
+		url="$(any_release_asset_url "$repo" "$stable_glob")" || return 2
+	else
+		url="$(latest_release_asset_url "$repo" "$stable_glob")" || return 2
+	fi
+	[ -n "$url" ] || return 3
+	stable_info="$(release_asset_info "$repo" "$stable_glob" "$stable_mode")"
+	RESOLVED_ASSET_URL="$url"
+	RESOLVED_ASSET_INFO="$(printf '%s' "$stable_info" | jq -c '. + {channel:"stable"}' 2>/dev/null)"
+	[ -n "$RESOLVED_ASSET_INFO" ] || RESOLVED_ASSET_INFO='{"channel":"stable"}'
+	return 0
+}
+
 # Record the installed release fingerprints so the Lumen About tab can show
 # installed-vs-latest. The plugin's bundled version string is unreliable, and a
 # tag alone misses asset-only re-uploads, so we stamp {tag, asset_at, size} per
@@ -1216,15 +1278,19 @@ PY
 # We just download, extract, and run setup.sh install — which also kills Steam.
 # ============================================================================
 install_slsteam_moon() {
-	local url tmp zip extract_root setup
+	local url tmp zip extract_root setup rc
 
 	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
 	             "Buscando a última release do slsteam-moon (Lumen)")"
-	url="$(any_release_asset_url "$SLS_REPO" "$SLS_ASSET_GLOB")" \
-		|| fail "$(forge_unreachable_msg)"
-	[ -n "$url" ] || fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
-	                          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
-	SLS_INFO="$(release_asset_info "$SLS_REPO" "$SLS_ASSET_GLOB" any)"
+	resolve_component_asset "$OPT_SLS_CHANNEL" "$SLS_REPO" "$SLS_BETA_PATH" \
+		"$SLS_ASSET_GLOB" any || rc=$?
+	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
+	if [ "${rc:-0}" -ne 0 ]; then
+		fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
+		          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
+	fi
+	url="$RESOLVED_ASSET_URL"
+	SLS_INFO="$RESOLVED_ASSET_INFO"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/slsteam-moon.zip"
@@ -1265,14 +1331,18 @@ install_slsteam_moon() {
 # ~/.local/share/Lumen. The Steam wrapper (slsteam-moon setup.sh) launches it
 # as a sidecar; it injects the LuaTools frontend via CDP and hosts the backend.
 install_lumen() {
-	local url tmp zip dest
+	local url tmp zip dest rc
 	dest="$LUMEN_DIR"
 	log_info "$(L "Resolving latest Lumen release" "Buscando a última release do Lumen")"
-	url="$(latest_release_asset_url "$LUMEN_REPO" "^${LUMEN_ASSET}$")" \
-		|| fail "$(forge_unreachable_msg)"
-	[ -n "$url" ] || fail "$(L "Could not find the Lumen release asset." \
-	                          "Não foi possível encontrar o asset da release do Lumen.")"
-	LUMEN_INFO="$(release_asset_info "$LUMEN_REPO" "^${LUMEN_ASSET}$")"
+	resolve_component_asset "$OPT_LUMEN_CHANNEL" "$LUMEN_REPO" "$LUMEN_BETA_PATH" \
+		"^${LUMEN_ASSET}$" latest || rc=$?
+	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
+	if [ "${rc:-0}" -ne 0 ]; then
+		fail "$(L "Could not find the Lumen release asset." \
+		          "Não foi possível encontrar o asset da release do Lumen.")"
+	fi
+	url="$RESOLVED_ASSET_URL"
+	LUMEN_INFO="$RESOLVED_ASSET_INFO"
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$LUMEN_ASSET"
 	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
@@ -1315,15 +1385,19 @@ remove_plugin_if_present() {
 }
 
 install_plugin() {
-	local url tmp zip dest
+	local url tmp zip dest rc
 
 	log_info "$(L "Resolving latest LuaTools plugin release" \
 	             "Buscando a última release do plugin LuaTools")"
-	url="$(latest_release_asset_url "$PLUGIN_REPO" "^${PLUGIN_ASSET}$")" \
-		|| fail "$(forge_unreachable_msg)"
-	[ -n "$url" ] || fail "$(L "Could not find the plugin release asset." \
-	                          "Não foi possível encontrar o asset da release do plugin.")"
-	PLUGIN_INFO="$(release_asset_info "$PLUGIN_REPO" "^${PLUGIN_ASSET}$")"
+	resolve_component_asset "$OPT_PLUGIN_CHANNEL" "$PLUGIN_REPO" "$PLUGIN_BETA_PATH" \
+		"^${PLUGIN_ASSET}$" latest || rc=$?
+	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
+	if [ "${rc:-0}" -ne 0 ]; then
+		fail "$(L "Could not find the plugin release asset." \
+		          "Não foi possível encontrar o asset da release do plugin.")"
+	fi
+	url="$RESOLVED_ASSET_URL"
+	PLUGIN_INFO="$RESOLVED_ASSET_INFO"
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$PLUGIN_ASSET"
@@ -1879,6 +1953,15 @@ $(L "Options" "Opções"):
                   "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
   --nolaunch   $(L "Do not auto-start Steam at the end of install." \
                   "Não inicia a Steam automaticamente ao final da instalação.")
+  --slsteam-channel stable|beta
+               $(L "Select the slsteam-moon update channel (default: stable)." \
+                  "Seleciona o canal de atualização do slsteam-moon (padrão: stable).")
+  --plugin-channel stable|beta
+               $(L "Select the LuaTools plugin update channel (default: stable)." \
+                  "Seleciona o canal de atualização do plugin LuaTools (padrão: stable).")
+  --lumen-channel stable|beta
+               $(L "Select the Lumen update channel (default: stable)." \
+                  "Seleciona o canal de atualização do Lumen (padrão: stable).")
   -h, --help   $(L "Show this help and exit." "Mostra esta ajuda e sai.")
 EOF
 }
@@ -1911,18 +1994,38 @@ do_autolaunch() {
 	setsid nohup "$wrapper" >/dev/null 2>&1 < /dev/null &
 }
 
-# Pure option parser: sets OPT_NOPLUGIN / OPT_NOLAUNCH / OPT_HELP, records the
-# first unknown option in OPT_BAD_ARG and returns 1 (main turns that into usage +
-# abort). Resets its output vars each call so it's safe to invoke repeatedly.
+# Pure option parser: sets install switches and each component's release
+# channel, records the first invalid argument in OPT_BAD_ARG and returns 1.
+# Resets its output vars each call so it's safe to invoke repeatedly.
 parse_args() {
 	OPT_NOPLUGIN=0
 	OPT_NOLAUNCH=0
 	OPT_HELP=0
 	OPT_BAD_ARG=""
+	OPT_SLS_CHANNEL="stable"
+	OPT_PLUGIN_CHANNEL="stable"
+	OPT_LUMEN_CHANNEL="stable"
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			--noplugin) OPT_NOPLUGIN=1 ;;
 			--nolaunch) OPT_NOLAUNCH=1 ;;
+			--slsteam-channel|--plugin-channel|--lumen-channel)
+				local option="$1"
+				if [ "$#" -lt 2 ]; then
+					OPT_BAD_ARG="$option"
+					return 1
+				fi
+				if [ "$2" != "stable" ] && [ "$2" != "beta" ]; then
+					OPT_BAD_ARG="$option $2"
+					return 1
+				fi
+				case "$option" in
+					--slsteam-channel) OPT_SLS_CHANNEL="$2" ;;
+					--plugin-channel)  OPT_PLUGIN_CHANNEL="$2" ;;
+					--lumen-channel)   OPT_LUMEN_CHANNEL="$2" ;;
+				esac
+				shift
+				;;
 			-h|--help)  OPT_HELP=1 ;;
 			*)          OPT_BAD_ARG="$1"; return 1 ;;
 		esac
