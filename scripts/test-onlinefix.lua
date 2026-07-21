@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/onlinefix.lua (perondepot index matcher).
+-- Unit tests for plugin/backend/onlinefix.lua (perondepot index matcher).
 --
 -- onlinefix.lua is a PURE module (no Millennium deps): it parses the
 -- perondepot /all/ autoindex HTML into (decoded game name -> rar href)
@@ -8,7 +8,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-onlinefix.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -20,7 +20,7 @@ local function check(name, cond)
   end
 end
 
-local of = dofile("linux/backend/onlinefix.lua")
+local of = dofile("plugin/backend/onlinefix.lua")
 
 -- A trimmed but real-shaped slice of the perondepot /all/ autoindex. The
 -- " по сети" marker (Cyrillic, UTF-8) separates the game name from the fix

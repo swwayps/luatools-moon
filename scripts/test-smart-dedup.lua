@@ -52,7 +52,7 @@ preload("paths", { get_plugin_dir = function() return "/tmp" end })
 preload("steam_utils", { detect_steam_install_path = function() return TMP .. "/steam" end })
 preload("plugin_utils", { ensure_temp_download_dir = function() return TMP end })
 preload("api_manifest", { load_api_manifest = function() return { { name = "Test", url = "http://127.0.0.1/<appid>" } } end })
-preload("settings.manager", { get_morrenus_api_key = function() return "" end })
+preload("settings.manager", { get_hubcap_api_key = function() return "" end })
 preload("json", { -- decode the fields downloads.lua reads from the state file
   decode = function(s)
     local status = s:match('"status"%s*:%s*"([^"]*)"')

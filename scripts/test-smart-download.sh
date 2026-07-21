@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test-smart-download.sh — unit tests for the smart source selector.
 #
-# Tests the PURE logic (no network) of linux/backend/scripts/smart_download.sh
+# Tests the PURE logic (no network) of plugin/backend/scripts/smart_download.sh
 # via its subcommands:
 #   smart_download.sh score  <appid> <candidate_dir>   -> "<app_key> <key_count> <manifest_count>"
 #   smart_download.sh select <appid> <work_dir>        -> winning candidate name
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SCRIPT="$ROOT/linux/backend/scripts/smart_download.sh"
+SCRIPT="$ROOT/plugin/backend/scripts/smart_download.sh"
 
 PASS=0
 FAIL=0
@@ -45,8 +45,8 @@ make_candidate() {
   done
 }
 
-# Morrenus: app-depot key present, 4 depot keys, 3 manifests
-make_candidate morrenus 3 <<'LUA'
+# Hubcap: app-depot key present, 4 depot keys, 3 manifests
+make_candidate hubcap 3 <<'LUA'
 addappid(1134710, 1, "1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")
 addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 setManifestid(1134711, "3238948344654627795", 49979014)
@@ -70,16 +70,16 @@ addappid(1134711, 1, "E4C5307D44D1E6057D21C3828BC766B625266BC61281E682B3ACE83B06
 addappid(1134712, 1, "6ACA6CE3DD1188B29E3251D88AEEF183FFD6BFE5F89260BE29C375811BA92903")
 LUA
 
-# SkyAPI: NO app-depot key, 2 depot keys, 0 manifests
-make_candidate skyapi 0 <<'LUA'
+# Minimal: NO app-depot key, 2 depot keys, 0 manifests
+make_candidate minimal 0 <<'LUA'
 addappid(1134710)
 addappid(1134711,0,"e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712,0,"6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 LUA
 
 # --- scoring tests --------------------------------------------------------
-assert_eq "morrenus score (app_key=1, 4 keys, 3 manifests)" \
-  "1 4 3" "$("$SCRIPT" score 1134710 "$TMP/morrenus")"
+assert_eq "hubcap score (app_key=1, 4 keys, 3 manifests)" \
+  "1 4 3" "$("$SCRIPT" score 1134710 "$TMP/hubcap")"
 
 assert_eq "ryuu score (app_key=1, 3 keys, 2 manifests)" \
   "1 3 2" "$("$SCRIPT" score 1134710 "$TMP/ryuu")"
@@ -87,8 +87,8 @@ assert_eq "ryuu score (app_key=1, 3 keys, 2 manifests)" \
 assert_eq "sushi score (app_key=0, 2 keys, 2 manifests; comment ignored)" \
   "0 2 2" "$("$SCRIPT" score 1134710 "$TMP/sushi")"
 
-assert_eq "skyapi score (app_key=0, 2 keys, 0 manifests)" \
-  "0 2 0" "$("$SCRIPT" score 1134710 "$TMP/skyapi")"
+assert_eq "minimal score (app_key=0, 2 keys, 0 manifests)" \
+  "0 2 0" "$("$SCRIPT" score 1134710 "$TMP/minimal")"
 
 # --- selection tests ------------------------------------------------------
 # select <appid> <work_dir>: each candidate is a subdir <name>/ with the
@@ -110,15 +110,15 @@ make_sel_candidate() {
   echo "$time" > "$wd/$name.time"
 }
 
-# Case 1: full NIMBY set -> twentytwo wins (ties morrenus on (1,4,3), faster).
+# Case 1: full candidate set -> fastcomplete wins (ties hubcap on (1,4,3), faster).
 WD1="$TMP/sel_full"; mkdir -p "$WD1"
-make_sel_candidate "$WD1" morrenus 3 2.0 <<'LUA'
+make_sel_candidate "$WD1" hubcap 3 2.0 <<'LUA'
 addappid(1134710, 1, "1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")
 addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712, 1, "6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 addappid(228989, 1, "ad69276eb476cf06c40312df7376d63deac0c838b9a2767005be8bb306ffb853")
 LUA
-make_sel_candidate "$WD1" twentytwo 3 1.0 <<'LUA'
+make_sel_candidate "$WD1" fastcomplete 3 1.0 <<'LUA'
 addappid(1134710, 1, "1dae66a4c21dcad9351a9ec70d59e36fd9055197ee7f7806e157156af1c505aa")
 addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712, 1, "6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
@@ -134,27 +134,27 @@ addappid(1134710)
 addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712, 1, "6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 LUA
-make_sel_candidate "$WD1" skyapi 0 0.3 <<'LUA'
+make_sel_candidate "$WD1" minimal 0 0.3 <<'LUA'
 addappid(1134710)
 addappid(1134711,0,"e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712,0,"6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 LUA
-assert_eq "select full NIMBY set -> twentytwo (complete + fastest of the complete)" \
-  "twentytwo" "$("$SCRIPT" select 1134710 "$WD1")"
+assert_eq "select full candidate set -> fastcomplete (complete + fastest of the complete)" \
+  "fastcomplete" "$("$SCRIPT" select 1134710 "$WD1")"
 
-# Case 2: only incomplete sources -> sushi (more manifests) beats skyapi.
+# Case 2: only incomplete sources -> sushi (more manifests) beats minimal.
 WD2="$TMP/sel_incomplete"; mkdir -p "$WD2"
 make_sel_candidate "$WD2" sushi 2 0.5 <<'LUA'
 addappid(1134710)
 addappid(1134711, 1, "e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712, 1, "6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 LUA
-make_sel_candidate "$WD2" skyapi 0 0.3 <<'LUA'
+make_sel_candidate "$WD2" minimal 0 0.3 <<'LUA'
 addappid(1134710)
 addappid(1134711,0,"e4c5307d44d1e6057d21c3828bc766b625266bc61281e682b3ace83b0612f7d0")
 addappid(1134712,0,"6aca6ce3dd1188b29e3251d88aeef183ffd6bfe5f89260be29c375811ba92903")
 LUA
-assert_eq "select incomplete-only -> sushi (more manifests than skyapi)" \
+assert_eq "select incomplete-only -> sushi (more manifests than minimal)" \
   "sushi" "$("$SCRIPT" select 1134710 "$WD2")"
 
 # Case 3: pure completeness tie -> faster time wins.

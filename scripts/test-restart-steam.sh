@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit test for linux/backend/scripts/restart_steam.sh strategy selection.
+# Unit test for plugin/backend/scripts/restart_steam.sh strategy selection.
 #
 # Why this exists
 # ---------------
@@ -21,7 +21,7 @@
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RESTART_SH="$SCRIPT_DIR/../linux/backend/scripts/restart_steam.sh"
+RESTART_SH="$SCRIPT_DIR/../plugin/backend/scripts/restart_steam.sh"
 
 failures=0
 check() { # $1 desc  $2 actual  $3 expected

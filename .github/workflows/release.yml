@@ -28,15 +28,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends luajit zip unzip python3
-
-      - name: Build plugin and zip
-        run: scripts/build.sh --zip
-
-      - name: Verify artifact
-        run: |
-          test -f dist/luatools-linux.zip
-          unzip -l dist/luatools-linux.zip | head -20
+          sudo apt-get install -y --no-install-recommends jq luajit p7zip-full python3 zip unzip
 
       - name: Resolve tag
         id: tag
@@ -46,6 +38,19 @@ jobs:
           else
             echo "name=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Test
+        run: |
+          scripts/check-release-version.sh "${{ steps.tag.outputs.name }}"
+          scripts/test.sh
+
+      - name: Build plugin and zip
+        run: scripts/build.sh --zip
+
+      - name: Verify artifact
+        run: |
+          test -f dist/luatools-linux.zip
+          unzip -l dist/luatools-linux.zip | head -20
 
       - name: Publish release
         env:

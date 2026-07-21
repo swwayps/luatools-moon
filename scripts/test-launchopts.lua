@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/launchopts.lua: read a game's current Steam
+-- Unit tests for plugin/backend/launchopts.lua: read a game's current Steam
 -- "Launch Options" string out of localconfig.vdf, so the online-fix flow can
 -- MERGE its WINEDLLOVERRIDES into the user's existing options (e.g. mangohud,
 -- gamemoderun) instead of clobbering them. localconfig.vdf is the reliable
@@ -7,7 +7,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-launchopts.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -15,7 +15,7 @@ local function check(name, cond)
   else io.write("FAIL " .. name .. "\n"); fails = fails + 1 end
 end
 
-local lo = dofile("linux/backend/launchopts.lua")
+local lo = dofile("plugin/backend/launchopts.lua")
 
 -- A trimmed but real-shaped localconfig.vdf slice.
 local LC = [[

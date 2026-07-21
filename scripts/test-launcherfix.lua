@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/launcherfix.lua
+-- Unit tests for plugin/backend/launcherfix.lua
 --
 -- A crack/bypass archive sometimes ships its OWN launcher (FC25's Launcher.exe,
 -- an EA/Denuvo unlocker, ...) that must be run INSTEAD of the game's default
@@ -23,7 +23,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-launcherfix.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -31,7 +31,7 @@ local function check(name, cond)
   else io.write("FAIL " .. name .. "\n"); fails = fails + 1 end
 end
 
-local lf = dofile("linux/backend/launcherfix.lua")
+local lf = dofile("plugin/backend/launcherfix.lua")
 
 -- The redirect simply points Steam at the launcher exe (in quotes) followed by
 -- %command%. Steam runs the leading exe through the game's Proton; the launcher

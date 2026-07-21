@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/steamlang.lua (Steam client language detection).
+-- Unit tests for plugin/backend/steamlang.lua (Steam client language detection).
 --
 -- steamlang is a PURE module: it parses the Steam client language from
 -- registry.vdf and maps the Steam language NAME (e.g. "brazilian") to a
@@ -7,7 +7,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-steamlang.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -15,7 +15,7 @@ local function check(name, cond)
   else io.write("FAIL " .. name .. "\n"); fails = fails + 1 end
 end
 
-local sl = dofile("linux/backend/steamlang.lua")
+local sl = dofile("plugin/backend/steamlang.lua")
 
 -- map_name: Steam language name -> LuaTools locale code (only existing locales).
 check("M1 brazilian -> pt-BR", sl.map_name("brazilian") == "pt-BR")

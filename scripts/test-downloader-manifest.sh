@@ -23,7 +23,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # Lay out a fake plugin tree so downloader.sh resolves $SCRIPT_DIR/../bin/7zz.
 mkdir -p "$TMP/backend/scripts" "$TMP/backend/bin"
-cp "$REPO/linux/backend/scripts/downloader.sh" "$TMP/backend/scripts/downloader.sh"
+cp "$REPO/plugin/backend/scripts/downloader.sh" "$TMP/backend/scripts/downloader.sh"
 ln -s "$SEVENZ_SYS" "$TMP/backend/bin/7zz"
 DL="$TMP/backend/scripts/downloader.sh"
 
