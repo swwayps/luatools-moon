@@ -1,12 +1,12 @@
 #!/usr/bin/env luajit
--- Smoke test for linux/backend/slsteam.lua (AdditionalApps registrar).
+-- Smoke test for plugin/backend/slsteam.lua (AdditionalApps registrar).
 -- Run from the repo root:  luajit scripts/test-slsteam.lua
 --
 -- Exercises register_app / unregister_app against synthetic config.yaml
 -- shapes, asserting byte-preservation of everything except the single
 -- inserted/removed entry.
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -28,7 +28,7 @@ local cfg = sandbox .. "/.config/SLSsteam/config.yaml"
 local function w(s) local f = assert(io.open(cfg, "wb")); f:write(s); f:close() end
 local function r() local f = assert(io.open(cfg, "rb")); local s = f:read("*a"); f:close(); return s end
 
-local slsteam = dofile("linux/backend/slsteam.lua")
+local slsteam = dofile("plugin/backend/slsteam.lua")
 
 -- Case 1: existing block list, append after, preserve comments.
 w("DisableFamilyShareLock: yes\nAdditionalApps:\n  - 480   # existing\nSafeMode: no\n")

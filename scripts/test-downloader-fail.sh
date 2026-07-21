@@ -21,7 +21,7 @@ check() { if eval "$2"; then echo "ok $1"; else echo "FAIL $1"; fails=$((fails+1
 command -v curl >/dev/null 2>&1 || { echo "SKIP: no curl"; exit 0; }
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-DL="$REPO/linux/backend/scripts/downloader.sh"
+DL="$REPO/plugin/backend/scripts/downloader.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 

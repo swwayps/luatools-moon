@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/protoncompat.lua (forced compat-tool reader).
+-- Unit tests for plugin/backend/protoncompat.lua (forced compat-tool reader).
 --
 -- protoncompat.lua is a PURE module (no Millennium deps): it parses Steam's
 -- config/config.vdf CompatToolMapping block to tell whether the user has
@@ -10,7 +10,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-protoncompat.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -22,7 +22,7 @@ local function check(name, cond)
   end
 end
 
-local pc = dofile("linux/backend/protoncompat.lua")
+local pc = dofile("plugin/backend/protoncompat.lua")
 
 -- A trimmed but real-shaped config.vdf slice. Steam writes the per-game
 -- "Force the use of a specific Steam Play compatibility tool" choice here,

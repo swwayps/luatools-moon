@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/crackfix.lua (ryuu Crack/Bypass resolver).
+-- Unit tests for plugin/backend/crackfix.lua (ryuu Crack/Bypass resolver).
 --
 -- crackfix.lua's logic helpers are PURE: url-encoding, picking the best entry
 -- for an appid, the hypervisor guard, and looking an appid up in a decoded
@@ -8,7 +8,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-crackfix.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local pass, fail = 0, 0
 local function check(name, cond)
@@ -20,7 +20,7 @@ local function check(name, cond)
   end
 end
 
-local cf = dofile("linux/backend/crackfix.lua")
+local cf = dofile("plugin/backend/crackfix.lua")
 
 -- ---------------------------------------------------------------------------
 -- url_encode / build_url

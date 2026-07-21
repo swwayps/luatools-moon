@@ -1384,8 +1384,55 @@ remove_plugin_if_present() {
 	fi
 }
 
+preserve_plugin_data() {
+	local dest="$1"
+	local backup="$2"
+
+	mkdir -p "$backup" || return 1
+	if [ -d "$dest/backend/data" ]; then
+		cp -a "$dest/backend/data/." "$backup/" 2>/dev/null || return 1
+	fi
+
+	# Before the persistent catalog existed, user API changes were written
+	# directly to backend/api.json. Migrate that file once, but never replace a
+	# catalog that is already stored under backend/data.
+	if [ ! -f "$backup/api.json" ] && [ -f "$dest/backend/api.json" ]; then
+		cp -a "$dest/backend/api.json" "$backup/api.json" 2>/dev/null || return 1
+	fi
+}
+
+restore_plugin_data() {
+	local dest="$1"
+	local backup="$2"
+
+	mkdir -p "$dest/backend/data" || return 1
+	cp -a "$backup/." "$dest/backend/data/" 2>/dev/null || return 1
+}
+
+activate_plugin_tree() {
+	local dest="$1"
+	local staged="$2"
+	local previous="$3"
+	local had_previous=0
+
+	if [ -e "$dest" ]; then
+		mv "$dest" "$previous" || return 1
+		had_previous=1
+	fi
+
+	if mv "$staged" "$dest"; then
+		[ "$had_previous" -eq 0 ] || rm -rf "$previous"
+		return 0
+	fi
+
+	if [ "$had_previous" -eq 1 ]; then
+		mv "$previous" "$dest" || return 2
+	fi
+	return 1
+}
+
 install_plugin() {
-	local url tmp zip dest rc
+	local url tmp zip dest rc stage previous
 
 	log_info "$(L "Resolving latest LuaTools plugin release" \
 	             "Buscando a última release do plugin LuaTools")"
@@ -1412,34 +1459,63 @@ install_plugin() {
 	dest="$LUMEN_DIR/luatools"
 
 	# Preserve the user's plugin data across reinstalls/updates. The plugin
-	# stores its settings (language, theme, API keys, ...) and the donated
-	# appid list inside its own backend/data dir, which we are about to
-	# replace. Stash them and restore after extracting the new version.
+	# stores its settings (language, theme, API keys, custom APIs, ...) and the
+	# donated appid list inside its own backend/data dir, which we are about to
+	# replace. Stash them and restore after extracting the new version. Older
+	# releases stored API changes in backend/api.json, so migrate that legacy
+	# file into the persistent data backup as well.
 	local data_bak=""
-	if [ -d "$dest/backend/data" ]; then
+	if [ -d "$dest/backend/data" ] || [ -f "$dest/backend/api.json" ]; then
 		data_bak="$(mktemp -d)"
-		cp -a "$dest/backend/data/." "$data_bak/" 2>/dev/null || true
+		if ! preserve_plugin_data "$dest" "$data_bak"; then
+			rm -rf "$data_bak"
+			fail "$(L "Could not preserve the existing plugin data; update aborted." \
+			          "Não foi possível preservar os dados do plugin; atualização cancelada.")"
+		fi
 	fi
 
-	# The zip contains the plugin contents (plugin.json, backend/, public/).
-	# Replace any prior install.
-	rm -rf "$dest"
-	log_info "$(L "Installing plugin to $dest" "Instalando o plugin em $dest")"
+	# Extract and validate the release before touching the working installation.
 	extract_zip "$zip" "$tmp/extracted" || fail "$(L "Extraction failed" "Falha na extração")"
 
 	local inner
 	inner="$(find "$tmp/extracted" -maxdepth 2 -name plugin.json -type f | head -n1)"
 	[ -n "$inner" ] || fail "$(L "plugin.json not found in the plugin archive." \
 	                            "plugin.json não encontrado no pacote do plugin.")"
-	# Copy the CONTENTS of the dir holding plugin.json into dest, so this
-	# works whether the zip puts files at the root or nests them in a dir.
-	mkdir -p "$dest"
-	cp -a "$(dirname "$inner")/." "$dest/"
 
-	# Restore the user's preserved data over the freshly extracted defaults.
+	# Build a complete staged tree on the destination filesystem. This keeps the
+	# current plugin usable until the archive and preserved data are both ready.
+	mkdir -p "$(dirname "$dest")"
+	stage="$(mktemp -d "${dest}.new.XXXXXX")"
+	cp -a "$(dirname "$inner")/." "$stage/" || {
+		rm -rf "$stage"
+		fail "$(L "Could not stage the plugin files; update aborted." \
+		          "Não foi possível preparar os arquivos do plugin; atualização cancelada.")"
+	}
+
 	if [ -n "$data_bak" ]; then
-		mkdir -p "$dest/backend/data"
-		cp -a "$data_bak/." "$dest/backend/data/" 2>/dev/null || true
+		if ! restore_plugin_data "$stage" "$data_bak"; then
+			rm -rf "$stage"
+			fail "$(L "Could not restore the plugin data. Backup kept at $data_bak" \
+			          "Não foi possível restaurar os dados do plugin. Backup mantido em $data_bak")"
+		fi
+	fi
+
+	# Switch trees with rollback. Both paths are siblings, so each mv is a
+	# same-filesystem rename instead of a partial cross-device copy.
+	previous="$stage.previous"
+	log_info "$(L "Installing plugin to $dest" "Instalando o plugin em $dest")"
+	rc=0
+	activate_plugin_tree "$dest" "$stage" "$previous" || rc=$?
+	if [ "$rc" -eq 2 ]; then
+		fail "$(L "Plugin activation and rollback failed; previous tree kept at $previous" \
+		          "A ativação e a reversão falharam; versão anterior mantida em $previous")"
+	elif [ "$rc" -ne 0 ]; then
+		rm -rf "$stage"
+		fail "$(L "Could not activate the staged plugin; previous installation restored." \
+		          "Não foi possível ativar o plugin preparado; instalação anterior restaurada.")"
+	fi
+
+	if [ -n "$data_bak" ]; then
 		rm -rf "$data_bak"
 		log_success "$(L "Plugin updated (settings preserved)" \
 		             "Plugin atualizado (configurações preservadas)")"

@@ -66,7 +66,7 @@ package.loaded["plugin_utils"] = {
   ensure_temp_download_dir = function() return "/tmp/dl" end,
 }
 package.loaded["api_manifest"] = { load_api_manifest = function() return {} end }
-package.loaded["settings.manager"] = { get_morrenus_api_key = function() return "" end }
+package.loaded["settings.manager"] = { get_hubcap_api_key = function() return "" end }
 package.loaded["json"] = {
   decode = function() return nil end,
   encode = function() return "{}" end,

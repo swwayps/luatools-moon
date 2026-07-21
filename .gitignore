@@ -6,12 +6,12 @@ dist/
 *.swp
 *~
 
-# Runtime artefacts that may end up in upstream/ if the rebase
-# script is bypassed.
-upstream/luatools/backend/temp_dl/
-upstream/luatools/backend/lua_runtime.log
-upstream/luatools/backend/loadedappids.txt
-upstream/luatools/backend/appidlogs.txt
+# Runtime artefacts from testing the canonical plugin tree in place.
+plugin/backend/temp_dl/
+plugin/backend/data/
+plugin/backend/lua_runtime.log
+plugin/backend/loadedappids.txt
+plugin/backend/appidlogs.txt
 
 # Local backup of published release assets (not tracked).
 .release-backup/

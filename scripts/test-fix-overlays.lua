@@ -1,5 +1,5 @@
 #!/usr/bin/env luajit
--- Unit tests for linux/backend/fix_overlays.lua
+-- Unit tests for plugin/backend/fix_overlays.lua
 --
 -- fix_overlays is a PURE module (no Millennium deps) that:
 --   * scans a directory for the Windows DLLs an online/generic fix ships
@@ -9,7 +9,7 @@
 --
 -- Run from the repo root:  luajit scripts/test-fix-overlays.lua
 
-package.path = "linux/backend/?.lua;" .. package.path
+package.path = "plugin/backend/?.lua;" .. package.path
 
 local fails = 0
 local function check(name, cond)
@@ -21,7 +21,7 @@ local function check(name, cond)
   end
 end
 
-local fo = dofile("linux/backend/fix_overlays.lua")
+local fo = dofile("plugin/backend/fix_overlays.lua")
 
 -- ---------------------------------------------------------------------------
 -- build_overrides(dll_names): map a set of present DLL basenames to a
