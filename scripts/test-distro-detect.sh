@@ -89,6 +89,46 @@ fixture 'ID=linuxmint
 ID_LIKE="ubuntu debian"'
 [ "$(get_distro_family)" = "debian" ]; check "family: mint -> debian" $?
 
+# --- NixOS ------------------------------------------------------------------
+# NixOS has no /usr/bin, no system package manager the installer can drive,
+# and no read-only root — it needs its own branches, not the immutable path.
+
+fixture 'ID=nixos
+ID_LIKE=""'
+[ "$(get_distro_id)" = "nixos" ]; check "id: nixos" $?
+if is_immutable_distro; then r=1; else r=0; fi
+check "immutable: nixos -> no (declarative, not read-only)" "$r"
+[ "$(get_distro_family)" = "unknown" ]; check "family: nixos -> unknown (no apt/dnf/pacman/zypper)" $?
+
+# detect_steam_type's nixos branch: accept `steam` off PATH only when it
+# resolves into the Nix store (real programs.steam.enable layout), not a
+# flatpak/snap shim that happens to shadow the name.
+FAKEBIN="$TESTDIR/fakebin"; mkdir -p "$FAKEBIN"
+FAKESTORE="$TESTDIR/nix-store-pkg/bin"; mkdir -p "$FAKESTORE"
+printf '#!/bin/sh\n' > "$FAKESTORE/steam"; chmod +x "$FAKESTORE/steam"
+ln -sf "$FAKESTORE/steam" "$FAKEBIN/steam"
+# readlink -f resolves through the symlink to $TESTDIR/nix-store-pkg/bin/steam,
+# which isn't under /nix/store on a dev host — so fake `readlink` to prove the
+# branch's logic (real /nix/store/* prefix) without needing an actual store.
+readlink() { case "$*" in "-f "*) printf '/nix/store/abc123-steam-1.0/bin/steam\n' ;; esac; }
+detect_steam_type_result="$(PATH="$FAKEBIN:$PATH" detect_steam_type)"
+[ "$detect_steam_type_result" = "native" ]; check "steam type: nixos + steam resolving into /nix/store -> native" $?
+unset -f readlink
+rm -rf "$FAKEBIN" "$FAKESTORE"
+
+# Negative: `steam` on PATH but NOT resolving into /nix/store (e.g. a stray
+# script) must not be misdetected as native.
+FAKEBIN2="$TESTDIR/fakebin2"; mkdir -p "$FAKEBIN2"
+printf '#!/bin/sh\n' > "$FAKEBIN2/steam"; chmod +x "$FAKEBIN2/steam"
+detect_steam_type_result="$(PATH="$FAKEBIN2:$PATH" detect_steam_type)"
+[ "$detect_steam_type_result" != "native" ]; check "steam type: nixos + steam outside /nix/store -> not native" $?
+rm -rf "$FAKEBIN2"
+
+# nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
+[ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?
+[ "$(nixos_pkg_for notify-send)" = "libnotify" ]; check "nixos_pkg_for: notify-send -> libnotify" $?
+[ "$(nixos_pkg_for jq)" = "jq" ]; check "nixos_pkg_for: jq -> jq (unchanged)" $?
+
 rm -rf "$TESTDIR"
 echo ""
 if [ "$failures" -eq 0 ]; then echo "ALL PASS"; exit 0; fi
