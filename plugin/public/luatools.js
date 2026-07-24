@@ -7644,18 +7644,88 @@
               return;
             }
 
-            // Helper that continues with the multi-API check flow
+            let isFastDownload = true;
+            try {
+              if (
+                window.__LuaToolsSettings &&
+                window.__LuaToolsSettings.values &&
+                window.__LuaToolsSettings.values.general &&
+                typeof window.__LuaToolsSettings.values.general.fastDownload !==
+                  "undefined"
+              ) {
+                isFastDownload =
+                  window.__LuaToolsSettings.values.general.fastDownload;
+              }
+            } catch (e) {}
+
+            const startSmartDownload = function (appid) {
+              showTestPopup();
+              runState.inProgress = true;
+              runState.appid = appid;
+              const overlay = document.querySelector(".luatools-overlay");
+              if (overlay) {
+                const status = overlay.querySelector(".luatools-status");
+                if (status) status.textContent = lt("Initializing download...");
+                const progressWrap = overlay.querySelector(
+                  ".luatools-progress-wrap",
+                );
+                if (progressWrap) progressWrap.style.display = "block";
+                const progressInfo = overlay.querySelector(
+                  ".luatools-progress-info",
+                );
+                if (progressInfo) progressInfo.style.display = "block";
+                const cancelBtn = overlay.querySelector(
+                  ".luatools-cancel-btn",
+                );
+                if (cancelBtn) cancelBtn.style.display = "flex";
+              }
+              backendLog("LuaTools: fast download -> parallel aggregation");
+              Millennium.callServerMethod(
+                "luatools",
+                "StartAddViaLuaToolsSmart",
+                { appid, contentScriptQuery: "" },
+              )
+                .then(function (res) {
+                  const payload = typeof res === "string" ? JSON.parse(res) : res;
+                  if (payload && payload.success === false) {
+                    throw new Error(payload.error || "Failed to start download");
+                  }
+                  startPolling(appid, function () {});
+                })
+                .catch(function (err) {
+                  backendLog("LuaTools: smart download start failed: " + err);
+                  runState.inProgress = false;
+                  runState.appid = null;
+                  const failedOverlay = document.querySelector(".luatools-overlay");
+                  const failedStatus = failedOverlay
+                    ? failedOverlay.querySelector(".luatools-status")
+                    : null;
+                  if (failedStatus) {
+                    failedStatus.textContent = lt("Failed: {error}").replace(
+                      "{error}",
+                      (err && err.message) || String(err),
+                    );
+                  }
+                  const cancelBtn = failedOverlay
+                    ? failedOverlay.querySelector(".luatools-cancel-btn")
+                    : null;
+                  if (cancelBtn) cancelBtn.style.display = "none";
+                });
+            };
+
+            // Fast Download starts immediately. Manual mode still checks APIs
+            // first because it needs concrete available URLs for its picker.
             const continueWithAdd = function () {
-              // Open the loading popup first to show "Searching..."
+              if (isFastDownload) {
+                startSmartDownload(appid);
+                return;
+              }
+
               showTestPopup();
               const overlay = document.querySelector(".luatools-overlay");
               const status = overlay
                 ? overlay.querySelector(".luatools-status")
                 : null;
-              const apiList = overlay
-                ? overlay.querySelector(".luatools-api-list")
-                : null;
-
               if (status)
                 status.textContent = lt("Searching across sources...");
 
@@ -7670,13 +7740,14 @@
                     if (!payload || !payload.success) {
                       throw new Error(payload.error || "Check failed");
                     }
-
-                    const results = payload.results || [];
-                    const available = results.filter((r) => r.available);
-
+                    const available = (payload.results || []).filter(
+                      (source) => source.available,
+                    );
                     if (available.length === 0) {
-                      const msg = lt("Game not found on any available API.");
-                      if (status) status.textContent = msg;
+                      if (status)
+                        status.textContent = lt(
+                          "Game not found on any available API.",
+                        );
                       const hideBtn = overlay
                         ? overlay.querySelector(".luatools-hide-btn")
                         : null;
@@ -7684,57 +7755,7 @@
                         hideBtn.innerHTML = "<span>" + lt("Close") + "</span>";
                       return;
                     }
-
-                    let isFastDownload = true; // default
-                    try {
-                      if (
-                        window.__LuaToolsSettings &&
-                        window.__LuaToolsSettings.values &&
-                        window.__LuaToolsSettings.values.general
-                      ) {
-                        if (
-                          typeof window.__LuaToolsSettings.values.general
-                            .fastDownload !== "undefined"
-                        ) {
-                          isFastDownload =
-                            window.__LuaToolsSettings.values.general
-                              .fastDownload;
-                        }
-                      }
-                    } catch (e) {}
-
-                    if (isFastDownload) {
-                      // slsteammoon: fast download runs the backend smart
-                      // source selector (parallel race -> most complete of
-                      // the fastest) instead of picking available[0] by order.
-                      backendLog(
-                        "LuaTools: fast download -> smart selection (" +
-                          available.length + " available)",
-                      );
-                      runState.inProgress = true;
-                      runState.appid = appid;
-                      const smartOverlay = document.querySelector(".luatools-overlay");
-                      if (smartOverlay) {
-                        const st = smartOverlay.querySelector(".luatools-status");
-                        if (st) st.textContent = lt("Initializing download...");
-                        const pw = smartOverlay.querySelector(".luatools-progress-wrap");
-                        if (pw) pw.style.display = "block";
-                        const pi = smartOverlay.querySelector(".luatools-progress-info");
-                        if (pi) pi.style.display = "block";
-                        const cb = smartOverlay.querySelector(".luatools-cancel-btn");
-                        if (cb) cb.style.display = "flex";
-                      } else {
-                        showTestPopup();
-                      }
-                      Millennium.callServerMethod("luatools", "StartAddViaLuaToolsSmart", {
-                        appid,
-                        contentScriptQuery: "",
-                      });
-                      startPolling(appid, function () {});
-                    } else {
-                      // Fast download disabled, let user select
-                      showSourceSelectionModal(appid, available);
-                    }
+                    showSourceSelectionModal(appid, available);
                   } catch (err) {
                     backendLog("LuaTools: CheckApisForApp error: " + err);
                     if (status)
