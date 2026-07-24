@@ -484,6 +484,18 @@ detect_steam_type() {
 			return
 		fi
 	done
+	# NixOS has no /usr/bin: `programs.steam.enable` symlinks the launcher into
+	# the user's profile (e.g. /run/current-system/sw/bin/steam) instead. Accept
+	# `steam` off PATH only when it resolves into the Nix store, so we don't
+	# misdetect a flatpak/snap shim that happens to shadow the name.
+	if [ "$(get_distro_id)" = "nixos" ] && command -v steam >/dev/null 2>&1; then
+		case "$(readlink -f "$(command -v steam)" 2>/dev/null)" in
+			/nix/store/*)
+				echo "native"
+				return
+				;;
+		esac
+	fi
 	if command -v flatpak >/dev/null 2>&1 && flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
 		echo "flatpak"
 		return
@@ -612,6 +624,17 @@ check_steam_bootstrapped() {
 # ============================================================================
 # Runtime dependencies
 # ============================================================================
+# nixpkgs attribute name for a tool (NixOS has no package-manager install —
+# see the "nixos" branch of install_dependencies below). Only "tar" differs:
+# nixpkgs ships it as gnutar, there is no top-level `tar` attribute.
+nixos_pkg_for() {
+	case "$1" in
+		tar)         echo "gnutar" ;;
+		notify-send) echo "libnotify" ;;
+		*)           echo "$1" ;;
+	esac
+}
+
 # Map a generic tool name to the package that provides it on each family.
 pkg_for() {
 	local tool="$1" family="$2"
@@ -702,6 +725,41 @@ install_dependencies() {
 	if [ "${#missing_tools[@]}" -eq 0 ]; then
 		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
 		return 0
+	fi
+
+	# NixOS: there is no ad-hoc package-manager install — packages come from
+	# environment.systemPackages + a system rebuild (or `nix profile install`
+	# for a one-off). Same "never touch the system for the user" contract as
+	# the immutable branch below, but with NixOS-flavored instructions.
+	if [ "$(get_distro_id)" = "nixos" ]; then
+		local essential=()
+		for tool in "${missing_tools[@]}"; do
+			[ "$tool" = "notify-send" ] || essential+=("$tool")
+		done
+		if [ "${#essential[@]}" -eq 0 ]; then
+			log_warn "$(L "notify-send not found; in-Steam popups will be disabled (everything else works)." \
+			             "notify-send não encontrado; os popups dentro da Steam ficarão desativados (o resto funciona).")"
+			log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+			return 0
+		fi
+		local nix_attrs="" flake_attrs="" t
+		for t in "${essential[@]}"; do
+			nix_attrs="$nix_attrs nixpkgs#$(nixos_pkg_for "$t")"
+			flake_attrs="$flake_attrs $(nixos_pkg_for "$t")"
+		done
+		echo ""
+		log_error "$(L "Missing required tools: ${essential[*]}" \
+		              "Ferramentas necessárias ausentes: ${essential[*]}")"
+		echo ""
+		echo -e "  $(L "Add them to environment.systemPackages in configuration.nix and rebuild:" \
+		               "Adicione-as a environment.systemPackages no configuration.nix e reconstrua:")"
+		echo -e "       ${GREEN}${flake_attrs# }${NC}"
+		echo -e "  $(L "...or install them for this user only, right now:" \
+		               "...ou instale-as só para este usuário, agora mesmo:")"
+		echo -e "       ${GREEN}nix profile install${nix_attrs}${NC}"
+		echo ""
+		fail "$(L "Aborted. Install the tools above, then re-run this installer." \
+		          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
 	fi
 
 	# Immutable / atomic OS: never invoke the package manager (rpm-ostree needs
@@ -1351,10 +1409,33 @@ install_lumen() {
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
 	chmod +x "$dest/lumen" 2>/dev/null || true
-	if ! file "$dest/lumen" 2>/dev/null | grep -q "ELF 64-bit"; then
+	# ELF64 magic: bytes 0-3 = 7f 45 4c 46, byte 4 (EI_CLASS) = 02. Checked via
+	# `od` (coreutils, always present) instead of `file`, which isn't installed
+	# by default on every distro (NixOS notably ships no `file` by default).
+	if [ "$(od -An -tx1 -N5 "$dest/lumen" 2>/dev/null | tr -d ' \n')" != "7f454c4602" ]; then
 		fail "$(L "Lumen binary is not a valid ELF executable" \
 		         "O binário do Lumen não é um ELF válido")"
 	fi
+
+	# NixOS has no FHS /lib64/ld-linux..., /usr/lib etc., so this prebuilt ELF
+	# can't load its dynamic linker directly. Move it aside and drop a
+	# steam-run shim in its place: every caller (the slsteam-moon wrapper
+	# execs "$dest/lumen" by convention) keeps working unmodified, now inside
+	# an FHS sandbox. steam-run ships automatically with programs.steam.enable.
+	if [ "$(get_distro_id)" = "nixos" ]; then
+		command -v steam-run >/dev/null 2>&1 || fail "$(L \
+			"steam-run not found. It ships automatically with programs.steam.enable on NixOS — make sure Steam is enabled and re-run this installer." \
+			"steam-run não encontrado. Ele vem automaticamente com programs.steam.enable no NixOS — confira se a Steam está habilitada e rode o instalador de novo.")"
+		mv -f "$dest/lumen" "$dest/lumen.bin"
+		cat >"$dest/lumen" <<-'WRAP'
+			#!/usr/bin/env bash
+			exec steam-run "$(dirname "$0")/lumen.bin" "$@"
+		WRAP
+		chmod +x "$dest/lumen"
+		log_info "$(L "Wrapped Lumen with steam-run for NixOS" \
+		             "Lumen encapsulado com steam-run para o NixOS")"
+	fi
+
 	log_success "$(L "Lumen installed" "Lumen instalado")"
 }
 
@@ -1699,13 +1780,14 @@ install_cloudredirect_so() {
 	fi
 
 	# The Steam client is 32-bit, so the hook must be a 32-bit ELF or it will be
-	# silently ignored by the loader. Verify before deploying.
-	if command -v file >/dev/null 2>&1; then
-		if ! file -b "$so" | grep -q "ELF 32-bit"; then
-			log_warn "$(L "Downloaded cloud_redirect.so is not 32-bit; skipping cloud saves." \
-			             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
-			return 1
-		fi
+	# silently ignored by the loader. Verify before deploying. ELF32 magic:
+	# bytes 0-3 = 7f 45 4c 46, byte 4 (EI_CLASS) = 01. Checked via `od`
+	# (coreutils, always present) instead of `file`, which isn't installed by
+	# default on every distro (NixOS notably ships no `file` by default).
+	if [ "$(od -An -tx1 -N5 "$so" 2>/dev/null | tr -d ' \n')" != "7f454c4601" ]; then
+		log_warn "$(L "Downloaded cloud_redirect.so is not 32-bit; skipping cloud saves." \
+		             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
+		return 1
 	fi
 
 	mkdir -p "$CR_DIR"

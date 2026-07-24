@@ -114,6 +114,17 @@ check_not_root() {
 
 # Keep the standalone uninstaller's privilege policy aligned with install.sh:
 # image-based/atomic systems are user-scoped and must never prompt for sudo.
+#
+# NixOS is deliberately absent from the list below, same as in install.sh:
+# its root is writable (declarative config, not a read-only image), so it
+# takes the ordinary sudo_prefix path. It needs no NixOS-specific branch in
+# this file the way install.sh does: every /usr-rooted path here (legacy
+# /usr/games/steam, /usr/share/applications/steam.desktop, /usr/lib/millennium)
+# is guarded on the file existing first, so it degrades to a no-op on NixOS
+# the same way it already does on any distro where that path was never
+# populated. And Lumen removal is a plain `rm -rf ~/.local/share/Lumen`, so
+# it takes install.sh's steam-run-wrapped lumen + lumen.bin split with it
+# regardless of how it got installed.
 OS_RELEASE_FILE="${OS_RELEASE_FILE:-/etc/os-release}"
 is_immutable_distro() {
 	local id="" like="" variant=""

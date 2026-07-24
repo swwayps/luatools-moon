@@ -10,6 +10,8 @@ curl -fsSL https://raw.githubusercontent.com/swwayps/luatools-moon/main/install.
 
 > **Requirements:** Linux x86_64 and **native Steam** installed from your package
 > manager. Flatpak and Snap Steam are not supported.
+> On NixOS, `programs.steam.enable`
+> counts as native — the installer wraps Lumen with `steam-run` automatically.
 >
 > **Want Steam theme support?** Use the [`millennium` branch](https://github.com/swwayps/luatools-moon/tree/millennium).
 

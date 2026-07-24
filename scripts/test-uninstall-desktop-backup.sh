@@ -47,5 +47,10 @@ export PATH="$TMP/bin:$PATH" SUDO_CALLS="$TMP/sudo.calls" OS_RELEASE_FILE="$TMP/
 check "immutable uninstaller returns no sudo prefix" "" "$(sudo_prefix)"
 check "immutable uninstaller never invokes sudo" "no" "$([ -s "$SUDO_CALLS" ] && echo yes || echo no)"
 
+# NixOS is declarative but its root is writable, not a read-only image, so
+# unlike SteamOS above it must take the ordinary sudo path.
+printf 'ID=nixos\nID_LIKE=""\n' > "$TMP/os-release"
+check "nixos uninstaller is not treated as immutable" "sudo" "$(sudo_prefix)"
+
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILURES"
 exit "$fail"
