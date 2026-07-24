@@ -308,6 +308,68 @@ restore_or_remove_desktop() {
 }
 
 # ============================================================================
+# Safety net: never leave the user without a working Steam launcher.
+# ============================================================================
+# The shared coverage restore (dc_restore_all) removes a patched entry when its
+# central backup is missing, and any entry it leaves behind still points at our
+# wrapper — which we are about to delete. Both cases make the Steam icon vanish
+# or stop launching. This heals the end state directly and is self-contained so
+# it works even against an older installed coverage lib:
+#   (a) any surviving steam.desktop that still runs the wrapper is rewritten back
+#       to the plain `steam` launcher and de-tagged (works via system Steam);
+#   (b) if NO steam.desktop exists anywhere, a minimal user entry is recreated so
+#       the menu/taskbar icon returns.
+# Overridable target for tests.
+: "${HEAL_SYS_DESKTOP:=/usr/share/applications/steam.desktop}"
+
+heal_steam_launcher() {
+	local wrapper="$HOME/.local/share/SLSsteam/path/steam"
+	local user_app="$HOME/.local/share/applications/steam.desktop"
+	local sys_app="$HEAL_SYS_DESKTOP"
+	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+
+	# (a) De-patch any surviving entry that still references the wrapper.
+	_heal_depatch() {
+		local f="$1" s="${2:-}" tmp
+		[ -f "$f" ] || return 0
+		grep -q "SLSsteam" "$f" 2>/dev/null || return 0
+		tmp="$(mktemp)" || return 0
+		# `|` delimiter: the wrapper path contains `/` but never `|`.
+		sed -e "s|${wrapper}|steam|g" -e "/^X-SLSteamMoon-/d" "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
+		if [ -n "$s" ]; then
+			$s cp -- "$tmp" "$f" 2>/dev/null && $s chmod 0644 "$f" 2>/dev/null
+		else
+			cp -- "$tmp" "$f" 2>/dev/null && chmod 0644 "$f" 2>/dev/null
+		fi
+		rm -f "$tmp"
+	}
+	_heal_depatch "$user_app"
+	if ! is_immutable_distro && [ -n "$sudo_cmd" ]; then
+		_heal_depatch "$sys_app" "$sudo_cmd"
+	fi
+
+	# (b) Nothing left anywhere -> recreate a minimal, vanilla user entry.
+	if [ ! -f "$user_app" ] && [ ! -f "$sys_app" ]; then
+		log_step "$(L "No Steam launcher survived restoration; recreating a minimal one" \
+		             "Nenhum lançador da Steam sobreviveu à restauração; recriando um mínimo")"
+		mkdir -p "$(dirname "$user_app")" 2>/dev/null || return 0
+		cat > "$user_app" <<'EOF'
+[Desktop Entry]
+Name=Steam
+Comment=Application for managing and playing games on Steam
+Exec=steam %U
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Game;
+MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
+PrefersNonDefaultGPU=true
+EOF
+		chmod 0644 "$user_app" 2>/dev/null || true
+	fi
+}
+
+# ============================================================================
 # Step: slsteam-moon
 # ============================================================================
 uninstall_slsteam_moon() {
@@ -341,6 +403,18 @@ uninstall_slsteam_moon() {
 		DC_SUDO=""
 		! is_immutable_distro && command -v sudo >/dev/null 2>&1 && DC_SUDO="sudo"
 		dc_restore_all
+
+		# Remove the systemd user guardian (path/timer/service) and the generated
+		# autostart drop-ins. Without this they linger after the wrapper is gone,
+		# pointing the autostart unit at a deleted binary. Sentinel-guarded in the
+		# lib, so foreign units are never touched.
+		local guardian_lib="$HOME/.local/share/SLSsteam/desktop-guardian-units.lib.sh"
+		if [ -f "$guardian_lib" ]; then
+			# shellcheck source=/dev/null
+			. "$guardian_lib" 2>/dev/null || true
+			command -v dgu_remove_autostart_dropins >/dev/null 2>&1 && dgu_remove_autostart_dropins || true
+			command -v dgu_remove_units >/dev/null 2>&1 && dgu_remove_units || true
+		fi
 		coverage_restored=1
 	fi
 
@@ -387,6 +461,20 @@ uninstall_slsteam_moon() {
 			log_warn "$(L "Legacy modification found but no backup exists" \
 			             "Modificação legada encontrada, mas sem backup")"
 		fi
+	fi
+
+	# Guarantee a working Steam launcher survives before we delete the wrapper the
+	# patched entries reference. Runs whether or not the coverage helper was used.
+	heal_steam_launcher
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
+	fi
+	# KDE resolves menu/taskbar launchers through KSycoca, which update-desktop-
+	# database does not refresh; rebuild it so the restored icon reappears at once.
+	if command -v kbuildsycoca6 >/dev/null 2>&1; then
+		kbuildsycoca6 --noincremental >/dev/null 2>&1 || true
+	elif command -v kbuildsycoca5 >/dev/null 2>&1; then
+		kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
 	fi
 
 	# Binaries + wrapper.
@@ -671,4 +759,8 @@ main() {
 	print_complete
 }
 
-main "$@"
+# Run the uninstaller unless sourced for unit tests (SLSPLUGIN_LIB_ONLY=1).
+# Plain `curl ... | bash` leaves SLSPLUGIN_LIB_ONLY unset, so main still runs.
+if [ -z "${SLSPLUGIN_LIB_ONLY:-}" ]; then
+	main "$@"
+fi
