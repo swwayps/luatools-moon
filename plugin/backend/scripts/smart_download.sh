@@ -45,7 +45,7 @@ fi
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
 
 # NUL records: source-index, display-name, URL, accepted HTTP status.
-declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_STAT C_PID C_STATE
+declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE
 n=0
 exec 3< "$CANDIDATES_FILE"
 while IFS= read -r -d '' idx <&3; do
@@ -54,7 +54,9 @@ while IFS= read -r -d '' idx <&3; do
   IFS= read -r -d '' code <&3 || break
   [[ "$idx" =~ ^[0-9]+$ && "$code" =~ ^[0-9]+$ && -n "$url" ]] || continue
   C_INDEX[n]="$idx"; C_NAME[n]="$name"; C_URL[n]="$url"; C_CODE[n]="$code"
-  C_ZIP[n]="$WORK/source_${n}.zip"; C_STAT[n]="$WORK/source_${n}.stat"; C_STATE[n]="pending"
+  C_ZIP[n]="$WORK/source_${n}.zip"; C_HEAD[n]="$WORK/source_${n}.headers"
+  C_PIPE[n]="$WORK/source_${n}.stream"; C_TOTAL_FILE[n]="$WORK/source_${n}.total"
+  C_TOTAL[n]=""; C_STATE[n]="pending"
   n=$((n + 1))
 done
 exec 3<&-
@@ -114,13 +116,44 @@ extract_source() {
   printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-index"
   printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-priority"
 }
+
+capture_curl_headers() {
+  local header_file="$1" total_file="$2"
+  local line clean plain status=0 content_length="" total_tmp="${total_file}.tmp"
+  : > "$header_file"
+  rm -f "$total_file" "$total_tmp"
+  while IFS= read -r line; do
+    clean="${line%$'\r'}"
+    if [[ "$clean" =~ ^\<\ HTTP/[0-9.]+[[:space:]]+([0-9]+) ]]; then
+      status="${BASH_REMATCH[1]}"
+      content_length=""
+      plain="${clean#< }"
+      printf '%s\n' "$plain" >> "$header_file"
+    elif [[ "${clean,,}" =~ ^\<\ content-length:[[:space:]]*([0-9]+)$ ]]; then
+      content_length="${BASH_REMATCH[1]}"
+      plain="${clean#< }"
+      printf '%s\n' "$plain" >> "$header_file"
+    elif [[ "$clean" == "< " && "$status" -ge 200 \
+        && ( "$status" -lt 300 || "$status" -ge 400 ) ]]; then
+      if [[ "$content_length" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$content_length" > "$total_tmp"
+        mv -f "$total_tmp" "$total_file"
+      fi
+    fi
+  done
+}
+
 write_state downloading "" 0 0
 for ((i=0; i<n; i++)); do
-  curl -sSL -A 'discord(dot)gg/luatools' \
+  mkfifo "${C_PIPE[i]}"
+  capture_curl_headers "${C_HEAD[i]}" "${C_TOTAL_FILE[i]}" < "${C_PIPE[i]}" &
+  C_PARSE_PID[i]=$!
+  # The verbose stream carries only metadata through the FIFO; the response
+  # body is written directly to the ZIP and this remains the source's only GET.
+  stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' \
     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$COLLECTION_DEADLINE" \
     --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
-    -o "${C_ZIP[i]}" -w '%{http_code} %{size_download} %{time_total}' \
-    "${C_URL[i]}" > "${C_STAT[i]}" 2>/dev/null &
+    -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
   C_PID[i]=$!
 done
 
@@ -139,8 +172,11 @@ while :; do
       continue
     fi
     wait "${C_PID[i]}"; rc=$?
-    read -r http _ _ < "${C_STAT[i]}" 2>/dev/null || true
-    if [[ "$rc" -eq 0 && "${http:-0}" == "${C_CODE[i]}" ]] \
+    wait "${C_PARSE_PID[i]}"; parse_rc=$?
+    http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
+      "${C_HEAD[i]}" 2>/dev/null)"
+    if [[ "$rc" -eq 0 && "$parse_rc" -eq 0 \
+        && "${http:-0}" == "${C_CODE[i]}" ]] \
         && zip_is_safe_and_usable "${C_ZIP[i]}" && extract_source "$i"; then
       C_STATE[i]="ok"; completed=$((completed + 1)); slog "source index=${C_INDEX[i]} collected"
     else
@@ -149,7 +185,24 @@ while :; do
   done
 
   if [[ "$bytes" -gt "$progress_bytes" ]]; then progress_bytes="$bytes"; fi
-  write_state downloading "" "$progress_bytes" 0
+
+  # curl writes every response header block while following redirects. Use a
+  # Content-Length only from the latest non-redirect response, then expose an
+  # aggregate total only when every participating source has a known size.
+  aggregate_total=0; totals_known=1
+  for ((i=0; i<n; i++)); do
+    C_TOTAL[i]=""
+    if [[ -f "${C_TOTAL_FILE[i]}" ]]; then
+      IFS= read -r 'C_TOTAL[i]' < "${C_TOTAL_FILE[i]}" || true
+    fi
+    if [[ "${C_TOTAL[i]}" =~ ^[0-9]+$ ]]; then
+      aggregate_total=$((aggregate_total + 10#${C_TOTAL[i]}))
+    else
+      totals_known=0
+    fi
+  done
+  [[ "$totals_known" -eq 1 ]] || aggregate_total=0
+  write_state downloading "" "$progress_bytes" "$aggregate_total"
   current_ms="$(now_ms)"
   if [[ -z "$coverage_at" ]] && coverage_complete; then coverage_at="$current_ms"; fi
   if [[ "$running" -eq 0 ]]; then break; fi
@@ -162,6 +215,7 @@ for ((i=0; i<n; i++)); do
   if [[ "${C_STATE[i]}" == pending ]]; then
     kill "${C_PID[i]}" 2>/dev/null || true
     wait "${C_PID[i]}" 2>/dev/null || true
+    wait "${C_PARSE_PID[i]}" 2>/dev/null || true
     C_STATE[i]="cancelled"
   fi
 done

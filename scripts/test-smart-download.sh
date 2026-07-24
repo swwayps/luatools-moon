@@ -137,8 +137,8 @@ ELAPSED=$(( $(date +%s%3N) - START ))
 check "global deadline bounds unhealthy source" '[[ "$ELAPSED" -ge 1800 && "$ELAPSED" -lt 3500 ]]'
 check "successful peer survives deadline" '[[ -f "$D4/extracted_1134710/source_0000/1134710.lua" ]]'
 
-# Atomic state snapshots must remain valid JSON and progress must never drop
-# when a completed source leaves the pending set.
+# Atomic state snapshots must remain valid JSON, progress must never drop,
+# and known response sizes must expose real intermediate percentages.
 D5="$TMP/d5"; mkdir -p "$D5"; C5="$TMP/c5.bin"; : > "$C5"
 write_candidate "$C5" 0 "Paced" "http://127.0.0.1:$PORT/paced.zip" 200
 write_candidate "$C5" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
@@ -151,7 +151,8 @@ while kill -0 "$WORKER_PID" 2>/dev/null; do
     value="$(python3 - "$D5/state.json" <<'PY' 2>/dev/null
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
-    print(int(json.load(f).get("bytesRead", 0)))
+    data = json.load(f)
+print(int(data.get("bytesRead", 0)), int(data.get("totalBytes", 0)))
 PY
 )" || JSON_ERRORS=$((JSON_ERRORS + 1))
     [[ -n "$value" ]] && printf '%s\n' "$value" >> "$D5/observed"
@@ -162,8 +163,15 @@ wait "$WORKER_PID"
 check "state remains valid JSON during rapid polling" '[[ "$JSON_ERRORS" -eq 0 ]]'
 check "live byte progress is monotonic" 'python3 - "$D5/observed" <<'"'"'PY'"'"'
 import sys
-values=[int(x) for x in open(sys.argv[1]) if x.strip()]
+samples=[tuple(map(int, x.split())) for x in open(sys.argv[1]) if x.strip()]
+values=[sample[0] for sample in samples]
 raise SystemExit(0 if values and all(b >= a for a,b in zip(values, values[1:])) else 1)
+PY'
+check "known totals expose intermediate progress" 'python3 - "$D5/observed" <<'"'"'PY'"'"'
+import sys
+samples=[tuple(map(int, x.split())) for x in open(sys.argv[1]) if x.strip()]
+pcts=[bytes_read * 100 / total for bytes_read, total in samples if total > 0]
+raise SystemExit(0 if any(1 < pct < 99 for pct in pcts) else 1)
 PY'
 
 # Existing pure progress contract remains monotonic and capped.
