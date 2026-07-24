@@ -1,10 +1,10 @@
 #!/usr/bin/env luajit
--- Smoke test for plugin/backend/slsteam.lua (AdditionalApps registrar).
+-- Smoke test for plugin/backend/slsteam.lua configuration helpers.
 -- Run from the repo root:  luajit scripts/test-slsteam.lua
 --
--- Exercises register_app / unregister_app against synthetic config.yaml
--- shapes, asserting byte-preservation of everything except the single
--- inserted/removed entry.
+-- App discovery is driven by config/stplug-in/*.lua filenames. This module
+-- must not expose an AdditionalApps registrar; it only maintains settings
+-- that still live in config.yaml.
 
 package.path = "plugin/backend/?.lua;" .. package.path
 
@@ -30,79 +30,14 @@ local function r() local f = assert(io.open(cfg, "rb")); local s = f:read("*a");
 
 local slsteam = dofile("plugin/backend/slsteam.lua")
 
--- Case 1: existing block list, append after, preserve comments.
-w("DisableFamilyShareLock: yes\nAdditionalApps:\n  - 480   # existing\nSafeMode: no\n")
-local ok, msg = slsteam.register_app(620, "Portal 2")
-check("C1 ok", ok == true and msg == "added")
-local c = r()
-check("C1 480 kept", c:find("480") ~= nil)
-check("C1 620 added", c:find("620") ~= nil)
-check("C1 comment kept", c:find("# existing") ~= nil)
-check("C1 SafeMode kept", c:find("SafeMode: no") ~= nil)
+check("A1 register_app is absent", slsteam.register_app == nil)
+check("A2 unregister_app is absent", slsteam.unregister_app == nil)
 
--- idempotent
-ok, msg = slsteam.register_app(620)
-check("C1 idempotent", msg == "already_present")
-
--- Case 2: empty block.
-w("AdditionalApps:\n")
-ok, msg = slsteam.register_app(123)
-check("C2 added to empty block", msg == "added" and r():find("%- 123") ~= nil)
-
--- Case 3: missing key -> created.
-w("PlayNotOwnedGames: yes\n")
-ok, msg = slsteam.register_app(777)
-c = r()
-check("C3 header created", c:find("AdditionalApps:") ~= nil)
-check("C3 entry created", c:find("%- 777") ~= nil)
-
--- Case 4: inline form refused.
-w("AdditionalApps: [1, 2]\n")
-ok, msg = slsteam.register_app(9)
-check("C4 inline refused", ok == false)
-
--- Case 5: wide indent preserved.
-w("AdditionalApps:\n    - 1\n    - 2\n")
-slsteam.register_app(3, "three")
-check("C5 indent preserved", r():find("    %- 3") ~= nil)
-
--- Case 6: unregister.
-w("AdditionalApps:\n  - 480\n  - 620\n")
-ok, msg = slsteam.unregister_app(480)
-c = r()
-check("C6 removed 480", msg == "removed" and c:find("%- 480") == nil)
-check("C6 kept 620", c:find("%- 620") ~= nil)
-ok, msg = slsteam.unregister_app(99999)
-check("C6 absent -> not_present", msg == "not_present")
-
--- Case 7: ZERO-indent list ("- 480" flush-left, valid YAML). Regression for
--- config_parse_abort_analysis.md: the new entry MUST match the existing 0
--- indentation. The old %s+ matcher broke the scan on the first item, so the
--- entry was inserted at the fallback 2-space indent right after the header ->
--- mixed indentation, which yaml-cpp rejects and can brick Steam at startup.
-w("AdditionalApps:\n- 480\n- 620\nSafeMode: no\n")
-ok, msg = slsteam.register_app(700, "added via LuaTools")
-c = r()
-check("C7 added", ok == true and msg == "added")
-check("C7 new entry at 0 indent", c:find("\n%- 700") ~= nil)
-check("C7 no mixed 2-space indent", c:find("  %- 700") == nil)
-check("C7 existing kept", c:find("\n%- 480") ~= nil and c:find("\n%- 620") ~= nil)
-check("C7 SafeMode kept", c:find("SafeMode: no") ~= nil)
--- idempotent on a zero-indent existing id
-ok, msg = slsteam.register_app(480)
-check("C7 idempotent on 0-indent id", msg == "already_present")
-
--- Case 8: unregister from a ZERO-indent list.
-w("AdditionalApps:\n- 480\n- 620\nSafeMode: no\n")
-ok, msg = slsteam.unregister_app(480)
-c = r()
-check("C8 removed 480", msg == "removed" and c:find("\n%- 480") == nil)
-check("C8 kept 620", c:find("\n%- 620") ~= nil)
+local ok, msg, c
 
 -- ---------------------------------------------------------------------------
 -- FakeAppIds map editor: set_fake_appid / unset_fake_appid.
--- FakeAppIds is a MAP block ("FakeAppIds:" then "  <appid>: <fake>" lines),
--- unlike AdditionalApps which is a LIST. Default fake = 480 (Spacewar).
+-- FakeAppIds is a MAP block ("FakeAppIds:" then "  <appid>: <fake>" lines).
 -- ---------------------------------------------------------------------------
 
 -- F1: insert into an empty FakeAppIds block (default config shape), preserving

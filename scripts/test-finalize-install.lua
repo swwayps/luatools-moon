@@ -1,18 +1,16 @@
 #!/usr/bin/env luajit
--- Tests for downloads._finalize_install_lua's register gate.
+-- Tests for downloads._finalize_install_lua's script-install gate.
 --
--- The bug this guards: a download whose archive carried NO usable <appid>.lua
--- (no depot keys) still registered the appid in SLSsteam's AdditionalApps and
--- reported "done" -> the game showed up "owned" but installed as 0 B (every
--- depot pruned for want of a key) and never appeared in the Lua-scripts list.
--- The fix: only register + mark done when the .lua actually landed on disk;
--- otherwise fail with a clear reason and register NOTHING. Both paths must log.
+-- App discovery is driven directly by config/stplug-in/<appid>.lua. A valid
+-- download must install that script and report success without maintaining a
+-- parallel AdditionalApps registry. An archive with no usable script must fail
+-- with a clear reason and leave no target behind.
 --
 -- Runs against the BUILT dist backend (that's what ships). Load with a small
 -- in-memory VFS + module shims so we can drive finalize without the network
 -- or a real Steam tree.
 --
--- Run from the repo root:  luajit scripts/test-finalize-register.lua
+-- Run from the repo root:  luajit scripts/test-finalize-install.lua
 
 local REPO = (arg and arg[0] or ""):gsub("scripts/[^/]*$", "")
 if REPO == "" then REPO = "./" end
@@ -93,7 +91,7 @@ local function logs_match(bucket, pat)
 end
 
 -- ==========================================================================
--- C1: archive HAS the game's <appid>.lua -> register + log the install.
+-- C1: archive HAS the game's <appid>.lua -> install it without registration.
 -- ==========================================================================
 reset()
 local APP1 = 2830030
@@ -103,12 +101,12 @@ FILES[lua1] = 'addappid(' .. APP1 .. ', 1, "' .. string.rep("a", 64) .. '")\n'
 LIST[ex1] = { { name = APP1 .. ".lua", path = lua1, is_directory = false } }
 downloads._finalize_install_lua(APP1, ex1, "/tmp/d1.zip", "TestSource")
 
-check("C1 registered the app", REGISTERED[1] == APP1)
+check("C1 does not register the app", #REGISTERED == 0)
 check("C1 wrote target lua", FILES["/tmp/steam/config/stplug-in/" .. APP1 .. ".lua"] ~= nil)
 check("C1 logged the install", logs_match("info", "installed"))
 
 -- ==========================================================================
--- C2: archive has NO <appid>.lua -> DO NOT register; fail; warn in the log.
+-- C2: archive has NO <appid>.lua -> fail without a target or registration.
 -- ==========================================================================
 reset()
 local APP2 = 2393730
