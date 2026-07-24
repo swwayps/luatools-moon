@@ -157,16 +157,13 @@ function downloads._finalize_install_lua(appid, extract_dir, dest_path, api_name
 
     pcall(fs.remove_all, extract_dir)
     pcall(fs.remove, dest_path)
-    -- slsteammoon: a successful add REQUIRES the game .lua (with depot keys) to
-    -- have landed in stplug-in. A package with no usable <appid>.lua would
-    -- otherwise install as 0 B (every depot pruned for want of a key) yet still
-    -- be registered as owned -- the "ghost" a user hit. Gate success on the
-    -- .lua being on disk: only then register the appid and report done;
-    -- otherwise fail with a clear, user-facing reason and register nothing.
+    -- slsteam-moon discovers apps from the script filenames in stplug-in. A
+    -- package without a usable <appid>.lua has no game data, so fail instead
+    -- of reporting a successful zero-byte install.
     if not fs.exists(target_lua) then
         logger.warn("LuaTools: finalize appid=" .. tostring(appid)
             .. " api=" .. tostring(api_name)
-            .. " -> NO .lua in downloaded package (no game data); not registering")
+            .. " -> NO .lua in downloaded package (no game data)")
         _set_download_state(appid, {
             status = "failed",
             error = "The download from " .. tostring(api_name)
@@ -176,15 +173,6 @@ function downloads._finalize_install_lua(appid, extract_dir, dest_path, api_name
     end
     logger.log("LuaTools: finalize appid=" .. tostring(appid)
         .. " api=" .. tostring(api_name) .. " -> installed " .. tostring(target_lua))
-    -- slsteammoon: register the appid in SLSsteam's AdditionalApps so
-    -- slsteam-moon establishes ownership (depot keys from the .lua are
-    -- not enough; config.yaml must list the appid). Non-fatal.
-    do
-        local ok_sls, sls = pcall(require, "slsteam")
-        if ok_sls and sls then
-            pcall(sls.register_app, appid, "added via LuaTools")
-        end
-    end
     _set_download_state(appid, { status = "done", success = true, api = api_name })
 end
 

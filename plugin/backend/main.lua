@@ -437,13 +437,11 @@ function DeleteLuaToolsForApp(appid)
             table.insert(deleted, p)
         end
     end
-    -- slsteammoon: drop the appid from SLSsteam's AdditionalApps, and
-    -- purge any manifest version pins for it (Game Updates tab).
+    -- slsteammoon: purge any manifest version pins for the removed script.
     do
         local ok_sls, sls = pcall(require, "slsteam")
-        if ok_sls and sls then
-            pcall(sls.unregister_app, appid)
-            if sls.purge_pins_for_app then pcall(sls.purge_pins_for_app, appid) end
+        if ok_sls and sls and sls.purge_pins_for_app then
+            pcall(sls.purge_pins_for_app, appid)
         end
     end
     return json_ok({ success = true, deleted = deleted, count = #deleted })
