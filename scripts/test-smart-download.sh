@@ -114,6 +114,19 @@ check "exact coverage closes collection early" '[[ "$ELAPSED" -lt 2000 ]]'
 check "covered source collected" '[[ -f "$D3/extracted_1134710/source_0000/1134711_9001.manifest" ]]'
 check "dead source excluded" '[[ ! -d "$D3/extracted_1134710/source_0001" ]]'
 
+# Exact coverage and the shared startup deadline must not truncate another
+# healthy source that is actively transferring complementary data. This models
+# large multi-DLC archives that legitimately need longer than the fast path.
+D3A="$TMP/d3a"; mkdir -p "$D3A"; C3A="$TMP/c3a.bin"; : > "$C3A"
+write_candidate "$C3A" 0 "Covered" "http://127.0.0.1:$PORT/fast.zip" 200
+write_candidate "$C3A" 1 "Large active" "http://127.0.0.1:$PORT/paced.zip" 200
+printf '1134711\t9001\n' > "$TMP/coverage-active"
+START=$(date +%s%3N)
+COLLECTION_DEADLINE=0.3 COVERAGE_GRACE=0.1 SPEED_TIME=9 "$SCRIPT" 1134710 "$D3A/state.json" "$D3A" "$C3A" "$TMP/coverage-active" >/dev/null 2>&1
+ELAPSED=$(( $(date +%s%3N) - START ))
+check "active large source survives coverage grace and startup deadline" '[[ -f "$D3A/extracted_1134710/source_0001/payload.bin" ]]'
+check "active extension waits for the healthy transfer" '[[ "$ELAPSED" -ge 500 ]]'
+
 # A filename alone is not coverage: an invalid exact-named manifest must not
 # cancel a slower source carrying a real Steam manifest.
 D3B="$TMP/d3b"; mkdir -p "$D3B"; C3B="$TMP/c3b.bin"; : > "$C3B"

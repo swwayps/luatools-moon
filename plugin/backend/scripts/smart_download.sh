@@ -144,14 +144,17 @@ capture_curl_headers() {
 }
 
 write_state downloading "" 0 0
+max_transfer_time="${MAX_TRANSFER_TIME:-600}"
 for ((i=0; i<n; i++)); do
   mkfifo "${C_PIPE[i]}"
   capture_curl_headers "${C_HEAD[i]}" "${C_TOTAL_FILE[i]}" < "${C_PIPE[i]}" &
   C_PARSE_PID[i]=$!
   # The verbose stream carries only metadata through the FIFO; the response
   # body is written directly to the ZIP and this remains the source's only GET.
+  # COLLECTION_DEADLINE bounds sources that never become productive; an active
+  # large transfer gets the separate runaway ceiling instead of being cut at 8s.
   stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' \
-    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$COLLECTION_DEADLINE" \
+    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$max_transfer_time" \
     --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
     -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
   C_PID[i]=$!
@@ -160,12 +163,21 @@ done
 start_ms="$(now_ms)"
 deadline_ms="$(awk -v s="$start_ms" -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", s+d*1000}')"
 grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
-coverage_at=""; completed=0; progress_bytes=0
+active_window_ms="$(awk -v s="${ACTIVE_PROGRESS_WINDOW:-$SPEED_TIME}" 'BEGIN{printf "%.0f", s*1000}')"
+coverage_at=""; completed=0; progress_bytes=0; extension_logged=0
+for ((i=0; i<n; i++)); do
+  C_SIZE[i]=0
+  C_LAST_PROGRESS[i]="$start_ms"
+done
 while :; do
-  running=0; bytes=0
+  running=0; bytes=0; poll_ms="$(now_ms)"
   for ((i=0; i<n; i++)); do
     size="$(stat -c %s "${C_ZIP[i]}" 2>/dev/null || echo 0)"
     bytes=$((bytes + size))
+    if [[ "$size" -gt "${C_SIZE[i]:-0}" ]]; then
+      C_SIZE[i]="$size"
+      C_LAST_PROGRESS[i]="$poll_ms"
+    fi
     [[ "${C_STATE[i]}" == pending ]] || continue
     if kill -0 "${C_PID[i]}" 2>/dev/null; then
       running=$((running + 1))
@@ -206,8 +218,32 @@ while :; do
   current_ms="$(now_ms)"
   if [[ -z "$coverage_at" ]] && coverage_complete; then coverage_at="$current_ms"; fi
   if [[ "$running" -eq 0 ]]; then break; fi
-  if [[ -n "$coverage_at" && $((current_ms - coverage_at)) -ge "$grace_ms" ]]; then break; fi
-  if [[ "$current_ms" -ge "$deadline_ms" ]]; then break; fi
+
+  close_reason=""
+  if [[ -n "$coverage_at" && $((current_ms - coverage_at)) -ge "$grace_ms" ]]; then
+    close_reason="coverage grace"
+  elif [[ "$current_ms" -ge "$deadline_ms" ]]; then
+    close_reason="startup deadline"
+  fi
+
+  if [[ -n "$close_reason" ]]; then
+    active_pending=0
+    for ((i=0; i<n; i++)); do
+      [[ "${C_STATE[i]}" == pending ]] || continue
+      if [[ "${C_SIZE[i]:-0}" -gt 0 \
+          && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
+        active_pending=$((active_pending + 1))
+      fi
+    done
+    if [[ "$active_pending" -eq 0 ]]; then
+      slog "closing after $close_reason; no productive sources remain"
+      break
+    fi
+    if [[ "$extension_logged" -eq 0 ]]; then
+      slog "extending past $close_reason for active_sources=$active_pending"
+      extension_logged=1
+    fi
+  fi
   sleep 0.05
 done
 
