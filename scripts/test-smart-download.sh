@@ -53,6 +53,15 @@ with open(sys.argv[1], "wb") as f:
 PY
 ( cd "$LARGE_DIR" && zip -qr "$TMP/large.zip" . )
 rm -rf "$LARGE_DIR"
+SLOW_DIR="$(mktemp -d "$TMP/slow.XXXX")"
+printf 'addappid(1134710)\n' > "$SLOW_DIR/1134710.lua"
+python3 - "$SLOW_DIR/payload.bin" <<'PY'
+import os, sys
+with open(sys.argv[1], "wb") as f:
+    f.write(os.urandom(1024))
+PY
+( cd "$SLOW_DIR" && zip -qr "$TMP/slow.zip" . )
+rm -rf "$SLOW_DIR"
 cat > "$TMP/server.py" <<'PY'
 import http.server, os, socketserver, sys, time
 root=sys.argv[1]
@@ -62,9 +71,15 @@ class H(http.server.BaseHTTPRequestHandler):
     name=self.path.lstrip('/')
     if name == 'dead.zip':
       self.send_response(200); self.send_header('Content-Length','999999'); self.end_headers(); time.sleep(10); return
+    if name == 'late.zip':
+      time.sleep(0.7)
     status=201 if name == 'created.zip' else 200
     paced=name == 'paced.zip'
-    source='fast.zip' if name == 'created.zip' else ('large.zip' if paced else name)
+    slow=name == 'slow.zip'
+    if name == 'created.zip' or name == 'late.zip': source='fast.zip'
+    elif paced: source='large.zip'
+    elif slow: source='slow.zip'
+    else: source=name
     path=os.path.join(root, source)
     if not os.path.isfile(path): self.send_response(404); self.end_headers(); return
     if name == 'other.zip': time.sleep(0.7)
@@ -74,6 +89,9 @@ class H(http.server.BaseHTTPRequestHandler):
     if paced:
       for pos in range(0, len(data), 4096):
         self.wfile.write(data[pos:pos+4096]); self.wfile.flush(); time.sleep(0.005)
+    elif slow:
+      for pos in range(0, len(data), 64):
+        self.wfile.write(data[pos:pos+64]); self.wfile.flush(); time.sleep(0.08)
     else:
       self.wfile.write(data)
 server=socketserver.ThreadingTCPServer(('127.0.0.1',0),H); server.daemon_threads=True
@@ -83,12 +101,44 @@ python3 "$TMP/server.py" "$TMP" > "$TMP/port" 2>/dev/null & SRV_PID=$!
 PORT=""
 for _ in $(seq 1 50); do PORT="$(head -1 "$TMP/port" 2>/dev/null)"; [[ -n "$PORT" ]] && break; sleep 0.1; done
 [[ -n "$PORT" ]] || { echo "server failed"; exit 1; }
+: > "$TMP/no-coverage"
+
+# Before any source succeeds, the shared fast-path deadline must never turn a
+# slow but healthy connection into a total failure.
+D0A="$TMP/d0a"; mkdir -p "$D0A"; C0A="$TMP/c0a.bin"; : > "$C0A"
+write_candidate "$C0A" 0 "Slow connection" "http://127.0.0.1:$PORT/slow.zip" 200
+START=$(date +%s%3N)
+COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0A/state.json" "$D0A" "$C0A" "$TMP/no-coverage" >/dev/null 2>&1
+ELAPSED=$(( $(date +%s%3N) - START ))
+check "sub-kilobyte healthy transfer is accepted" '[[ -f "$D0A/extracted_1134710/source_0000/payload.bin" ]]'
+check "slow transfer continues beyond fast-path deadline" '[[ "$ELAPSED" -ge 1000 ]]'
+
+# A source may take longer than the fast-path deadline to produce its first
+# byte (slow network, TLS, or on-demand archive generation).
+D0B="$TMP/d0b"; mkdir -p "$D0B"; C0B="$TMP/c0b.bin"; : > "$C0B"
+write_candidate "$C0B" 0 "Late first byte" "http://127.0.0.1:$PORT/late.zip" 200
+COLLECTION_DEADLINE=0.2 SPEED_TIME=2 "$SCRIPT" 1134710 "$D0B/state.json" "$D0B" "$C0B" "$TMP/no-coverage" >/dev/null 2>&1
+check "first source can start after fast-path deadline" '[[ -f "$D0B/extracted_1134710/source_0000/1134710.lua" ]]'
+
+# With no successful fallback, a truly stalled source is still bounded by its
+# own inactivity guard rather than by the shared fast-path deadline.
+D0C="$TMP/d0c"; mkdir -p "$D0C"; C0C="$TMP/c0c.bin"; : > "$C0C"
+write_candidate "$C0C" 0 "Stalled" "http://127.0.0.1:$PORT/dead.zip" 200
+START=$(date +%s%3N)
+if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0C/state.json" "$D0C" "$C0C" "$TMP/no-coverage" >/dev/null 2>&1; then
+  STALLED_RC=0
+else
+  STALLED_RC=$?
+fi
+ELAPSED=$(( $(date +%s%3N) - START ))
+check "fully stalled source still fails" '[[ "$STALLED_RC" -ne 0 && "$(state_field "$D0C/state.json" status)" == "failed" ]]'
+check "stalled source uses bounded inactivity timeout" '[[ "$ELAPSED" -ge 800 && "$ELAPSED" -lt 3000 ]]'
+
 # All healthy APIs, including a hostile custom display name, must contribute.
 D1="$TMP/d1"; mkdir -p "$D1"; C1="$TMP/c1.bin"; : > "$C1"
 CUSTOM_NAME=$'custom/name\tline\nbreak'
 write_candidate "$C1" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C1" 1 "$CUSTOM_NAME" "http://127.0.0.1:$PORT/other.zip" 200
-: > "$TMP/no-coverage"
 COLLECTION_DEADLINE=3 COVERAGE_GRACE=0.2 "$SCRIPT" 1134710 "$D1/state.json" "$D1" "$C1" "$TMP/no-coverage" >/dev/null 2>&1
 check "all healthy sources collected" '[[ "$(state_field "$D1/state.json" status)" == "collected" ]]'
 check "first indexed source preserved" '[[ -f "$D1/extracted_1134710/source_0000/1134710.lua" ]]'
@@ -140,7 +190,8 @@ check "invalid named manifest cannot satisfy early coverage" '[[ "$ELAPSED" -ge 
 check "invalid source itself is still collected for its valid Lua" '[[ -f "$D3B/extracted_1134710/source_0000/1134710.lua" ]]'
 check "valid slower coverage source survives" '[[ -f "$D3B/extracted_1134710/source_0001/1134711_9001.manifest" ]]'
 
-# Without coverage, the global deadline is the absolute bound.
+# After one usable result, the fast-path deadline still bounds an unhealthy
+# peer even when exact coverage is unavailable.
 D4="$TMP/d4"; mkdir -p "$D4"; C4="$TMP/c4.bin"; : > "$C4"
 write_candidate "$C4" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C4" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200

@@ -6,9 +6,11 @@ umask 077
 
 : "${COLLECTION_DEADLINE:=8}"
 : "${COVERAGE_GRACE:=0.3}"
-: "${CONNECT_TIMEOUT:=5}"
-: "${SPEED_LIMIT:=1000}"
-: "${SPEED_TIME:=3}"
+: "${CONNECT_TIMEOUT:=20}"
+: "${SPEED_LIMIT:=1}"
+: "${SPEED_TIME:=120}"
+: "${ACTIVE_PROGRESS_WINDOW:=30}"
+: "${MAX_TRANSFER_TIME:=0}"
 
 mono_pct() {
   local prev="${1:-0}" raw="${2:-0}"
@@ -144,17 +146,17 @@ capture_curl_headers() {
 }
 
 write_state downloading "" 0 0
-max_transfer_time="${MAX_TRANSFER_TIME:-600}"
 for ((i=0; i<n; i++)); do
   mkfifo "${C_PIPE[i]}"
   capture_curl_headers "${C_HEAD[i]}" "${C_TOTAL_FILE[i]}" < "${C_PIPE[i]}" &
   C_PARSE_PID[i]=$!
   # The verbose stream carries only metadata through the FIFO; the response
   # body is written directly to the ZIP and this remains the source's only GET.
-  # COLLECTION_DEADLINE bounds sources that never become productive; an active
-  # large transfer gets the separate runaway ceiling instead of being cut at 8s.
+  # COLLECTION_DEADLINE is only a fast-path cutoff after another source has
+  # succeeded. Before that, curl owns the generous connection/inactivity guards
+  # so slow links and delayed archive generation cannot become false failures.
   stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' \
-    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$max_transfer_time" \
+    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TRANSFER_TIME" \
     --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
     -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
   C_PID[i]=$!
@@ -163,8 +165,8 @@ done
 start_ms="$(now_ms)"
 deadline_ms="$(awk -v s="$start_ms" -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", s+d*1000}')"
 grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
-active_window_ms="$(awk -v s="${ACTIVE_PROGRESS_WINDOW:-$SPEED_TIME}" 'BEGIN{printf "%.0f", s*1000}')"
-coverage_at=""; completed=0; progress_bytes=0; extension_logged=0
+active_window_ms="$(awk -v s="$ACTIVE_PROGRESS_WINDOW" 'BEGIN{printf "%.0f", s*1000}')"
+coverage_at=""; completed=0; progress_bytes=0; extension_logged=0; first_source_wait_logged=0
 for ((i=0; i<n; i++)); do
   C_SIZE[i]=0
   C_LAST_PROGRESS[i]="$start_ms"
@@ -227,21 +229,33 @@ while :; do
   fi
 
   if [[ -n "$close_reason" ]]; then
-    active_pending=0
-    for ((i=0; i<n; i++)); do
-      [[ "${C_STATE[i]}" == pending ]] || continue
-      if [[ "${C_SIZE[i]:-0}" -gt 0 \
-          && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
-        active_pending=$((active_pending + 1))
+    # The short deadline is an optimization, never a failure deadline. Until a
+    # complete source exists, let each request reach its own connection or
+    # inactivity result; otherwise every slow user can lose all candidates at
+    # once. Once a usable source exists, retain only peers that are still making
+    # recent progress so healthy fast-path latency stays bounded.
+    if [[ "$completed" -eq 0 ]]; then
+      if [[ "$first_source_wait_logged" -eq 0 ]]; then
+        slog "continuing past $close_reason while awaiting first usable source"
+        first_source_wait_logged=1
       fi
-    done
-    if [[ "$active_pending" -eq 0 ]]; then
-      slog "closing after $close_reason; no productive sources remain"
-      break
-    fi
-    if [[ "$extension_logged" -eq 0 ]]; then
-      slog "extending past $close_reason for active_sources=$active_pending"
-      extension_logged=1
+    else
+      active_pending=0
+      for ((i=0; i<n; i++)); do
+        [[ "${C_STATE[i]}" == pending ]] || continue
+        if [[ "${C_SIZE[i]:-0}" -gt 0 \
+            && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
+          active_pending=$((active_pending + 1))
+        fi
+      done
+      if [[ "$active_pending" -eq 0 ]]; then
+        slog "closing after $close_reason; usable result exists and no productive peers remain"
+        break
+      fi
+      if [[ "$extension_logged" -eq 0 ]]; then
+        slog "extending past $close_reason for active_sources=$active_pending"
+        extension_logged=1
+      fi
     fi
   fi
   sleep 0.05
@@ -258,7 +272,7 @@ done
 
 if [[ "$completed" -eq 0 ]]; then
   rm -rf "$EXTRACT_DIR"
-  write_state failed "" "$progress_bytes" 0 "All sources failed or exceeded the collection deadline"
+  write_state failed "" "$progress_bytes" 0 "No configured source returned a valid package; check the connection and try again"
   exit 1
 fi
 [[ "$progress_bytes" -gt 0 ]] || progress_bytes=1
