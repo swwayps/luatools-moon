@@ -6600,6 +6600,56 @@
                 .luatools-pill.yellow { background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); }
                 .luatools-pill.orange { background: rgba(255, 136, 0, 0.15); color: #ff8800; border: 1px solid rgba(255, 136, 0, 0.3); }
                 .luatools-pill.gray { background: rgba(150, 150, 150, 0.15); color: #a0a0a0; border: 1px solid rgba(150, 150, 150, 0.3); }
+                .BasicUI .luatools-gamepad-row {
+                    display: flex !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    gap: var(--spacing-1, 4px) !important;
+                }
+                .BasicUI .luatools-gamepad-cell {
+                    flex: var(--luatools-flex-grow, 1) 1 0 !important;
+                    min-width: 0 !important;
+                }
+                .BasicUI .luatools-gamepad-button {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    margin: 0 !important;
+                    overflow: hidden !important;
+                    white-space: nowrap !important;
+                }
+                .BasicUI .luatools-gamepad-button > span,
+                .BasicUI .luatools-gamepad-button > span > span {
+                    min-width: 0 !important;
+                    overflow: hidden !important;
+                    text-overflow: ellipsis !important;
+                    white-space: nowrap !important;
+                }
+                .BasicUI #luatools-gamepad-actions[data-action-count="3"] .luatools-gamepad-button {
+                    padding-inline: 4px !important;
+                    font-size: 11px !important;
+                }
+                .BasicUI .luatools-gamepad-proton-button > span > span {
+                    display: flex !important;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .BasicUI .luatools-gamepad-proton-button .ltp-medal {
+                    width: 13px;
+                    height: 13px;
+                    margin-right: 7px;
+                    border-radius: 50%;
+                    flex: 0 0 auto;
+                    background: radial-gradient(circle at 34% 30%, rgba(255,255,255,.75), transparent 58%), var(--ltp-color, #66c0f4);
+                    box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 0 7px var(--ltp-glow, transparent);
+                }
+                .BasicUI .luatools-gamepad-proton-button .ltp-mark { color: #d6d7d8; }
+                .BasicUI .luatools-gamepad-proton-button .ltp-sep { margin: 0 5px; color: #8b929a; }
+                .BasicUI .luatools-gamepad-proton-button .ltp-tier {
+                    color: var(--ltp-text, #fff);
+                    font-weight: 700;
+                    text-transform: uppercase;
+                    text-shadow: 0 0 10px var(--ltp-glow, transparent);
+                }
             `;
       document.head.appendChild(style); // This is now separate from the main style block
     }
@@ -6817,6 +6867,461 @@
     }
   }
 
+  // slsteammoon: Gamescope's 2026 store redesign replaced #queueBtnFollow
+  // with a React feature target. Resolve the new layout structurally so hashed
+  // CSS-module class names can change without hiding the controls again.
+  function findBigPictureInterestLayout(root) {
+    root = root || document.getElementById("FeatureTarget_interest-buttons");
+    if (!root) return null;
+
+    const nativeButtons = Array.from(root.querySelectorAll("button")).filter(
+      function (button) {
+        return !(
+          button.classList.contains("luatools-gamepad-button") ||
+          button.classList.contains("luatools-gamepad-proton-button")
+        );
+      },
+    );
+    if (nativeButtons.length < 3) return null;
+
+    let column = nativeButtons[0].parentElement;
+    while (
+      column &&
+      !nativeButtons.slice(0, 3).every(function (button) {
+        return column.contains(button);
+      })
+    ) {
+      column = column.parentElement;
+    }
+    if (!column) return null;
+
+    const directChildWithin = function (node) {
+      while (node && node.parentElement !== column) node = node.parentElement;
+      return node && node.parentElement === column ? node : null;
+    };
+    const wishlistRow = directChildWithin(nativeButtons[0]);
+    const followRow = directChildWithin(nativeButtons[1]);
+    if (!wishlistRow || !followRow || wishlistRow === followRow) return null;
+
+    let referenceCell = nativeButtons[1];
+    while (referenceCell && referenceCell.parentElement !== followRow) {
+      referenceCell = referenceCell.parentElement;
+    }
+    if (!referenceCell) return null;
+
+    return {
+      root: root,
+      column: column,
+      wishlistRow: wishlistRow,
+      followRow: followRow,
+      referenceCells: Array.from(followRow.children).filter(function (cell) {
+        return !!cell.querySelector("button");
+      }),
+      referenceCell: referenceCell,
+      referenceButton: nativeButtons[1],
+    };
+  }
+
+  function createBigPictureStoreButton(layout, markerClass, label) {
+    const button = layout.referenceButton.cloneNode(false);
+    button.className = button.className
+      .replace(/luatools-[\w-]+/g, "")
+      .trim();
+    button.classList.add("luatools-gamepad-button", markerClass);
+    button.type = "button";
+    button.setAttribute("role", "button");
+    button.setAttribute("tabindex", "0");
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.setAttribute("data-tooltip-text", label);
+
+    const nativeLabel = layout.referenceButton.querySelector("span");
+    const labelWrap = nativeLabel
+      ? nativeLabel.cloneNode(false)
+      : document.createElement("span");
+    const nativeState = nativeLabel && nativeLabel.firstElementChild;
+    const labelState = nativeState
+      ? nativeState.cloneNode(false)
+      : document.createElement("span");
+    labelState.textContent = label;
+    // Steam keeps inactive native button labels in the DOM with visibility
+    // hidden. A shallow clone inherits that state class, so explicitly expose
+    // the single state used by LuaTools.
+    labelState.style.setProperty("visibility", "visible", "important");
+    labelWrap.appendChild(labelState);
+    button.appendChild(labelWrap);
+    return button;
+  }
+
+  function createBigPictureStoreRow(layout, id) {
+    const row = layout.followRow.cloneNode(false);
+    row.id = id;
+    row.classList.add("luatools-gamepad-row");
+    row.style.setProperty("--width", "100%");
+    row.style.setProperty("--direction", "row");
+    row.style.setProperty("--gap", "var(--spacing-1)");
+    return row;
+  }
+
+  function appendBigPictureStoreButton(layout, row, button) {
+    const sourceCell =
+      layout.referenceCells[row.children.length] || layout.referenceCell;
+    const cell = sourceCell.cloneNode(false);
+    cell.classList.add("luatools-gamepad-cell");
+    cell.style.setProperty("--flex-grow", "1");
+    cell.appendChild(button);
+    row.appendChild(cell);
+  }
+
+  function alignBigPictureStoreRow(layout, row) {
+    const cells = Array.from(row.children);
+    const mirrorNativeSplit = cells.length === layout.referenceCells.length;
+    cells.forEach(function (cell, index) {
+      let grow = 1;
+      if (mirrorNativeSplit) {
+        const rect = layout.referenceCells[index].getBoundingClientRect();
+        if (rect && rect.width > 0) grow = rect.width;
+      }
+      cell.style.setProperty("--luatools-flex-grow", String(grow));
+    });
+  }
+
+  function addBigPictureProtonDBButton(appid, layout, protonRow) {
+    if (protonRow.querySelector(".luatools-gamepad-proton-button")) return;
+
+    const button = createBigPictureStoreButton(
+      layout,
+      "luatools-gamepad-proton-button",
+      "ProtonDB",
+    );
+    const labelWrap = button.querySelector("span");
+    const labelState = labelWrap && labelWrap.firstElementChild;
+    if (labelState) {
+      labelState.textContent = "";
+      const medal = document.createElement("span");
+      medal.className = "ltp-medal";
+      const mark = document.createElement("span");
+      mark.className = "ltp-mark";
+      mark.textContent = "ProtonDB";
+      labelState.appendChild(medal);
+      labelState.appendChild(mark);
+    }
+    button.title = "ProtonDB — Linux/Proton compatibility";
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      const url = "https://www.protondb.com/app/" + appid;
+      try {
+        Millennium.callServerMethod("luatools", "OpenExternalUrl", {
+          url: url,
+          contentScriptQuery: "",
+        });
+      } catch (_) {
+        try {
+          window.open(url, "_blank", "noopener,noreferrer");
+        } catch (_) {}
+      }
+    });
+    appendBigPictureStoreButton(layout, protonRow, button);
+
+    let locked = false;
+    const apply = function (tierKey, meta) {
+      const tierData = LTP_TIERS[tierKey] || LTP_TIERS.pending;
+      button.style.setProperty("--ltp-color", tierData.color);
+      button.style.setProperty("--ltp-glow", tierData.glow);
+      button.style.setProperty("--ltp-text", tierData.text);
+      if (labelState) {
+        const oldSep = labelState.querySelector(".ltp-sep");
+        const oldTier = labelState.querySelector(".ltp-tier");
+        if (oldSep) oldSep.remove();
+        if (oldTier) oldTier.remove();
+        const sep = document.createElement("span");
+        sep.className = "ltp-sep";
+        sep.textContent = "·";
+        const tier = document.createElement("span");
+        tier.className = "ltp-tier";
+        tier.textContent = tierData.label;
+        labelState.appendChild(sep);
+        labelState.appendChild(tier);
+      }
+
+      let tip = "ProtonDB: " + tierData.label;
+      if (meta && typeof meta.score === "number") {
+        tip += "  ·  " + Math.round(meta.score * 100) + "%";
+      }
+      if (meta && typeof meta.total === "number" && meta.total > 0) {
+        tip += "  ·  " + meta.total + " report" + (meta.total === 1 ? "" : "s");
+      }
+      if (tierKey === "native") tip = "Native Linux build  ·  ProtonDB";
+      button.title = tip;
+      button.setAttribute("aria-label", tip);
+    };
+
+    const lockNative = function () {
+      if (locked) return;
+      locked = true;
+      apply("native", null);
+    };
+    if (ltpLooksNative()) {
+      lockNative();
+    } else {
+      let tries = 0;
+      const probe = setInterval(function () {
+        if (locked) {
+          clearInterval(probe);
+          return;
+        }
+        if (ltpLooksNative()) {
+          clearInterval(probe);
+          lockNative();
+          return;
+        }
+        if (++tries > 24) clearInterval(probe);
+      }, 50);
+    }
+
+    try {
+      Millennium.callServerMethod("luatools", "GetProtonDBStatus", {
+        appid: appid,
+        contentScriptQuery: "",
+      })
+        .then(function (res) {
+          if (locked) return;
+          const payload = typeof res === "string" ? JSON.parse(res) : res;
+          if (payload && payload.success && payload.data && payload.data.tier) {
+            apply(String(payload.data.tier).toLowerCase(), payload.data);
+          } else {
+            apply("pending", null);
+          }
+        })
+        .catch(function () {
+          if (!locked) apply("pending", null);
+        });
+    } catch (_) {
+      if (!locked) apply("pending", null);
+    }
+  }
+
+  function renderBigPictureStoreButtons(appid, isAdded, layout) {
+    layout = layout || findBigPictureInterestLayout();
+    if (!layout) return false;
+    try {
+      ensureStyles();
+    } catch (_) {}
+
+    let actionRow = document.getElementById("luatools-gamepad-actions");
+    if (!actionRow || actionRow.parentElement !== layout.column) {
+      if (actionRow) actionRow.remove();
+      actionRow = createBigPictureStoreRow(
+        layout,
+        "luatools-gamepad-actions",
+      );
+      layout.wishlistRow.after(actionRow);
+    }
+    actionRow.innerHTML = "";
+
+    const restartText = lt("Restart Steam");
+    const restartButton = createBigPictureStoreButton(
+      layout,
+      "luatools-restart-button",
+      restartText,
+    );
+    restartButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      askRestartConfirmation();
+    });
+    appendBigPictureStoreButton(layout, actionRow, restartButton);
+
+    if (isAdded) {
+      const removeText = t("menu.removeLuaTools", "Remove via LuaTools");
+      const fixesText = t("menu.fixesMenu", "Fixes Menu");
+      const removeButton = createBigPictureStoreButton(
+        layout,
+        "luatools-remove-button",
+        removeText,
+      );
+      const fixesButton = createBigPictureStoreButton(
+        layout,
+        "luatools-fixes-button",
+        fixesText,
+      );
+
+      removeButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        showLuaToolsConfirm(
+          "LuaTools",
+          t("menu.remove.confirm", "Remove via LuaTools for this game?"),
+          function () {
+            Millennium.callServerMethod("luatools", "DeleteLuaToolsForApp", {
+              appid: appid,
+              contentScriptQuery: "",
+            })
+              .then(function () {
+                const currentLayout = findBigPictureInterestLayout();
+                if (currentLayout) {
+                  renderBigPictureStoreButtons(appid, false, currentLayout);
+                }
+                window.__LuaToolsManageInserted = false;
+                window.__LuaToolsButtonInserted = true;
+                ShowLuaToolsAlert(
+                  "LuaTools",
+                  t("menu.remove.success", "LuaTools removed for this app."),
+                );
+              })
+              .catch(function (err) {
+                ShowLuaToolsAlert(
+                  "LuaTools",
+                  (err && err.message) ||
+                    t("menu.remove.failure", "Failed to remove LuaTools."),
+                );
+              });
+          },
+          function () {},
+        );
+      });
+
+      fixesButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        Millennium.callServerMethod("luatools", "GetGameInstallPath", {
+          appid: appid,
+          contentScriptQuery: "",
+        })
+          .then(function (pathRes) {
+            const pathPayload =
+              typeof pathRes === "string" ? JSON.parse(pathRes) : pathRes;
+            const installed = !!(
+              pathPayload &&
+              pathPayload.success &&
+              pathPayload.installPath
+            );
+            window.__LuaToolsGameIsInstalled = installed;
+            if (installed) {
+              window.__LuaToolsGameInstallPath = pathPayload.installPath;
+            }
+            showFixesLoadingPopupAndCheck(appid);
+          })
+          .catch(function () {
+            ShowLuaToolsAlert(
+              "LuaTools",
+              t("menu.error.getPath", "Error getting game path"),
+            );
+          });
+      });
+
+      appendBigPictureStoreButton(layout, actionRow, removeButton);
+      appendBigPictureStoreButton(layout, actionRow, fixesButton);
+      window.__LuaToolsManageInserted = true;
+      window.__LuaToolsButtonInserted = false;
+    } else {
+      const addText = lt("Add via LuaTools");
+      const addButton = createBigPictureStoreButton(
+        layout,
+        "luatools-button",
+        addText,
+      );
+      appendBigPictureStoreButton(layout, actionRow, addButton);
+      window.__LuaToolsManageInserted = false;
+      window.__LuaToolsButtonInserted = true;
+    }
+
+    actionRow.setAttribute(
+      "data-action-count",
+      String(actionRow.querySelectorAll("button").length),
+    );
+    alignBigPictureStoreRow(layout, actionRow);
+    actionRow.setAttribute("data-appid", String(appid));
+    actionRow.setAttribute("data-added", isAdded ? "1" : "0");
+
+    let protonRow = document.getElementById("luatools-gamepad-protondb");
+    if (!protonRow || protonRow.parentElement !== layout.column) {
+      if (protonRow) protonRow.remove();
+      protonRow = createBigPictureStoreRow(
+        layout,
+        "luatools-gamepad-protondb",
+      );
+      layout.followRow.after(protonRow);
+    }
+    addBigPictureProtonDBButton(appid, layout, protonRow);
+    alignBigPictureStoreRow(layout, protonRow);
+    window.__LuaToolsRestartInserted = true;
+    return true;
+  }
+
+  function mountBigPictureStoreButtons() {
+    const layout = findBigPictureInterestLayout();
+    if (!layout) return false;
+    const match =
+      window.location.href.match(/https:\/\/store\.steampowered\.com\/app\/(\d+)/) ||
+      window.location.href.match(/https:\/\/steamcommunity\.com\/app\/(\d+)/);
+    const appid = match ? parseInt(match[1], 10) : NaN;
+    if (isNaN(appid)) return false;
+
+    document
+      .querySelectorAll(
+        ".luatools-restart-button, .luatools-button, .luatools-remove-button, .luatools-fixes-button, .luatools-proton-btn",
+      )
+      .forEach(function (button) {
+        if (
+          !button.closest("#luatools-gamepad-actions") &&
+          !button.closest("#luatools-gamepad-protondb")
+        ) {
+          button.remove();
+        }
+      });
+
+    const existingActions = document.getElementById(
+      "luatools-gamepad-actions",
+    );
+    const existingProton = document.getElementById(
+      "luatools-gamepad-protondb",
+    );
+    if (
+      existingActions &&
+      existingProton &&
+      existingActions.getAttribute("data-appid") === String(appid)
+    ) {
+      return true;
+    }
+    if (
+      window.__LuaToolsPresenceCheckInFlight &&
+      window.__LuaToolsPresenceCheckAppId === appid
+    ) {
+      return true;
+    }
+
+    window.__LuaToolsPresenceCheckInFlight = true;
+    window.__LuaToolsPresenceCheckAppId = appid;
+    window.__LuaToolsCurrentAppId = appid;
+    try {
+      Millennium.callServerMethod("luatools", "HasLuaToolsForApp", {
+        appid: appid,
+        contentScriptQuery: "",
+      })
+        .then(function (res) {
+          const payload = typeof res === "string" ? JSON.parse(res) : res;
+          const currentLayout = findBigPictureInterestLayout();
+          if (currentLayout) {
+            renderBigPictureStoreButtons(
+              appid,
+              !!(payload && payload.success && payload.exists === true),
+              currentLayout,
+            );
+          }
+          window.__LuaToolsPresenceCheckInFlight = false;
+        })
+        .catch(function () {
+          const currentLayout = findBigPictureInterestLayout();
+          if (currentLayout) {
+            renderBigPictureStoreButtons(appid, false, currentLayout);
+          }
+          window.__LuaToolsPresenceCheckInFlight = false;
+        });
+    } catch (_) {
+      renderBigPictureStoreButtons(appid, false, layout);
+      window.__LuaToolsPresenceCheckInFlight = false;
+    }
+    return true;
+  }
+
   // ===========================================================================
   // slsteammoon: "manage" header buttons for an already-added game
   // ---------------------------------------------------------------------------
@@ -6846,14 +7351,11 @@
     } catch (_) {}
 
     // Reference an existing button so the new ones inherit the native store
-    // look-and-feel. Prefer the Restart Steam button (same row, same styling);
-    // fall back to the first link in the container / the BP queue button.
-    const isBigPicture = window.__LUATOOLS_IS_BIG_PICTURE__;
+    // look-and-feel. Prefer the Restart Steam button (same row, same styling),
+    // then fall back to the first link in the desktop container.
     const referenceBtn =
       container.querySelector(".luatools-restart-button") ||
-      (isBigPicture
-        ? document.querySelector("#queueBtnFollow")
-        : container.querySelector("a"));
+      container.querySelector("a");
 
     const makeBtn = function (cls, label) {
       const a = document.createElement("a");
@@ -7080,19 +7582,22 @@
     // Check if we're in Big Picture mode
     const isBigPicture = window.__LUATOOLS_IS_BIG_PICTURE__;
 
-    // Look for the appropriate container based on mode
-    let targetContainer;
+    // The redesigned Gamescope/Big Picture store owns a dedicated React
+    // interest block. Keep this path isolated so none of the retired legacy
+    // queue-row controls are created alongside the new native rows.
     if (isBigPicture) {
-      // In Big Picture mode, use the queue button's parent as reference
-      const queueBtn = document.querySelector("#queueBtnFollow");
-      targetContainer = queueBtn ? queueBtn.parentElement : null;
-    } else {
-      // In normal mode, use the SteamDB buttons container
-      targetContainer =
-        document.querySelector(".steamdb-buttons") ||
-        document.querySelector("[data-steamdb-buttons]") ||
-        document.querySelector(".apphub_OtherSiteInfo");
+      if (!mountBigPictureStoreButtons() && !logState.missingOnce) {
+        backendLog("LuaTools: gamepad interest controls not ready");
+        logState.missingOnce = true;
+      }
+      return;
     }
+
+    // Desktop store controls retain their existing SteamDB row placement.
+    const targetContainer =
+      document.querySelector(".steamdb-buttons") ||
+      document.querySelector("[data-steamdb-buttons]") ||
+      document.querySelector(".apphub_OtherSiteInfo");
 
     if (targetContainer) {
       const steamdbContainer = targetContainer;
@@ -7104,10 +7609,7 @@
           !window.__LuaToolsRestartInserted
         ) {
           ensureStyles();
-          // In Big Picture mode, use queue button as reference; otherwise use first link in container
-          const referenceBtn = isBigPicture
-            ? document.querySelector("#queueBtnFollow")
-            : steamdbContainer.querySelector("a");
+          const referenceBtn = steamdbContainer.querySelector("a");
 
           // Use same custom button for both modes
           const restartBtn = document.createElement("a");
@@ -7168,10 +7670,7 @@
       // Check if button already exists to avoid duplicates
       if (!existingBtn && !window.__LuaToolsButtonInserted) {
         // Create the LuaTools button modeled after existing SteamDB/PCGW buttons
-        // In Big Picture mode, use queue button as reference; otherwise use first link in container
-        let referenceBtn = isBigPicture
-          ? document.querySelector("#queueBtnFollow")
-          : steamdbContainer.querySelector("a");
+        let referenceBtn = steamdbContainer.querySelector("a");
 
         // Use same custom button for both modes
         const luatoolsButton = document.createElement("a");
@@ -8684,7 +9183,7 @@
                   node.classList &&
                   (node.classList.contains("steamdb-buttons") ||
                     node.classList.contains("apphub_OtherSiteInfo") ||
-                    node.id === "queueBtnFollow")
+                    node.id === "FeatureTarget_interest-buttons")
                 ) {
                   shouldUpdate = true;
                   break;
@@ -8693,6 +9192,15 @@
             }
           }
           if (shouldUpdate) break;
+        }
+
+        if (
+          window.__LUATOOLS_IS_BIG_PICTURE__ &&
+          document.getElementById("FeatureTarget_interest-buttons") &&
+          (!document.getElementById("luatools-gamepad-actions") ||
+            !document.getElementById("luatools-gamepad-protondb"))
+        ) {
+          shouldUpdate = true;
         }
 
         if (shouldUpdate) {
