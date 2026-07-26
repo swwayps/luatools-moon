@@ -266,6 +266,8 @@ get_distro_family() {
 			echo "arch"
 		elif [[ "${ID:-}" =~ opensuse ]] || [[ "${ID_LIKE:-}" =~ opensuse ]]; then
 			echo "opensuse"
+		elif [ "${ID:-}" = "nixos" ] || [[ "${ID_LIKE:-}" =~ nixos ]]; then
+			echo "nixos"
 		else
 			echo "unknown"
 		fi
@@ -423,7 +425,7 @@ sudo_hint() {
 # hint (to the tty) the first time it hands back a real "sudo", so every sudo
 # site gets the instruction without duplicating it.
 sudo_prefix() {
-	if is_immutable_distro; then
+	if is_immutable_distro || [ "$(get_distro_id)" = "nixos" ]; then
 		echo ""
 	elif [ "$(id -u)" -eq 0 ]; then
 		echo ""
@@ -441,6 +443,7 @@ sudo_prefix() {
 # (the caller handles that fallback), or when the credential is already cached.
 ensure_sudo() {
 	is_immutable_distro && return 0
+	[ "$(get_distro_id)" = "nixos" ] && return 0
 	[ "$(id -u)" -ne 0 ] || return 0
 	command -v sudo >/dev/null 2>&1 || return 0
 	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
@@ -484,6 +487,12 @@ detect_steam_type() {
 			return
 		fi
 	done
+	# NixOS wraps Steam through the Nix store, so the binary is on PATH but
+	# never in the FHS paths above. Detect it by distro ID + PATH lookup.
+	if [ "$(get_distro_id)" = "nixos" ] && command -v steam >/dev/null 2>&1; then
+		echo "native"
+		return
+	fi
 	if command -v flatpak >/dev/null 2>&1 && flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
 		echo "flatpak"
 		return
@@ -506,6 +515,8 @@ suggest_native_steam_install() {
 		fedora)   echo "sudo dnf install steam" ;;
 		arch)     echo "sudo pacman -S steam" ;;
 		opensuse) echo "sudo zypper install steam" ;;
+		nixos)    echo "$(L "add steam to environment.systemPackages in configuration.nix" \
+		                    "adicione steam em environment.systemPackages no configuration.nix")" ;;
 		*)        echo "$(L "see your distro's documentation to install native Steam" \
 		                    "consulte a documentação da sua distro para instalar a Steam nativa")" ;;
 	esac
@@ -682,6 +693,17 @@ immutable_install_hint() {
 	esac
 }
 
+# NixOS is declarative: packages must be declared in configuration.nix,
+# not installed imperatively. Show the correct snippet.
+nixos_install_hint() {
+	local pkgs="$*"
+	echo "$(L "Add to environment.systemPackages in /etc/nixos/configuration.nix:" \
+	             "Adicione em environment.systemPackages no /etc/nixos/configuration.nix:")"
+	echo "  environment.systemPackages = with pkgs; [ ${pkgs} ];"
+	echo "$(L "Then run: sudo nixos-rebuild switch" \
+	             "Depois rode: sudo nixos-rebuild switch")"
+}
+
 # Ensure the generic CLI tools this installer + the stack need are present.
 install_dependencies() {
 	local family; family="$(get_distro_family)"
@@ -735,6 +757,16 @@ install_dependencies() {
 	# Mutable distro: install via the package manager as before.
 	log_warn "$(L "Installing missing tools: ${missing_pkgs[*]}" \
 	             "Instalando ferramentas ausentes: ${missing_pkgs[*]}")"
+	if [ "$family" = "nixos" ]; then
+		echo ""
+		log_error "$(L "Missing required tools on NixOS: ${missing_pkgs[*]}" \
+		              "Ferramentas necessárias ausentes no NixOS: ${missing_pkgs[*]}")"
+		echo ""
+		nixos_install_hint "${missing_pkgs[*]}"
+		echo ""
+		fail "$(L "Aborted. Install the tools above, then re-run this installer." \
+		          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
+	fi
 	if [ "$family" = "unknown" ]; then
 		fail "$(L "Unknown distro — please install manually: ${missing_pkgs[*]}" \
 		          "Distro desconhecida — instale manualmente: ${missing_pkgs[*]}")"
@@ -1351,7 +1383,8 @@ install_lumen() {
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
 	chmod +x "$dest/lumen" 2>/dev/null || true
-	if ! file "$dest/lumen" 2>/dev/null | grep -q "ELF 64-bit"; then
+	# Check ELF magic (7f454c46) — works everywhere, no `file(1)` needed.
+	if [ "$(head -c 4 "$dest/lumen" 2>/dev/null | od -An -tx1 | tr -d ' ')" != "7f454c46" ]; then
 		fail "$(L "Lumen binary is not a valid ELF executable" \
 		         "O binário do Lumen não é um ELF válido")"
 	fi
@@ -2170,6 +2203,17 @@ main() {
 	# Record the installed release tags for the Lumen About tab (installed-vs-
 	# latest). Best-effort; never fails the install.
 	write_versions_stamp
+
+	# NixOS: the Lumen binary needs a bubblewrap FHS sandbox to run. Patch the
+	# slsteam-moon wrapper to launch via steam-run after all components exist.
+	if [ "$(get_distro_id)" = "nixos" ] && command -v steam-run >/dev/null 2>&1; then
+		local _w="$HOME/.local/share/SLSsteam/path/steam"
+		if [ -f "$_w" ] && grep -q 'setsid "\$LUMEN_DIR/lumen"' "$_w" 2>/dev/null; then
+			sed -i 's|setsid "$LUMEN_DIR/lumen"|setsid steam-run "$LUMEN_DIR/lumen"|g' "$_w"
+			log_success "$(L "Patched Steam wrapper to use steam-run for Lumen (NixOS)" \
+			             "Wrapper da Steam ajustado para usar steam-run com o Lumen (NixOS)")"
+		fi
+	fi
 
 	# Game Mode is opt-in and gamescope-only. It prints its own section header
 	# (and prompts) ONLY when a gamescope session exists, so normal desktop
