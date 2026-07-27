@@ -105,6 +105,65 @@ do
 end
 check("L7 garbage index -> 404", cf.lookup("nope", 1).status == 404)
 
+-- The live Ryuu catalogue moved from the old generated {fixes={...}} map to
+-- /files/fixes.json, an array keyed by appid. Keep the exact current shape so
+-- GTA titles do not disappear merely because their filenames use abbreviations.
+local CURRENT_INDEX = {
+  {
+    appid = "1547000",
+    name = "Grand Theft Auto: San Andreas – The Definitive Edition",
+    fixes = {
+      {
+        href = "https://generator.ryuu.lol/fixes/GTA SA DE.zip",
+        filename = "GTA SA DE.zip",
+        size = "17.6 MB",
+        badges = { "Tested" },
+      },
+    },
+  },
+  {
+    appid = "1546990",
+    name = "Grand Theft Auto: Vice City – The Definitive Edition",
+    fixes = {
+      {
+        href = "https://generator.ryuu.lol/fixes/GTA VICE DE.zip",
+        filename = "GTA VICE DE.zip",
+        size = "17.6 MB",
+        badges = { "Tested" },
+      },
+    },
+  },
+}
+do
+  local r = cf.lookup(CURRENT_INDEX, 1547000)
+  check("L8 current catalogue finds GTA San Andreas DE", r.status == 200 and r.available == true)
+  check("L9 current catalogue URL is encoded, never the raw href",
+    r.url == "https://generator.ryuu.lol/fixes/GTA%20SA%20DE.zip")
+  check("L9b no literal space survives into the URL", r.url:find(" ") == nil)
+  check("L10 current catalogue reads array badges", r.badge == "tested")
+end
+do
+  local r = cf.lookup(CURRENT_INDEX, 1546990)
+  check("L11 current catalogue finds GTA Vice City DE", r.status == 200)
+end
+-- An entry that carries only an href (no filename) must still be made safe.
+do
+  local HREF_ONLY = {{ appid = "42", name = "Href Only", fixes = {{
+    href = "https://generator.ryuu.lol/fixes/Some Fix (v2).zip", badges = {"Tested"} }}}}
+  local r = cf.lookup(HREF_ONLY, 42)
+  check("L12 href-only entry is still resolved", r.status == 200)
+  check("L13 href-only URL has no literal space", r.url and r.url:find(" ") == nil)
+  check("L14 href-only URL keeps its path", r.url:find("Some%%20Fix", 1, false) ~= nil)
+end
+-- Already-encoded hrefs must not be encoded twice.
+do
+  local ENCODED = {{ appid = "43", name = "Encoded", fixes = {{
+    href = "https://generator.ryuu.lol/fixes/Ok%20Fix.zip", badges = {"Tested"} }}}}
+  local r = cf.lookup(ENCODED, 43)
+  check("L15 an encoded href is left alone",
+    r.url == "https://generator.ryuu.lol/fixes/Ok%20Fix.zip")
+end
+
 -- ---------------------------------------------------------------------------
 -- check() dispatch with injected deps (no filesystem, no network)
 -- ---------------------------------------------------------------------------
