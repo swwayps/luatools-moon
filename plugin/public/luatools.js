@@ -1795,6 +1795,12 @@
       const link = document.createElement("link");
       link.id = "luatools-fontawesome";
       link.rel = "stylesheet";
+      // Loaded out of the render path: the CDN was measured at ~9.5s on a Game
+      // Mode box, and as a normal stylesheet it delayed every popup's first
+      // paint by that long. Switched to "all" on load (icons appear a beat late
+      // instead of freezing the dialog).
+      link.media = "print";
+      link.addEventListener("load", function () { link.media = "all"; });
       link.href =
         "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css";
       link.integrity =
@@ -2858,9 +2864,394 @@
     }
   }
 
+  function openRyuuAuthPage(url) {
+    try {
+      Millennium.callServerMethod("luatools", "OpenExternalUrl", {
+        url: url,
+        contentScriptQuery: "",
+      });
+    } catch (_) {
+      try { window.open(url, "_blank", "noopener,noreferrer"); } catch (_) {}
+    }
+  }
+
+  function showRyuuAuthHelpPopup() {
+    if (document.querySelector(".luatools-ryuu-help-overlay")) return;
+    ensureLuaToolsStyles();
+    const colors = getThemeColors();
+    const overlay = document.createElement("div");
+    overlay.className = "luatools-ryuu-help-overlay";
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:100002;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72);padding:20px;box-sizing:border-box;";
+    const modal = document.createElement("div");
+    modal.style.cssText = `width:500px;max-width:100%;box-sizing:border-box;background:${colors.modalBg};color:${colors.text};border:1px solid ${colors.border};border-radius:12px;padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.65);`;
+    const title = document.createElement("div");
+    title.style.cssText = "font-size:19px;font-weight:700;margin-bottom:8px;";
+    title.textContent = lt("How to get your Ryuu session cookie");
+    const intro = document.createElement("div");
+    intro.style.cssText = `font-size:13px;line-height:1.5;color:${colors.textSecondary};margin-bottom:14px;`;
+    intro.textContent = lt("Ryuu sessions currently last about seven days. Repeat these steps when the session expires.");
+    const steps = document.createElement("ol");
+    steps.style.cssText = `margin:0 0 16px;padding-left:21px;font-size:13px;line-height:1.55;color:${colors.textSecondary};`;
+    const stepCopies = [
+      lt("Open the Ryuu Fixes page and sign in with Discord."),
+      lt("Right-click the page, choose Inspect, then open Network."),
+      lt("Select Fetch/XHR. If the list is empty, reload the page."),
+      lt("Open a generator.ryuu.lol request, such as api/votes/bulk?type=fix, and select Headers."),
+      lt("Under Request Headers, copy the complete Cookie value or line. LuaTools extracts only session= automatically."),
+    ];
+    stepCopies.forEach(function (copy, index) {
+      const li = document.createElement("li");
+      li.style.marginBottom = "7px";
+      if (index === 0) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.textContent = copy;
+        link.style.cssText = `background:none;border:0;padding:0;color:${colors.accent};font:inherit;text-align:left;text-decoration:underline;cursor:pointer;`;
+        link.addEventListener("click", function () {
+          openRyuuAuthPage("https://generator.ryuu.lol/fixes");
+        });
+        li.appendChild(link);
+      } else {
+        li.textContent = copy;
+      }
+      steps.appendChild(li);
+    });
+    const warning = document.createElement("div");
+    warning.style.cssText =
+      "font-size:12px;line-height:1.45;color:#e0b341;background:rgba(224,179,65,.08);border:1px solid rgba(224,179,65,.3);border-radius:7px;padding:10px 12px;margin-bottom:18px;";
+    warning.textContent = lt("The session cookie works like a password. Do not share it. Logging out of Ryuu invalidates it.");
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:flex-end;";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = lt("Close");
+    close.style.cssText = `border:1px solid ${colors.accent};border-radius:6px;padding:8px 18px;background:${colors.accent};color:#fff;font-weight:600;cursor:pointer;`;
+    const dismiss = function () { if (overlay.parentNode) overlay.remove(); };
+    close.addEventListener("click", dismiss);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) dismiss(); });
+    row.appendChild(close);
+    modal.appendChild(title); modal.appendChild(intro); modal.appendChild(steps);
+    modal.appendChild(warning); modal.appendChild(row); overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  }
+
+  function showRyuuAuthPopup(onSaved) {
+    const old = document.querySelector(".luatools-ryuu-auth-overlay");
+    if (old) old.remove();
+    ensureLuaToolsStyles();
+    const colors = getThemeColors();
+    const overlay = document.createElement("div");
+    overlay.className = "luatools-ryuu-auth-overlay";
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.76);padding:20px;box-sizing:border-box;";
+    const modal = document.createElement("div");
+    modal.style.cssText = `width:500px;max-width:100%;box-sizing:border-box;background:${colors.modalBg};color:${colors.text};border:1px solid ${colors.border};border-radius:12px;padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.65);`;
+    const title = document.createElement("div");
+    title.style.cssText = "display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700;margin-bottom:9px;";
+    title.innerHTML = '<svg viewBox="0 0 512 512" width="19" height="19" fill="#e0b341" aria-hidden="true"><path d="M336 0a176 176 0 00-168 228L7 389a24 24 0 00-7 17v82a24 24 0 0024 24h82a24 24 0 0017-7l23-23a24 24 0 007-17v-29h29a24 24 0 0024-24v-29h29a24 24 0 0017-7l32-32A176 176 0 10336 0zm48 176a48 48 0 110-96 48 48 0 010 96z"/></svg><span></span>';
+    title.querySelector("span").textContent = lt("Ryuu authentication required");
+    const intro = document.createElement("div");
+    intro.style.cssText = `font-size:13px;line-height:1.5;color:${colors.textSecondary};margin-bottom:15px;`;
+    intro.textContent = lt("Paste your Ryuu session cookie or official auth key. LuaTools will save it privately and continue this download.");
+    const label = document.createElement("label");
+    label.style.cssText = "display:block;font-size:12px;font-weight:700;margin-bottom:6px;";
+    label.textContent = lt("Session cookie or auth key");
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.placeholder = lt("Paste the complete Cookie line, session=… or auth key");
+    input.style.cssText = `display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:10px 11px;background:${colors.bgTertiary};color:${colors.text};border:1px solid ${colors.border};border-radius:7px;font:13px monospace;`;
+    label.appendChild(input);
+    const help = document.createElement("button");
+    help.type = "button";
+    help.textContent = lt("How do I get it?");
+    help.style.cssText = `margin-top:9px;padding:0;background:none;border:0;color:${colors.accent};font:12px inherit;text-decoration:underline;cursor:pointer;`;
+    help.addEventListener("click", showRyuuAuthHelpPopup);
+    const safety = document.createElement("div");
+    safety.style.cssText = `font-size:11.5px;line-height:1.45;color:${colors.textSecondary};margin:12px 0;`;
+    safety.textContent = lt("You can paste the entire Cookie line. LuaTools keeps only session= and discards every other cookie.");
+    const error = document.createElement("div");
+    error.setAttribute("aria-live", "polite");
+    error.style.cssText = "display:none;color:#ec8b8b;font-size:12px;line-height:1.4;margin:10px 0;";
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:16px;";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = lt("Cancel");
+    cancel.style.cssText = `border:1px solid ${colors.border};border-radius:6px;padding:8px 16px;background:transparent;color:${colors.textSecondary};font-weight:600;cursor:pointer;`;
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = lt("Save and continue");
+    save.style.cssText = `border:1px solid ${colors.accent};border-radius:6px;padding:8px 16px;background:${colors.accent};color:#fff;font-weight:600;cursor:pointer;`;
+    const onEsc = function (e) {
+      if (e.key === "Escape") { e.stopPropagation(); dismiss(); }
+    };
+    const dismiss = function () {
+      signInPolling = false;
+      try { document.removeEventListener("keydown", onEsc, true); } catch (_) {}
+      if (overlay.parentNode) overlay.remove();
+    };
+    document.addEventListener("keydown", onEsc, true);
+    cancel.addEventListener("click", dismiss);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) dismiss(); });
+    const submit = function () {
+      if (save.disabled) return;
+      if (!input.value.trim()) {
+        error.textContent = lt("Paste a Cookie line, session cookie or auth key.");
+        error.style.display = "block";
+        input.focus();
+        return;
+      }
+      save.disabled = true;
+      save.textContent = lt("Saving…");
+      error.style.display = "none";
+      Millennium.callServerMethod("luatools", "SaveRyuuAuthCredential", {
+        contentScriptQuery: "",
+        credential: input.value,
+      }).then(function (res) {
+        const payload = typeof res === "string" ? JSON.parse(res) : res;
+        if (payload && payload.success && payload.configured) {
+          input.value = "";
+          dismiss();
+          if (typeof onSaved === "function") onSaved(payload);
+          return;
+        }
+        error.textContent = payload && payload.error
+          ? String(payload.error)
+          : lt("Could not save Ryuu authentication.");
+        error.style.display = "block";
+        save.disabled = false;
+        save.textContent = lt("Save and continue");
+      }).catch(function () {
+        error.textContent = lt("Could not save Ryuu authentication.");
+        error.style.display = "block";
+        save.disabled = false;
+        save.textContent = lt("Save and continue");
+      });
+    };
+    save.addEventListener("click", submit);
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+    });
+    row.appendChild(cancel); row.appendChild(save);
+
+    // The manual paste is the advanced path: it stays behind a link so the
+    // default is the guided Discord sign-in below.
+    const manualBox = document.createElement("div");
+    manualBox.style.display = "none";
+    manualBox.appendChild(label); manualBox.appendChild(help);
+    manualBox.appendChild(safety); manualBox.appendChild(error);
+    manualBox.appendChild(row);
+
+    // ── Discord-first section ────────────────────────────────────────────────
+    // Steam opens its own window on the Ryuu page; Lumen reads the resulting
+    // session out of the (global) CEF cookie jar and verifies it. The same three
+    // RPCs back the Lumen Fixes Menu, so there is one implementation.
+    const signInBox = document.createElement("div");
+    const signInCopy = document.createElement("div");
+    signInCopy.style.cssText = `font-size:13px;line-height:1.55;color:${colors.textSecondary};`;
+    const signInNote = document.createElement("div");
+    signInNote.style.cssText = `font-size:11.5px;line-height:1.5;color:${colors.textSecondary};margin-top:16px;`;
+    signInNote.textContent = lt("Your Discord password never passes through LuaTools. Only the site session is stored, and it lasts about 7 days.");
+    const signInRow = document.createElement("div");
+    signInRow.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:18px;";
+    const altRow = document.createElement("div");
+    altRow.style.cssText = `margin-top:16px;padding-top:13px;border-top:1px solid ${colors.border};`;
+    const altLink = document.createElement("button");
+    altLink.type = "button";
+    altLink.textContent = lt("Paste a session cookie instead");
+    altLink.style.cssText = `background:none;border:0;padding:0;color:${colors.textSecondary};font:12px inherit;text-decoration:underline;cursor:pointer;`;
+    altLink.addEventListener("click", function () {
+      signInPolling = false;
+      signInBox.style.display = "none";
+      altRow.style.display = "none";
+      manualBox.style.display = "";
+      title.querySelector("span").textContent = lt("Ryuu authentication required");
+      intro.textContent = lt("Paste your Ryuu session cookie or official auth key. LuaTools will save it privately and continue this download.");
+      setTimeout(function () { try { input.focus(); } catch (_) {} }, 0);
+    });
+    altRow.appendChild(altLink);
+    signInBox.appendChild(signInCopy); signInBox.appendChild(signInNote);
+    signInBox.appendChild(signInRow);
+
+    let signInPolling = false;
+    const RYUU_SIGNIN_LIMIT = 180000;
+    const RYUU_SIGNIN_TICK = 2500;
+    const lumenCall = function (fn) {
+      return Millennium.callServerMethod("lumen", fn, {}).then(function (res) {
+        return typeof res === "string" ? JSON.parse(res) : res;
+      });
+    };
+    const signInButton = function (text, primary, onClick) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = text;
+      b.style.cssText = primary
+        ? "border:1px solid #5865f2;border-radius:6px;padding:9px 18px;background:#5865f2;color:#fff;font-weight:600;cursor:pointer;"
+        : `border:1px solid ${colors.border};border-radius:6px;padding:9px 16px;background:transparent;color:${colors.textSecondary};font-weight:600;cursor:pointer;`;
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    const renderSignIn = function (state, message) {
+      signInRow.innerHTML = "";
+      signInNote.style.display = state === "intro" ? "" : "none";
+      if (state === "intro") {
+        title.querySelector("span").textContent = lt("This source requires a Discord login");
+        intro.textContent = "";
+        signInCopy.textContent = lt("Ryuu Fixes only serves downloads to signed-in accounts, and it signs in through Discord. Steam will open a window on the Ryuu page — authorize with Discord there and this panel continues on its own.");
+        signInRow.appendChild(signInButton(lt("Sign in with Discord"), true, startSignIn));
+        signInRow.appendChild(signInButton(lt("Cancel"), false, dismiss));
+        return;
+      }
+      if (state === "opening" || state === "waiting") {
+        title.querySelector("span").textContent = state === "opening"
+          ? lt("Opening the sign-in window…") : lt("Waiting for the Discord login…");
+        signInCopy.textContent = state === "opening"
+          ? lt("Steam is bringing up the Ryuu page.")
+          : lt("Finish it in the window Steam opened. You can cancel here.");
+        if (state === "waiting") {
+          signInRow.appendChild(signInButton(lt("Cancel"), false, function () {
+            signInPolling = false;
+            lumenCall("__lumenRyuuLoginClose").catch(function () {});
+            dismiss();
+          }));
+        }
+        return;
+      }
+      if (state === "done") {
+        title.querySelector("span").textContent = lt("Signed in");
+        signInCopy.textContent = lt("Resuming the download…");
+        return;
+      }
+      title.querySelector("span").textContent = lt("The sign-in was not completed");
+      signInCopy.textContent = message
+        || lt("Nothing was saved. You can try again or paste a session cookie.");
+      signInRow.appendChild(signInButton(lt("Try again"), true, startSignIn));
+      signInRow.appendChild(signInButton(lt("Cancel"), false, dismiss));
+    };
+    const pollSignIn = function (startedAt) {
+      if (!signInPolling) return;
+      lumenCall("__lumenRyuuLoginPoll").catch(function () { return null; })
+        .then(function (p) {
+          if (!signInPolling) return;
+          const state = (p && p.ok) ? p.state : null;
+          if (state === "configured") {
+            signInPolling = false;
+            lumenCall("__lumenRyuuLoginClose").catch(function () {});
+            renderSignIn("done");
+            setTimeout(function () {
+              dismiss();
+              if (typeof onSaved === "function") onSaved({ configured: true });
+            }, 900);
+            return;
+          }
+          if (state === "error") {
+            signInPolling = false;
+            renderSignIn("failed", p && p.error);
+            return;
+          }
+          if (Date.now() - startedAt >= RYUU_SIGNIN_LIMIT) {
+            signInPolling = false;
+            renderSignIn("failed",
+              lt("The sign-in took too long, so it was stopped. Try again when you are ready."));
+            return;
+          }
+          setTimeout(function () { pollSignIn(startedAt); }, RYUU_SIGNIN_TICK);
+        });
+    };
+    function startSignIn() {
+      signInPolling = true;
+      renderSignIn("opening");
+      lumenCall("__lumenRyuuLoginOpen").catch(function () { return null; })
+        .then(function (p) {
+          if (!signInPolling) return;
+          if (!(p && p.ok)) {
+            signInPolling = false;
+            renderSignIn("failed", (p && p.reason) === "unsupported"
+              ? lt("This Steam mode cannot open the sign-in window. Paste a session cookie instead.")
+              : lt("Steam could not open the sign-in window. Paste a session cookie instead."));
+            return;
+          }
+          renderSignIn("waiting");
+          setTimeout(function () { pollSignIn(Date.now()); }, RYUU_SIGNIN_TICK);
+        });
+    }
+
+    modal.appendChild(title); modal.appendChild(intro);
+    modal.appendChild(signInBox); modal.appendChild(manualBox); modal.appendChild(altRow);
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    renderSignIn("intro");
+    // Game Mode / Big Picture cannot open the sign-in window at all (verified on
+    // a live gamescope session), and typing a 300-character cookie with a gamepad
+    // is not a real option. The credential is shared between modes, so there the
+    // modal becomes a short notice pointing at Desktop Mode: no form, no polling.
+    lumenCall("__lumenRyuuLoginAvailable").then(function (p) {
+      if (!(p && p.ok && p.available === false)) return;
+      signInPolling = false;
+      signInBox.style.display = "none";
+      manualBox.style.display = "none";
+      altRow.style.display = "none";
+      title.querySelector("span").textContent = lt("Sign-in is only available in Desktop Mode");
+      intro.textContent = lt("Steam cannot open the sign-in window in Game Mode. Switch to Desktop Mode and sign in once from the Fixes Menu: the session is saved and applies here too.");
+      const noticeRow = document.createElement("div");
+      noticeRow.style.cssText = "display:flex;justify-content:flex-end;margin-top:18px;";
+      noticeRow.appendChild(signInButton(lt("Got it"), true, dismiss));
+      modal.appendChild(noticeRow);
+    }).catch(function () {});
+  }
+
+  // A Ryuu session lasts about a week and is also invalidated by logging out
+  // of the site. downloader.sh tags HTTP 401/403 with errorCode
+  // "authentication" (and fixes.lua clears the stored credential), so the UI
+  // can offer a fresh sign-in instead of the misleading "corrupt archive" text.
+  function ryuuAuthFailure(state) {
+    return !!(state && state.errorCode === "authentication");
+  }
+
+  function ryuuCrackUiState(crackFix, strings) {
+    crackFix = crackFix || {};
+    strings = strings || {};
+    const available = crackFix.status === 200;
+    const needsAuth = available && crackFix.requiresAuth && !crackFix.authConfigured;
+    return {
+      available,
+      needsAuth,
+      // The button keeps its own icon; the key goes on the badge, which is what
+      // conveys the missing authentication.
+      icon: "fa-wrench",
+      badge: needsAuth ? strings.badge : null,
+      badgeIcon: needsAuth,
+      description: needsAuth ? strings.auth : strings.normal,
+    };
+  }
+
   // Fixes Results popup
+  // Overlays can be orphaned in the DOM when the view is dismissed without our
+  // own close handlers running — Game Mode's gamepad Back does exactly that.
+  // The old "already open? bail out" guard then made the Fixes Menu unopenable
+  // for the rest of the session, so any stale overlay is cleared first.
+  // Returns how many were removed (exported for tests).
+  const LT_STALE_FIX_OVERLAYS = [
+    ".luatools-fixes-results-overlay",
+    ".luatools-ryuu-auth-overlay",
+    ".luatools-ryuu-help-overlay",
+  ];
+  function clearStaleFixOverlays(doc) {
+    let removed = 0;
+    try {
+      const nodes = doc.querySelectorAll(LT_STALE_FIX_OVERLAYS.join(","));
+      Array.prototype.forEach.call(nodes, function (node) {
+        node.remove();
+        removed++;
+      });
+    } catch (_) {}
+    return removed;
+  }
+  try { window.__LuaToolsClearStaleFixOverlays = clearStaleFixOverlays; } catch (_) {}
+
   function showFixesResultsPopup(data, isGameInstalled) {
-    if (document.querySelector(".luatools-fixes-results-overlay")) return;
+    clearStaleFixOverlays(document);
     // Close other popups
     try {
       const d = document.querySelector(".luatools-overlay");
@@ -3093,18 +3484,23 @@
     // button sourced from the ryuu catalogue. Availability + URL come from
     // data.crackFix (CheckForFixes resolves it against the bundled index).
     const crackStatus = (data.crackFix && data.crackFix.status) || 0;
+    const crackUi = ryuuCrackUiState(data.crackFix, {
+      normal: lt("Fetches and applies fixes from Ryuu Fixes"),
+      auth: lt("Ryuu authentication is required. Click to add it."),
+      badge: lt("Needs auth"),
+    });
     const crackSection = createFixButton(
       lt("Crack/Bypass"),
       // slsteammoon: static descriptive subtitle (like the sibling buttons),
       // not the Apply/No-crack status -- availability is conveyed by the
       // dimmed style below, not the text.
-      lt("Fetches and applies fixes from Ryuu Fixes"),
-      "fa-wrench",
+      crackUi.description,
+      crackUi.icon,
       // slsteammoon: a normal (theme-colored) button when available, NOT the
       // green "success" highlight -- it's an action, not an applied state.
       // Match the sibling buttons (Online Fix passes null). Stay dimmed/
       // disabled when no crack/bypass exists (isSuccess === false).
-      crackStatus === 200 ? null : false,
+      crackUi.available ? null : false,
       function (e) {
         e.preventDefault();
         if (crackStatus !== 200 || !isGameInstalled) return;
@@ -3143,6 +3539,13 @@
           );
         }
         function __cfProceed() {
+          if (crackUi.needsAuth) {
+            showRyuuAuthPopup(function () {
+              data.crackFix.authConfigured = true;
+              applyFix(data.appid, crackUrl, lt("Crack/Bypass"), data.gameName, overlay);
+            });
+            return;
+          }
           applyFix(data.appid, crackUrl, lt("Crack/Bypass"), data.gameName, overlay);
         }
         if (__cfLooksNativeLinux()) {
@@ -3168,6 +3571,29 @@
       },
     );
     columnsContainer.appendChild(crackSection);
+
+    if (crackUi.needsAuth) {
+      // Badge only: no border tint, so the button keeps its normal resting and
+      // hover styling instead of looking like a warning state.
+      crackSection.style.position = "relative";
+      const badge = document.createElement("span");
+      badge.style.cssText =
+        "position:absolute;top:9px;right:9px;display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border-radius:999px;background:rgba(224,179,65,.14);color:#f3ca62;font-size:9px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.35px;";
+      if (crackUi.badgeIcon) {
+        const badgeKey = document.createElement("span");
+        badgeKey.style.cssText = "display:inline-flex;align-items:center;";
+        badgeKey.innerHTML =
+          '<svg viewBox="0 0 512 512" width="9" height="9" fill="currentColor" aria-hidden="true">'
+          + '<path d="M336 0a176 176 0 00-168 228L7 389a24 24 0 00-7 17v82a24 24 0 0024 24h82a24 24 0 0017-7'
+          + 'l23-23a24 24 0 007-17v-29h29a24 24 0 0024-24v-29h29a24 24 0 0017-7l32-32A176 176 0 10336 0zm48 176'
+          + 'a48 48 0 110-96 48 48 0 010 96z"/></svg>';
+        badge.appendChild(badgeKey);
+      }
+      const badgeText = document.createElement("span");
+      badgeText.textContent = crackUi.badge;
+      badge.appendChild(badgeText);
+      crackSection.appendChild(badge);
+    }
 
     if (!isGameInstalled) {
       crackSection.style.opacity = "0.5";
@@ -3651,9 +4077,19 @@
       });
   }
 
+  // Last fix request, so an expired Ryuu session can be retried straight from
+  // the progress modal (which only knows the appid and the fix label).
+  let lastFixRequest = null;
+
   // Apply Fix function
   function applyFix(appid, downloadUrl, fixType, gameName, resultsOverlay) {
     try {
+      lastFixRequest = {
+        appid: appid,
+        downloadUrl: downloadUrl,
+        fixType: fixType,
+        gameName: gameName,
+      };
       // Close results overlay
       if (resultsOverlay) {
         resultsOverlay.remove();
@@ -3683,6 +4119,12 @@
             if (payload && payload.success) {
               // Show download progress popup similar to Add via LuaTools
               showFixDownloadProgress(appid, fixType);
+            } else if (ryuuAuthFailure(payload)) {
+              // The card thought a credential was present but the backend
+              // found none (removed elsewhere, or cleared after a 401).
+              showRyuuAuthPopup(function () {
+                applyFix(appid, downloadUrl, fixType, gameName, null);
+              });
             } else {
               const errorKey =
                 payload && payload.error ? String(payload.error) : "";
@@ -3837,6 +4279,32 @@
       overlayEl.remove();
     };
     btnRow.appendChild(closeBtn);
+  }
+
+  // Dead-end recovery for an expired Ryuu session: Close plus a primary action
+  // that collects a fresh credential and restarts the same download.
+  function replaceFixButtonsWithReauth(overlayEl, onRetry) {
+    replaceFixButtonsWithClose(overlayEl);
+    if (!overlayEl) return;
+    const btnRow = overlayEl.querySelector(".lt-fix-btn-row");
+    if (!btnRow) return;
+    btnRow.style.cssText =
+      "margin-top:16px;display:flex;justify-content:flex-end;gap:10px;";
+    const closeBtn = btnRow.querySelector(".luatools-btn");
+    if (closeBtn) closeBtn.classList.remove("primary");
+    const authBtn = document.createElement("a");
+    authBtn.href = "#";
+    authBtn.className = "luatools-btn primary";
+    authBtn.style.minWidth = "170px";
+    authBtn.innerHTML = `<span>${lt("Update authentication")}</span>`;
+    authBtn.onclick = function (e) {
+      e.preventDefault();
+      showRyuuAuthPopup(function () {
+        overlayEl.remove();
+        if (typeof onRetry === "function") onRetry();
+      });
+    };
+    btnRow.appendChild(authBtn);
   }
 
   // Poll fix download and extraction progress
@@ -4038,6 +4506,24 @@
                 replaceFixButtonsWithClose(overlayEl);
                 return; // Stop polling
               } else if (state.status === "failed") {
+                if (ryuuAuthFailure(state)) {
+                  if (msgEl)
+                    msgEl.textContent = lt(
+                      "Your Ryuu session was rejected or expired. Add a current session cookie or auth key to continue.",
+                    );
+                  const retry = lastFixRequest;
+                  replaceFixButtonsWithReauth(overlayEl, function () {
+                    if (!retry) return;
+                    applyFix(
+                      retry.appid,
+                      retry.downloadUrl,
+                      retry.fixType,
+                      retry.gameName,
+                      null,
+                    );
+                  });
+                  return; // Stop polling
+                }
                 if (msgEl)
                   msgEl.textContent = lt("Failed: {error}").replace(
                     "{error}",
@@ -4893,18 +5379,20 @@
               option.description,
             );
 
-            // Special handling for hubcap link
+            // Special handling for API-provider links.
             if (
               descTextVal.includes("hubcapmanifest.com") ||
               descTextVal.includes("{link}")
             ) {
               const url = "https://hubcapmanifest.com";
-              const linkHtml = `<a href="${url}" id="lt-hubcap-link" style="color:${optDescColors.accent};text-decoration:underline;">hubcapmanifest.com</a>`;
+              const host = "hubcapmanifest.com";
+              const linkId = "lt-hubcap-link";
+              const linkHtml = `<a href="${url}" id="${linkId}" style="color:${optDescColors.accent};text-decoration:underline;">${host}</a>`;
               if (descTextVal.includes("{link}")) {
                 descTextVal = descTextVal.replace("{link}", linkHtml);
               } else {
                 descTextVal = descTextVal.replace(
-                  "hubcapmanifest.com",
+                  host,
                   linkHtml,
                 );
               }
@@ -4913,7 +5401,7 @@
               // Add event listener after appending to document or wait?
               // Better: use a selector later or add it now if possible.
               setTimeout(() => {
-                const link = document.getElementById("lt-hubcap-link");
+                const link = document.getElementById(linkId);
                 if (link) {
                   link.onclick = (e) => {
                     e.preventDefault();

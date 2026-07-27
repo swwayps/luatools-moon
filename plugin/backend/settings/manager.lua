@@ -6,7 +6,7 @@ local utils = require("plugin_utils")
 local locales = require("locales.manager")
 local options = require("settings.options")
 
-local SCHEMA_VERSION = 2
+local SCHEMA_VERSION = 3
 local SETTINGS_FILE = paths.backend_path("data/settings.json")
 
 local _SETTINGS_CACHE = nil
@@ -24,6 +24,12 @@ local function _migrate_legacy_values(values)
     end
     if general.morrenusApiKey ~= nil then
         general.morrenusApiKey = nil
+        changed = true
+    end
+    -- Ryuu sessions are bearer credentials. They now live in a dedicated
+    -- chmod-600 file and must never be returned through GetSettingsConfig.
+    if general.ryuuAuthKey ~= nil then
+        general.ryuuAuthKey = nil
         changed = true
     end
     return changed
