@@ -115,4 +115,105 @@ do
         of.find_fix(HTML2, "CURE: A Hospital Simulator") ~= nil)
 end
 
+-- ---------------------------------------------------------------------------
+-- GTA aliases. Steam uses the full franchise names while mirrors frequently
+-- abbreviate GTA / SA / DE and mix Roman and Arabic sequel numbers. These are
+-- aliases, not edition erasure: an original game must stay distinct from DE.
+-- ---------------------------------------------------------------------------
+local GTA_HTML = [[
+<pre>
+<a href="GTA%20V%20Legacy%20%D0%BF%D0%BE%20%D1%81%D0%B5%D1%82%D0%B8%20-%20GTAVLegacy_Fix_Repair_Steam_Generic.rar">x</a>
+<a href="GTA%20SA%20DE%20%D0%BF%D0%BE%20%D1%81%D0%B5%D1%82%D0%B8%20-%20GTASADE_Fix_Repair_Steam_Generic.rar">x</a>
+<a href="GTA%20Vice%20DE%20%D0%BF%D0%BE%20%D1%81%D0%B5%D1%82%D0%B8%20-%20GTAViceDE_Fix_Repair_Steam_Generic.rar">x</a>
+<a href="GTA%20III%20DE%20%D0%BF%D0%BE%20%D1%81%D0%B5%D1%82%D0%B8%20-%20GTA3DE_Fix_Repair_Steam_Generic.rar">x</a>
+<a href="GTA%20Trilogy%20DE%20%D0%BF%D0%BE%20%D1%81%D0%B5%D1%82%D0%B8%20-%20GTATrilogyDE_Fix_Repair_Steam_Generic.rar">x</a>
+</pre>
+]]
+do
+  check("G1 GTA expands to Grand Theft Auto",
+    of.find_fix(GTA_HTML, "Grand Theft Auto V Legacy") ~= nil)
+  check("G2 SA+DE aliases match the Steam title",
+    of.find_fix(GTA_HTML, "Grand Theft Auto: San Andreas – The Definitive Edition") ~= nil)
+  check("G3 Vice+DE aliases match the Steam title",
+    of.find_fix(GTA_HTML, "Grand Theft Auto: Vice City – The Definitive Edition") ~= nil)
+  check("G4 Roman sequel and DE alias match",
+    of.find_fix(GTA_HTML, "Grand Theft Auto III – The Definitive Edition") ~= nil)
+  check("G5 Trilogy alias matches articles and DE suffix",
+    of.find_fix(GTA_HTML, "Grand Theft Auto: The Trilogy – The Definitive Edition") ~= nil)
+  check("G6 original and Definitive Edition remain distinct",
+    of.normalize("GTA III") ~= of.normalize("GTA III DE"))
+end
+
+-- ── index fetch: cache + a bounded time budget ─────────────────────────────
+-- The mirror is a third party and can take tens of seconds to answer (measured
+-- 23s from one machine while another got 0.3s at the same moment). The plugin
+-- backend runs inside Lumen's single-threaded loop, so every second spent here
+-- is a second in which NO other RPC is served — a slow mirror froze the whole
+-- Fixes Menu. Hence: serve from cache when fresh, spend a bounded amount of time
+-- when not, and fall back to a stale copy rather than hanging.
+do
+  local function harness(opts)
+    opts = opts or {}
+    local clock = opts.start or 1000
+    local state = {gets = 0, written = nil, sleeps = 0}
+    local deps = {
+      now = function() return clock end,
+      get = function(_, o)
+        state.gets = state.gets + 1
+        state.last_timeout = o and o.timeout
+        clock = clock + (opts.cost or 1)
+        local reply = opts.replies and opts.replies[state.gets]
+        if reply == nil then reply = opts.reply end
+        return reply
+      end,
+      read = function() return opts.cached end,
+      write = function(body) state.written = body; return true end,
+      ttl = opts.ttl or 600,
+      budget = opts.budget or 12,
+    }
+    return deps, state
+  end
+
+  local OK = {status = 200, body = "<html>fresh</html>"}
+
+  local deps, state = harness({reply = OK})
+  local body, from = of.fetch_index(deps)
+  check("X1 a cold cache fetches", body == OK.body and from == "network")
+  check("X2 the fetched index is cached", state.written == OK.body)
+  check("X3 the request is given a bounded timeout",
+    type(state.last_timeout) == "number" and state.last_timeout <= 10)
+
+  deps, state = harness({cached = {body = "<html>cached</html>", at = 1000}, start = 1100})
+  body, from = of.fetch_index(deps)
+  check("X4 a fresh cache is served without touching the network",
+    body == "<html>cached</html>" and from == "cache" and state.gets == 0)
+
+  deps, state = harness({cached = {body = "<html>old</html>", at = 0}, start = 5000, reply = OK})
+  body, from = of.fetch_index(deps)
+  check("X5 an expired cache refetches", body == OK.body and state.gets == 1)
+
+  -- Every attempt fails and each burns 6s: the budget must stop the retries.
+  deps, state = harness({reply = nil, cost = 6, budget = 12})
+  body, from = of.fetch_index(deps)
+  check("X6 a dead mirror gives up", body == nil)
+  check("X7 retries stop at the time budget", state.gets <= 2)
+
+  -- A stale copy beats hanging the menu on an unreachable mirror.
+  deps, state = harness({cached = {body = "<html>stale</html>", at = 0}, start = 9999,
+                         reply = nil, cost = 6})
+  body, from = of.fetch_index(deps)
+  check("X8 an unreachable mirror falls back to the stale copy",
+    body == "<html>stale</html>" and from == "stale")
+
+  -- A transient first failure still succeeds on the second attempt.
+  deps, state = harness({replies = {nil, OK}, cost = 1})
+  body, from = of.fetch_index(deps)
+  check("X9 a transient failure is retried", body == OK.body and state.gets == 2)
+
+  -- A non-200 is not cached as if it were the index.
+  deps, state = harness({reply = {status = 503, body = "nope"}, cost = 1})
+  body = of.fetch_index(deps)
+  check("X10 a non-200 reply is not accepted", body == nil and state.written == nil)
+end
+
 if fails == 0 then io.write("\nALL TESTS OK\n") else io.write("\n" .. fails .. " FAILED\n"); os.exit(1) end
