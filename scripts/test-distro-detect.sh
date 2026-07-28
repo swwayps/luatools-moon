@@ -156,22 +156,35 @@ setup_path="$(
 [ "$setup_path" = "$NATIVEBIN:/usr/bin" ]; check "setup handoff: strips own wrapper and preserves remaining PATH order" $?
 rm -rf "$WRAPPERBIN" "$NATIVEBIN"
 
-# NixOS preflight is independently testable and fails before main can reach
+# The single dependency pass is independently testable. On NixOS it includes
+# steam-run, treats notify-send as optional, and runs from main before
 # check_internet, Steam shutdown, or cleanup.
 PREREQBIN="$TESTDIR/prereqbin"; mkdir -p "$PREREQBIN"
 for tool in jq tar unzip; do
 	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
 	chmod +x "$PREREQBIN/$tool"
 done
-if NIXOS_PREREQ_PATH="$PREREQBIN" check_nixos_prerequisites >/dev/null 2>&1; then r=1; else r=0; fi
+if (DEPENDENCY_PATH="$PREREQBIN" install_dependencies >/dev/null 2>&1); then r=1; else r=0; fi
 check "nixos preflight: missing curl and steam-run fails closed" "$r"
 for tool in curl steam-run; do
 	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
 	chmod +x "$PREREQBIN/$tool"
 done
-NIXOS_PREREQ_PATH="$PREREQBIN" check_nixos_prerequisites >/dev/null 2>&1
+DEPENDENCY_PATH="$PREREQBIN" install_dependencies >/dev/null 2>&1
 check "nixos preflight: complete toolset passes" $?
 rm -rf "$PREREQBIN"
+
+# Pin the destructive-action ordering that motivated this preflight.
+dependency_calls="$(grep -Ec '^[[:space:]]+install_dependencies$' "$INSTALL_SH")"
+dependency_line="$(grep -nE '^[[:space:]]+install_dependencies$' "$INSTALL_SH" | cut -d: -f1)"
+internet_line="$(grep -nE '^[[:space:]]+check_internet$' "$INSTALL_SH" | cut -d: -f1)"
+stop_line="$(grep -nE '^[[:space:]]+stop_steam$' "$INSTALL_SH" | cut -d: -f1)"
+cleanup_line="$(grep -nE '^[[:space:]]+cleanup_previous_install$' "$INSTALL_SH" | cut -d: -f1)"
+[ "$dependency_calls" -eq 1 ]; check "dependency preflight: called exactly once" $?
+[ "$dependency_line" -lt "$internet_line" ] \
+	&& [ "$dependency_line" -lt "$stop_line" ] \
+	&& [ "$dependency_line" -lt "$cleanup_line" ]
+check "dependency preflight: runs before internet, Steam shutdown, and cleanup" $?
 
 # nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?

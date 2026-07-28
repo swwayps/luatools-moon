@@ -672,46 +672,6 @@ nixos_pkg_for() {
 	esac
 }
 
-# NixOS cannot repair missing tools later with a conventional package manager,
-# and Lumen's prebuilt ELF also needs steam-run. Check all hard prerequisites
-# before check_internet (which itself needs curl), before stopping Steam, and
-# before removing a working installation.
-check_nixos_prerequisites() {
-	[ "$(get_distro_id)" = "nixos" ] || return 0
-
-	local missing=() tool dir found nix_attrs="" flake_attrs=""
-	local prereq_path="${NIXOS_PREREQ_PATH-${PATH:-}}"
-	for tool in jq curl tar unzip steam-run; do
-		found=0
-		while IFS= read -r dir; do
-			[ -n "$dir" ] || dir="."
-			if [ -x "${dir%/}/$tool" ]; then
-				found=1
-				break
-			fi
-		done < <(printf '%s\n' "$prereq_path" | tr ':' '\n')
-		[ "$found" -eq 1 ] || missing+=("$tool")
-	done
-	[ "${#missing[@]}" -gt 0 ] || return 0
-
-	for tool in "${missing[@]}"; do
-		nix_attrs="$nix_attrs nixpkgs#$(nixos_pkg_for "$tool")"
-		flake_attrs="$flake_attrs $(nixos_pkg_for "$tool")"
-	done
-	echo ""
-	log_error "$(L "Missing required NixOS tools: ${missing[*]}" \
-	              "Ferramentas necessárias ausentes no NixOS: ${missing[*]}")"
-	echo ""
-	echo -e "  $(L "Add them to environment.systemPackages in configuration.nix and rebuild:" \
-	               "Adicione-as a environment.systemPackages no configuration.nix e reconstrua:")"
-	echo -e "       ${GREEN}${flake_attrs# }${NC}"
-	echo -e "  $(L "...or install them for this user only, right now:" \
-	               "...ou instale-as só para este usuário, agora mesmo:")"
-	echo -e "       ${GREEN}nix profile install${nix_attrs}${NC}"
-	echo ""
-	return 1
-}
-
 # Map a generic tool name to the package that provides it on each family.
 pkg_for() {
 	local tool="$1" family="$2"
@@ -724,6 +684,8 @@ pkg_for() {
 			echo "tar" ;;
 		unzip)
 			echo "unzip" ;;
+		steam-run)
+			echo "steam-run" ;;
 		notify-send)
 			# slsteam-moon shells out to notify-send for in-Steam status
 			# popups (download progress, errors). Missing on minimal
@@ -784,14 +746,29 @@ immutable_install_hint() {
 
 # Ensure the generic CLI tools this installer + the stack need are present.
 install_dependencies() {
-	local family; family="$(get_distro_family)"
+	local family distro_id
+	family="$(get_distro_family)"
+	distro_id="$(get_distro_id)"
 
-	log_info "$(L "Checking required tools (jq, curl, tar, unzip, notify-send)" \
-	             "Verificando ferramentas necessárias (jq, curl, tar, unzip, notify-send)")"
+	local required_tools=(jq curl tar unzip notify-send)
+	[ "$distro_id" = "nixos" ] && required_tools+=(steam-run)
+	log_info "$(L "Checking required tools (${required_tools[*]})" \
+	             "Verificando ferramentas necessárias (${required_tools[*]})")"
 
-	local missing_tools=() missing_pkgs=() tool
-	for tool in jq curl tar unzip notify-send; do
-		if ! command -v "$tool" >/dev/null 2>&1; then
+	# The override keeps detection tests isolated from tools installed on the
+	# host running them. Production uses PATH.
+	local dependency_path="${DEPENDENCY_PATH-${PATH:-}}"
+	local missing_tools=() missing_pkgs=() tool dir found
+	for tool in "${required_tools[@]}"; do
+		found=0
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || dir="."
+			if [ -x "${dir%/}/$tool" ]; then
+				found=1
+				break
+			fi
+		done < <(printf '%s\n' "$dependency_path" | tr ':' '\n')
+		if [ "$found" -eq 0 ]; then
 			missing_tools+=("$tool")
 			missing_pkgs+=("$(pkg_for "$tool" "$family")")
 		fi
@@ -808,7 +785,7 @@ install_dependencies() {
 	# environment.systemPackages + a system rebuild (or `nix profile install`
 	# for a one-off). Same "never touch the system for the user" contract as
 	# the immutable branch below, but with NixOS-flavored instructions.
-	if [ "$(get_distro_id)" = "nixos" ]; then
+	if [ "$distro_id" = "nixos" ]; then
 		local essential=()
 		for tool in "${missing_tools[@]}"; do
 			[ "$tool" = "notify-send" ] || essential+=("$tool")
@@ -2294,9 +2271,7 @@ main() {
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
 	check_not_root
 	check_arch
-	check_nixos_prerequisites || fail "$(L \
-		"Aborted before stopping Steam or changing the existing installation." \
-		"Abortado antes de parar a Steam ou alterar a instalação existente.")"
+	install_dependencies
 	check_internet
 	check_steam_native
 	check_steam_bootstrapped
@@ -2312,9 +2287,6 @@ main() {
 
 	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
 	cleanup_previous_install
-
-	print_section "$(L "Dependencies" "Dependências")"
-	install_dependencies
 
 	print_section "$(L "Installing slsteam-moon" "Instalando slsteam-moon")"
 	install_slsteam_moon
