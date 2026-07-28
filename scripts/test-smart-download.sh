@@ -60,7 +60,8 @@ with zipfile.ZipFile(archive, "w") as z:
     z.writestr(entry, victim)
 PY
 LARGE_DIR="$(mktemp -d "$TMP/large.XXXX")"
-printf 'addappid(1134710)\n' > "$LARGE_DIR/1134710.lua"
+printf 'addappid(1134710)\naddappid(1134712,1,"%064d")\n' 0 > "$LARGE_DIR/1134710.lua"
+printf '\320\027\366\161' > "$LARGE_DIR/1134712_9002.manifest"
 python3 - "$LARGE_DIR/payload.bin" <<'PY'
 import os, sys
 with open(sys.argv[1], "wb") as f:
@@ -238,6 +239,20 @@ write_candidate "$C3A" 1 "Large active" "http://127.0.0.1:$PORT/paced.zip" 200
 printf '1134711\t9001\n' > "$TMP/coverage-active"
 COLLECTION_DEADLINE=0.3 COVERAGE_GRACE=0.1 SPEED_TIME=9 "$SCRIPT" 1134710 "$D3A/state.json" "$D3A" "$C3A" "$TMP/coverage-active" >/dev/null 2>&1
 check "active large source survives coverage grace and startup deadline" '[[ -f "$D3A/extracted_1134710/source_0001/payload.bin" ]]'
+
+# Once a small package makes the aggregate usable, a healthy larger source may
+# need much longer than the enrichment fast path. The coordinator must retain
+# complementary manifests from any source that continues making progress.
+D3AA="$TMP/d3aa"; mkdir -p "$D3AA"; C3AA="$TMP/c3aa.bin"; : > "$C3AA"
+write_candidate "$C3AA" 0 "Fast usable" "http://127.0.0.1:$PORT/fast.zip" 200
+write_candidate "$C3AA" 1 "Large enrichment" "http://127.0.0.1:$PORT/paced.zip" 200
+START=$(date +%s%3N)
+COLLECTION_DEADLINE=0.1 ENRICHMENT_MAX=0.2 ACTIVE_PROGRESS_WINDOW=2 SPEED_TIME=2 \
+  "$SCRIPT" 1134710 "$D3AA/state.json" "$D3AA" "$C3AA" "$TMP/no-coverage" >/dev/null 2>&1
+ELAPSED=$(( $(date +%s%3N) - START ))
+check "active enrichment is not truncated by the fast-path ceiling" \
+  '[[ -f "$D3AA/extracted_1134710/source_0001/1134712_9002.manifest" ]]'
+check "collector waits for the active enrichment source to finish" '[[ "$ELAPSED" -ge 400 ]]'
 
 # A filename alone is not coverage: an invalid exact-named manifest must not
 # cancel a slower source carrying a real Steam manifest.

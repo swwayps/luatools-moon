@@ -11,7 +11,6 @@ umask 077
 : "${SPEED_TIME:=120}"
 : "${ACTIVE_PROGRESS_WINDOW:=30}"
 : "${MAX_TRANSFER_TIME:=600}"
-: "${ENRICHMENT_MAX:=8}"
 : "${MAX_ARCHIVE_ENTRIES:=10000}"
 : "${MAX_EXPANDED_BYTES:=1073741824}"
 
@@ -214,7 +213,6 @@ done
 
 start_ms="$(now_ms)"
 quiet_ms="$(awk -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", d*1000}')"
-enrichment_max_ms="$(awk -v d="$ENRICHMENT_MAX" 'BEGIN{printf "%.0f", d*1000}')"
 grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
 active_window_ms="$(awk -v s="$ACTIVE_PROGRESS_WINDOW" 'BEGIN{printf "%.0f", s*1000}')"
 coverage_at=""; usable_at=""; completed=0; progress_bytes=0; extension_logged=0; cancelled=0
@@ -309,8 +307,7 @@ while :; do
         active_pending=$((active_pending + 1))
       fi
     done
-    if [[ "$active_pending" -eq 0 \
-        || $((current_ms - usable_at)) -ge "$enrichment_max_ms" ]]; then
+    if [[ "$active_pending" -eq 0 ]]; then
       slog "closing after $close_reason; usable result retained active_sources=$active_pending"
       break
     fi
