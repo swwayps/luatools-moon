@@ -50,6 +50,7 @@ preload("api_manifest", {
 })
 preload("downloads", {})
 preload("fixes", {})
+preload("ryuu_auth", {})
 preload("settings.manager", { get_hubcap_api_key = function() return "" end, init_settings = function() end })
 preload("auto_update", {})
 
