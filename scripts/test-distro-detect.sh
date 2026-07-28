@@ -212,6 +212,23 @@ check "dependency detection: runs before internet, Steam shutdown, and cleanup" 
 [ "$install_line" -gt "$native_line" ] && [ "$install_line" -gt "$bootstrap_line" ]
 check "dependency install: runs only after the machine is validated" $?
 
+# check_internet probes with curl, so a missing curl must be reported as such
+# instead of as a network failure. No network is touched in this case.
+EMPTYBIN="$TESTDIR/emptybin"; mkdir -p "$EMPTYBIN"
+internet_out="$(PATH="$EMPTYBIN" check_internet 2>&1)"; internet_rc=$?
+[ "$internet_rc" -eq 0 ]; check "missing curl: connectivity check is skipped, not failed" $?
+case "$internet_out" in
+	*curl*) r=0 ;;
+	*) r=1 ;;
+esac
+check "missing curl: message names curl instead of the connection" "$r"
+case "$internet_out" in
+	*"No internet connection"*|*"Sem conexão"*) r=1 ;;
+	*) r=0 ;;
+esac
+check "missing curl: does not claim the connection is down" "$r"
+rm -rf "$EMPTYBIN"
+
 # nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?
 [ "$(nixos_pkg_for notify-send)" = "libnotify" ]; check "nixos_pkg_for: notify-send -> libnotify" $?

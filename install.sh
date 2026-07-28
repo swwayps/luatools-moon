@@ -469,6 +469,16 @@ check_arch() {
 }
 
 check_internet() {
+	# This probe IS curl, so a missing curl is not a network fault — say which
+	# one it is instead of blaming the connection. Only reachable on a mutable
+	# distro: NixOS and immutable systems already aborted in check_dependencies,
+	# because there curl cannot be installed for the user. Here the Dependencies
+	# step installs it, so skip the probe rather than failing.
+	if ! command -v curl >/dev/null 2>&1; then
+		log_warn "$(L "curl is not installed yet, so the connectivity check was skipped; it is installed in the Dependencies step." \
+		             "O curl ainda não está instalado, então a verificação de conectividade foi pulada; ele é instalado na etapa de Dependências.")"
+		return 0
+	fi
 	if ! curl -fsS --head "https://github.com" >/dev/null 2>&1; then
 		fail "$(L "No internet connection." "Sem conexão com a internet.")"
 	fi
