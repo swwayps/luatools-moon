@@ -475,15 +475,64 @@ check_internet() {
 	log_success "$(L "Internet reachable" "Internet acessível")"
 }
 
+# Remove the installer-managed Steam wrapper from a PATH value. During a
+# reinstall setup.sh recreates that wrapper before looking up Steam, so merely
+# teaching our own detector to skip it is not enough: setup.sh must see the
+# underlying native launcher too.
+path_without_slsteam_wrapper() {
+	local input_path="${1-}" wrapper_dir="$HOME/.local/share/SLSsteam/path"
+	local dir output=""
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || dir="."
+		[ "${dir%/}" = "$wrapper_dir" ] && continue
+		if [ -n "$output" ]; then
+			output="$output:$dir"
+		else
+			output="$dir"
+		fi
+	done < <(printf '%s\n' "$input_path" | tr ':' '\n')
+	printf '%s\n' "$output"
+}
+
 # How is Steam installed? native / flatpak / snap / none.
 detect_steam_type() {
 	# A native package-manager install puts the launcher in a system bin dir.
-	for c in /usr/bin/steam /usr/games/steam /usr/local/bin/steam /bin/steam; do
+	# Both search lists are overridable so tests can be isolated from whatever
+	# Steam happens to be installed on the host running them.
+	local fixed_candidates="${STEAM_FIXED_CANDIDATES-/usr/bin/steam /usr/games/steam /usr/local/bin/steam /bin/steam}"
+	local search_path="${STEAM_SEARCH_PATH-${PATH:-}}"
+	local c dir resolved wrapper_dir
+	for c in $fixed_candidates; do
 		if [ -x "$c" ]; then
 			echo "native"
 			return
 		fi
 	done
+	# NixOS has no /usr/bin: `programs.steam.enable` symlinks the launcher into
+	# the user's profile (e.g. /run/current-system/sw/bin/steam) instead. Accept
+	# `steam` off PATH only when it resolves into the Nix store, so we don't
+	# misdetect a flatpak/snap shim that happens to shadow the name. Inspect
+	# every PATH entry: setup.sh prepends its own wrapper directory, so the
+	# first match on a reinstall is not necessarily the native launcher.
+	if [ "$(get_distro_id)" = "nixos" ]; then
+		wrapper_dir="$HOME/.local/share/SLSsteam/path"
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || dir="."
+			c="${dir%/}/steam"
+			[ -x "$c" ] || continue
+			case "$c" in
+				"$wrapper_dir"/*) continue ;;
+			esac
+			resolved="$(readlink -f "$c" 2>/dev/null || printf '%s\n' "$c")"
+			case "$resolved" in
+				"$wrapper_dir"/*) continue ;;
+				/nix/store/*)
+					echo "native"
+					return
+					;;
+			esac
+		done < <(printf '%s\n' "$search_path" | tr ':' '\n')
+	fi
 	if command -v flatpak >/dev/null 2>&1 && flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
 		echo "flatpak"
 		return
@@ -612,6 +661,17 @@ check_steam_bootstrapped() {
 # ============================================================================
 # Runtime dependencies
 # ============================================================================
+# nixpkgs attribute name for a tool (NixOS has no package-manager install —
+# see the "nixos" branch of install_dependencies below). Only "tar" differs:
+# nixpkgs ships it as gnutar, there is no top-level `tar` attribute.
+nixos_pkg_for() {
+	case "$1" in
+		tar)         echo "gnutar" ;;
+		notify-send) echo "libnotify" ;;
+		*)           echo "$1" ;;
+	esac
+}
+
 # Map a generic tool name to the package that provides it on each family.
 pkg_for() {
 	local tool="$1" family="$2"
@@ -624,6 +684,8 @@ pkg_for() {
 			echo "tar" ;;
 		unzip)
 			echo "unzip" ;;
+		steam-run)
+			echo "steam-run" ;;
 		notify-send)
 			# slsteam-moon shells out to notify-send for in-Steam status
 			# popups (download progress, errors). Missing on minimal
@@ -684,14 +746,29 @@ immutable_install_hint() {
 
 # Ensure the generic CLI tools this installer + the stack need are present.
 install_dependencies() {
-	local family; family="$(get_distro_family)"
+	local family distro_id
+	family="$(get_distro_family)"
+	distro_id="$(get_distro_id)"
 
-	log_info "$(L "Checking required tools (jq, curl, tar, unzip, notify-send)" \
-	             "Verificando ferramentas necessárias (jq, curl, tar, unzip, notify-send)")"
+	local required_tools=(jq curl tar unzip notify-send)
+	[ "$distro_id" = "nixos" ] && required_tools+=(steam-run)
+	log_info "$(L "Checking required tools (${required_tools[*]})" \
+	             "Verificando ferramentas necessárias (${required_tools[*]})")"
 
-	local missing_tools=() missing_pkgs=() tool
-	for tool in jq curl tar unzip notify-send; do
-		if ! command -v "$tool" >/dev/null 2>&1; then
+	# The override keeps detection tests isolated from tools installed on the
+	# host running them. Production uses PATH.
+	local dependency_path="${DEPENDENCY_PATH-${PATH:-}}"
+	local missing_tools=() missing_pkgs=() tool dir found
+	for tool in "${required_tools[@]}"; do
+		found=0
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || dir="."
+			if [ -x "${dir%/}/$tool" ]; then
+				found=1
+				break
+			fi
+		done < <(printf '%s\n' "$dependency_path" | tr ':' '\n')
+		if [ "$found" -eq 0 ]; then
 			missing_tools+=("$tool")
 			missing_pkgs+=("$(pkg_for "$tool" "$family")")
 		fi
@@ -702,6 +779,41 @@ install_dependencies() {
 	if [ "${#missing_tools[@]}" -eq 0 ]; then
 		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
 		return 0
+	fi
+
+	# NixOS: there is no ad-hoc package-manager install — packages come from
+	# environment.systemPackages + a system rebuild (or `nix profile install`
+	# for a one-off). Same "never touch the system for the user" contract as
+	# the immutable branch below, but with NixOS-flavored instructions.
+	if [ "$distro_id" = "nixos" ]; then
+		local essential=()
+		for tool in "${missing_tools[@]}"; do
+			[ "$tool" = "notify-send" ] || essential+=("$tool")
+		done
+		if [ "${#essential[@]}" -eq 0 ]; then
+			log_warn "$(L "notify-send not found; in-Steam popups will be disabled (everything else works)." \
+			             "notify-send não encontrado; os popups dentro da Steam ficarão desativados (o resto funciona).")"
+			log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+			return 0
+		fi
+		local nix_attrs="" flake_attrs="" t
+		for t in "${essential[@]}"; do
+			nix_attrs="$nix_attrs nixpkgs#$(nixos_pkg_for "$t")"
+			flake_attrs="$flake_attrs $(nixos_pkg_for "$t")"
+		done
+		echo ""
+		log_error "$(L "Missing required tools: ${essential[*]}" \
+		              "Ferramentas necessárias ausentes: ${essential[*]}")"
+		echo ""
+		echo -e "  $(L "Add them to environment.systemPackages in configuration.nix and rebuild:" \
+		               "Adicione-as a environment.systemPackages no configuration.nix e reconstrua:")"
+		echo -e "       ${GREEN}${flake_attrs# }${NC}"
+		echo -e "  $(L "...or install them for this user only, right now:" \
+		               "...ou instale-as só para este usuário, agora mesmo:")"
+		echo -e "       ${GREEN}nix profile install${nix_attrs}${NC}"
+		echo ""
+		fail "$(L "Aborted. Install the tools above, then re-run this installer." \
+		          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
 	fi
 
 	# Immutable / atomic OS: never invoke the package manager (rpm-ostree needs
@@ -1278,7 +1390,7 @@ PY
 # We just download, extract, and run setup.sh install — which also kills Steam.
 # ============================================================================
 install_slsteam_moon() {
-	local url tmp zip extract_root setup rc
+	local url tmp zip extract_root setup setup_path rc
 
 	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
 	             "Buscando a última release do slsteam-moon (Lumen)")"
@@ -1312,8 +1424,11 @@ install_slsteam_moon() {
 	log_info "$(L "Running slsteam-moon setup (this will stop Steam)" \
 	             "Rodando o setup do slsteam-moon (isto vai parar a Steam)")"
 
-	# setup.sh resolves its own paths relative to the extracted dir.
-	( cd "$extract_root" && bash "$setup" install ) \
+	# setup.sh resolves its own paths relative to the extracted dir. Give it a
+	# PATH without an older SLSsteam wrapper: setup recreates that wrapper
+	# before detecting Steam, otherwise a second install can select itself.
+	setup_path="$(path_without_slsteam_wrapper "${PATH:-}")"
+	( cd "$extract_root" && PATH="$setup_path" bash "$setup" install ) \
 		|| fail "$(L "slsteam-moon setup failed" "Falha no setup do slsteam-moon")"
 
 	log_success "$(L "slsteam-moon installed" "slsteam-moon instalado")"
@@ -1351,10 +1466,33 @@ install_lumen() {
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
 	chmod +x "$dest/lumen" 2>/dev/null || true
-	if ! file "$dest/lumen" 2>/dev/null | grep -q "ELF 64-bit"; then
+	# ELF64 magic: bytes 0-3 = 7f 45 4c 46, byte 4 (EI_CLASS) = 02. Checked via
+	# `od` (coreutils, always present) instead of `file`, which isn't installed
+	# by default on every distro (NixOS notably ships no `file` by default).
+	if [ "$(od -An -tx1 -N5 "$dest/lumen" 2>/dev/null | tr -d ' \n')" != "7f454c4602" ]; then
 		fail "$(L "Lumen binary is not a valid ELF executable" \
 		         "O binário do Lumen não é um ELF válido")"
 	fi
+
+	# NixOS has no FHS /lib64/ld-linux..., /usr/lib etc., so this prebuilt ELF
+	# can't load its dynamic linker directly. Move it aside and drop a
+	# steam-run shim in its place: every caller (the slsteam-moon wrapper
+	# execs "$dest/lumen" by convention) keeps working unmodified, now inside
+	# an FHS sandbox. steam-run ships automatically with programs.steam.enable.
+	if [ "$(get_distro_id)" = "nixos" ]; then
+		command -v steam-run >/dev/null 2>&1 || fail "$(L \
+			"steam-run not found. It ships automatically with programs.steam.enable on NixOS — make sure Steam is enabled and re-run this installer." \
+			"steam-run não encontrado. Ele vem automaticamente com programs.steam.enable no NixOS — confira se a Steam está habilitada e rode o instalador de novo.")"
+		mv -f "$dest/lumen" "$dest/lumen.bin"
+		cat >"$dest/lumen" <<-'WRAP'
+			#!/usr/bin/env bash
+			exec steam-run "$(dirname "$0")/lumen.bin" "$@"
+		WRAP
+		chmod +x "$dest/lumen"
+		log_info "$(L "Wrapped Lumen with steam-run for NixOS" \
+		             "Lumen encapsulado com steam-run para o NixOS")"
+	fi
+
 	log_success "$(L "Lumen installed" "Lumen instalado")"
 }
 
@@ -1699,13 +1837,14 @@ install_cloudredirect_so() {
 	fi
 
 	# The Steam client is 32-bit, so the hook must be a 32-bit ELF or it will be
-	# silently ignored by the loader. Verify before deploying.
-	if command -v file >/dev/null 2>&1; then
-		if ! file -b "$so" | grep -q "ELF 32-bit"; then
-			log_warn "$(L "Downloaded cloud_redirect.so is not 32-bit; skipping cloud saves." \
-			             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
-			return 1
-		fi
+	# silently ignored by the loader. Verify before deploying. ELF32 magic:
+	# bytes 0-3 = 7f 45 4c 46, byte 4 (EI_CLASS) = 01. Checked via `od`
+	# (coreutils, always present) instead of `file`, which isn't installed by
+	# default on every distro (NixOS notably ships no `file` by default).
+	if [ "$(od -An -tx1 -N5 "$so" 2>/dev/null | tr -d ' \n')" != "7f454c4601" ]; then
+		log_warn "$(L "Downloaded cloud_redirect.so is not 32-bit; skipping cloud saves." \
+		             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
+		return 1
 	fi
 
 	mkdir -p "$CR_DIR"
@@ -2132,6 +2271,7 @@ main() {
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
 	check_not_root
 	check_arch
+	install_dependencies
 	check_internet
 	check_steam_native
 	check_steam_bootstrapped
@@ -2147,9 +2287,6 @@ main() {
 
 	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
 	cleanup_previous_install
-
-	print_section "$(L "Dependencies" "Dependências")"
-	install_dependencies
 
 	print_section "$(L "Installing slsteam-moon" "Instalando slsteam-moon")"
 	install_slsteam_moon
