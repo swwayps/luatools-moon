@@ -54,8 +54,8 @@ check("A3 passes only the header path to downloader",
 check("A3b fix downloads get a stall guard that tolerates a slow link",
   ryuu_worker:find("SPEED_LIMIT=1024", 1, true) ~= nil
     and ryuu_worker:find("SPEED_TIME=45", 1, true) ~= nil)
-check("A3c fix downloads keep no overall time limit",
-  ryuu_worker:find("MAX_TIME=0", 1, true) ~= nil)
+check("A3c fix downloads have a generous but finite overall limit",
+  ryuu_worker:find("MAX_TIME=1800", 1, true) ~= nil)
 
 check("A4 never exposes the key on the process command line",
   ryuu_worker and ryuu_worker:find("test-session", 1, true) == nil)
@@ -66,6 +66,14 @@ local online = fixes.apply_game_fix(285900,
 check("A5 non-Ryuu apply starts without auth", online.success == true)
 check("A6 non-Ryuu command has no Ryuu header file",
   #commands == before + 2 and commands[#commands]:find("headers.txt", 1, true) == nil)
+
+local hostile = "https://files.test/fix.zip';touch /tmp/lt-fix-injected;#"
+fixes.apply_game_fix(285901, hostile, "/games/Gang';touch /tmp/lt-path-injected;#",
+  "Online", "Gang Beasts")
+local hostile_worker = commands[#commands] or ""
+check("A6b user-controlled fix arguments are single-quoted shell data",
+  hostile_worker:find("'https://files.test/fix.zip'\\'';touch /tmp/lt-fix-injected;#'", 1, true) ~= nil
+    and hostile_worker:find("'/games/Gang'\\'';touch /tmp/lt-path-injected;#'", 1, true) ~= nil)
 
 package.loaded.ryuu_auth.get_header_line = function() return nil end
 package.loaded.ryuu_auth = package.loaded.ryuu_auth

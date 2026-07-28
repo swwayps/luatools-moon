@@ -9,6 +9,10 @@ local ryuu_auth = require("ryuu_auth")
 
 local fixes = {}
 
+local function shell_quote(value)
+    return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+end
+
 function fixes.check_for_fixes(appid)
     if type(appid) == "string" then appid = tonumber(appid) end
     local result = {
@@ -71,7 +75,7 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
         if m_utils.write_file(header_file, auth_header) == false then
             return { success = false, error = "Could not prepare Ryuu authentication." }
         end
-        m_utils.exec('chmod 600 "' .. header_file .. '"')
+        m_utils.exec("chmod 600 -- " .. shell_quote(header_file))
     end
 
     logger.log("LuaTools: Applying fix to " .. tostring(install_path))
@@ -87,15 +91,16 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
         m_utils.exec(cmd)
     else
         local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "downloader.sh")
-        m_utils.exec('chmod +x "' .. sh_path .. '"')
+        m_utils.exec("chmod +x -- " .. shell_quote(sh_path))
 -- SPEED_LIMIT/SPEED_TIME: the shared downloader defaults (20 KB/s over 5s) are
         -- tuned for small manifest fetches and kill a fix archive on a slow link
         -- (measured: the same 11 MB file took 2s on one connection and had not
         -- finished after 5 minutes on another). Here only a transfer that is
         -- effectively dead should abort, so the floor is 1 KB/s over 45s.
         local cmd = string.format(
-            'nohup env MAX_TIME=0 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" "" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &',
-            sh_path, download_url, dest_zip, install_path, state_file, header_file
+            "nohup env MAX_TIME=1800 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash %s %s %s %s %s '' %s >> \"${HOME:-/tmp}/.lumen.log\" 2>&1 &",
+            shell_quote(sh_path), shell_quote(download_url), shell_quote(dest_zip),
+            shell_quote(install_path), shell_quote(state_file), shell_quote(header_file)
         )
         m_utils.exec(cmd)
     end

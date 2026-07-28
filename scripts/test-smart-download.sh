@@ -44,6 +44,21 @@ make_zip "$TMP/fast.zip" "1134711_9001.manifest"
 make_zip "$TMP/other.zip" "1134712_9002.manifest"
 make_zip "$TMP/othercovered.zip" "1134711_9001.manifest"
 make_invalid_zip "$TMP/invalid.zip" "1134711_9001.manifest"
+KEYLESS_DIR="$(mktemp -d "$TMP/keyless.XXXX")"
+printf 'addappid(1134710)\n' > "$KEYLESS_DIR/1134710.lua"
+( cd "$KEYLESS_DIR" && zip -qr "$TMP/keyless.zip" . )
+rm -rf "$KEYLESS_DIR"
+printf 'ORIGINAL\n' > "$TMP/symlink-victim"
+python3 - "$TMP/symlink.zip" "$TMP/symlink-victim" <<'PY'
+import stat, sys, zipfile
+archive, victim = sys.argv[1:]
+with zipfile.ZipFile(archive, "w") as z:
+    z.writestr("1134710.lua", "addappid(1134710)\naddappid(1134710,1,\"" + "a" * 64 + "\")\n")
+    entry = zipfile.ZipInfo(".source-name")
+    entry.create_system = 3
+    entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+    z.writestr(entry, victim)
+PY
 LARGE_DIR="$(mktemp -d "$TMP/large.XXXX")"
 printf 'addappid(1134710)\n' > "$LARGE_DIR/1134710.lua"
 python3 - "$LARGE_DIR/payload.bin" <<'PY'
@@ -120,6 +135,28 @@ write_candidate "$C0B" 0 "Late first byte" "http://127.0.0.1:$PORT/late.zip" 200
 COLLECTION_DEADLINE=0.2 SPEED_TIME=2 "$SCRIPT" 1134710 "$D0B/state.json" "$D0B" "$C0B" "$TMP/no-coverage" >/dev/null 2>&1
 check "first source can start after fast-path deadline" '[[ -f "$D0B/extracted_1134710/source_0000/1134710.lua" ]]'
 
+# A package is not a usable fallback merely because it has the right Lua
+# filename. A fast keyless response must not cancel a delayed source that has
+# a real depot key.
+D0D="$TMP/d0d"; mkdir -p "$D0D"; C0D="$TMP/c0d.bin"; : > "$C0D"
+write_candidate "$C0D" 0 "Fast keyless" "http://127.0.0.1:$PORT/keyless.zip" 200
+write_candidate "$C0D" 1 "Delayed usable" "http://127.0.0.1:$PORT/late.zip" 200
+COLLECTION_DEADLINE=0.2 SPEED_TIME=2 "$SCRIPT" 1134710 "$D0D/state.json" "$D0D" "$C0D" "$TMP/no-coverage" >/dev/null 2>&1
+check "keyless package cannot cancel delayed usable source" \
+  '[[ -f "$D0D/extracted_1134710/source_0001/1134710.lua" ]]'
+
+# Reserved metadata must never be supplied as a link by the archive. The old
+# extractor followed .source-name when writing coordinator metadata.
+D0E="$TMP/d0e"; mkdir -p "$D0E"; C0E="$TMP/c0e.bin"; : > "$C0E"
+write_candidate "$C0E" 0 "Linked metadata" "http://127.0.0.1:$PORT/symlink.zip" 200
+if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0E/state.json" "$D0E" "$C0E" "$TMP/no-coverage" >/dev/null 2>&1; then
+  SYMLINK_RC=0
+else
+  SYMLINK_RC=$?
+fi
+check "archive metadata symlink is rejected" \
+  '[[ "$SYMLINK_RC" -ne 0 && "$(cat "$TMP/symlink-victim")" == "ORIGINAL" ]]'
+
 # With no successful fallback, a truly stalled source is still bounded by its
 # own inactivity guard rather than by the shared fast-path deadline.
 D0C="$TMP/d0c"; mkdir -p "$D0C"; C0C="$TMP/c0c.bin"; : > "$C0C"
@@ -135,6 +172,32 @@ check "fully stalled source still fails" '[[ "$STALLED_RC" -ne 0 && "$(state_fie
 # curl's 1-second inactivity guard should finish well before the fixture's
 # 10-second server stall, with room for scheduling delays on CI runners.
 check "stalled source uses bounded inactivity timeout" '[[ "$ELAPSED" -ge 800 && "$ELAPSED" -lt 8000 ]]'
+
+# A real 404 means the configured source does not have the app; it is not a
+# connection failure or an invalid archive. Keep this machine-readable so the
+# frontend can explain the right action.
+D0F="$TMP/d0f"; mkdir -p "$D0F"; C0F="$TMP/c0f.bin"; : > "$C0F"
+write_candidate "$C0F" 0 "Missing A" "http://127.0.0.1:$PORT/missing-a.zip" 200
+write_candidate "$C0F" 1 "Missing B" "http://127.0.0.1:$PORT/missing-b.zip" 200
+"$SCRIPT" 1134710 "$D0F/state.json" "$D0F" "$C0F" "$TMP/no-coverage" >/dev/null 2>&1 || true
+check "all-404 response is classified as not found" \
+  '[[ "$(state_field "$D0F/state.json" errorCode)" == "not_found" ]]'
+check "all-404 message does not blame the connection" \
+  '[[ "$(state_field "$D0F/state.json" error)" == *"not have this app"* ]]'
+
+# Cancellation must stop an active transfer rather than only closing the UI.
+D0G="$TMP/d0g"; mkdir -p "$D0G"; C0G="$TMP/c0g.bin"; : > "$C0G"
+write_candidate "$C0G" 0 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
+START=$(date +%s%3N)
+SPEED_TIME=9 "$SCRIPT" 1134710 "$D0G/state.json" "$D0G" "$C0G" "$TMP/no-coverage" "$D0G/stop" >/dev/null 2>&1 &
+CANCEL_PID=$!
+sleep 0.2
+printf cancel > "$D0G/stop"
+wait "$CANCEL_PID" || true
+ELAPSED=$(( $(date +%s%3N) - START ))
+check "stop marker produces terminal cancelled state" \
+  '[[ "$(state_field "$D0G/state.json" status)" == "cancelled" ]]'
+check "cancel interrupts active transfer promptly" '[[ "$ELAPSED" -lt 3000 ]]'
 
 # All healthy APIs, including a hostile custom display name, must contribute.
 D1="$TMP/d1"; mkdir -p "$D1"; C1="$TMP/c1.bin"; : > "$C1"
@@ -203,6 +266,21 @@ ELAPSED=$(( $(date +%s%3N) - START ))
 # independently proves that the successful peer survives that early close.
 check "global deadline bounds unhealthy source" '[[ "$ELAPSED" -lt 8000 ]]'
 check "successful peer survives deadline" '[[ -f "$D4/extracted_1134710/source_0000/1134710.lua" ]]'
+
+# Losing a duplicate lock must not erase the active worker's extraction.
+D4A="$TMP/d4a"; mkdir -p "$D4A"; C4A="$TMP/c4a.bin"; : > "$C4A"
+write_candidate "$C4A" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
+write_candidate "$C4A" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
+COLLECTION_DEADLINE=1 SPEED_TIME=4 "$SCRIPT" 1134710 "$D4A/state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 &
+FIRST_PID=$!
+for _ in $(seq 1 100); do
+  [[ -f "$D4A/extracted_1134710/source_0000/1134710.lua" ]] && break
+  sleep 0.02
+done
+"$SCRIPT" 1134710 "$D4A/duplicate-state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 || true
+wait "$FIRST_PID"
+check "duplicate worker cannot erase active extraction" \
+  '[[ -f "$D4A/extracted_1134710/source_0000/1134710.lua" ]]'
 
 # Atomic state snapshots must remain valid JSON, progress must never drop,
 # and known response sizes must expose real intermediate percentages.

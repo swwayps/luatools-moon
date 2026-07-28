@@ -1,8 +1,8 @@
 #!/bin/bash
 # downloader.sh — Linux download/extract worker for slsteammoon.
 #
-# Used by the MANUAL source-selection path (fast download off). The fast
-# path uses smart_download.sh instead.
+# Used by the fix-application path. Game-data downloads, including manual
+# source selection, use smart_download.sh and its validated merge pipeline.
 #
 # Overrides upstream's backend/scripts/downloader.sh. Upstream's version
 # works on Windows but, on Linux, the plugin spawns this from inside the
@@ -50,9 +50,9 @@ slog() { printf '%s INFO downloader[%s pid %s]: %s\n' \
 write_state() {
   # write_state <status> [bytesRead] [totalBytes]
   [ -n "$STATE_FILE" ] || return 0
-  local status="$1" br="${2:-0}" tb="${3:-0}"
+  local status="$1" br="${2:-0}" tb="${3:-0}" tmp="${STATE_FILE}.tmp.$$"
   printf '{"status": "%s", "bytesRead": %s, "totalBytes": %s}\n' \
-    "$status" "$br" "$tb" > "$STATE_FILE"
+    "$status" "$br" "$tb" > "$tmp" && mv -f "$tmp" "$STATE_FILE"
 }
 
 # json_escape <str> : escape backslash + double-quote so a reason with quotes
@@ -65,15 +65,25 @@ write_failed() {
   local reason="$1" error_code="${2:-}"
   slog "FAILED: $reason"
   [ -n "$STATE_FILE" ] || return 0
+  local tmp="${STATE_FILE}.tmp.$$"
   if [ -n "$error_code" ]; then
     printf '{"status": "failed", "error": "%s", "errorCode": "%s"}\n' \
-      "$(json_escape "$reason")" "$(json_escape "$error_code")" > "$STATE_FILE"
+      "$(json_escape "$reason")" "$(json_escape "$error_code")" > "$tmp"
   else
-    printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$reason")" > "$STATE_FILE"
+    printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$reason")" > "$tmp"
   fi
+  mv -f "$tmp" "$STATE_FILE"
 }
 
-slog "worker start: url=$URL dest=$DEST_PATH extract=$EXTRACT_DIR"
+if command -v flock >/dev/null 2>&1 && [ -n "$STATE_FILE" ]; then
+  exec 9>"${STATE_FILE}.lock"
+  if ! flock -n 9; then
+    slog "worker already active for this operation"
+    exit 0
+  fi
+fi
+
+slog "worker start: dest=$DEST_PATH extract=$EXTRACT_DIR"
 write_state "downloading" 0 0
 
 # Authenticated sources pass a chmod-600 curl header file. Keep credentials out
@@ -149,17 +159,64 @@ if [ -n "$EXTRACT_DIR" ]; then
   # only when 7zz is absent (zip-only).
   SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   SEVENZ="$SCRIPT_DIR/../bin/7zz"
-  if [ -x "$SEVENZ" ]; then
-    "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$DEST_PATH" >/dev/null 2>&1
+  MAX_ARCHIVE_ENTRIES="${MAX_ARCHIVE_ENTRIES:-20000}"
+  MAX_EXPANDED_BYTES="${MAX_EXPANDED_BYTES:-4294967296}"
+  STAGE_DIR=""
+  EXTRACT_WORK="$EXTRACT_DIR"
+  cleanup_stage() { [ -z "$STAGE_DIR" ] || rm -rf "$STAGE_DIR"; }
+  trap cleanup_stage EXIT
+
+  archive_is_safe() {
+    local archive="$1" paths count expanded listing
+    if [ -x "$SEVENZ" ]; then
+      listing="$("$SEVENZ" l -slt "$archive" 2>/dev/null)" || return 1
+      paths="$(printf '%s\n' "$listing" | sed -n 's/^Path = //p' | tail -n +2)"
+      count="$(printf '%s\n' "$paths" | sed '/^$/d' | wc -l)"
+      expanded="$(printf '%s\n' "$listing" | awk -F' = ' '/^Size = [0-9]+$/ {s += $2} END {printf "%.0f", s}')"
+    else
+      paths="$(unzip -Z1 "$archive" 2>/dev/null)" || return 1
+      count="$(printf '%s\n' "$paths" | sed '/^$/d' | wc -l)"
+      expanded="$(unzip -Z -t "$archive" 2>/dev/null \
+        | awk '/bytes uncompressed/ { for (i=1;i<=NF;i++) if ($i=="bytes") {print $(i-1); exit} }')"
+    fi
+    [ "$count" -le "$MAX_ARCHIVE_ENTRIES" ] || return 1
+    [[ "$expanded" =~ ^[0-9]+$ ]] && [ "$expanded" -le "$MAX_EXPANDED_BYTES" ] || return 1
+    if printf '%s\n' "$paths" | grep -Eq '(^/|^[A-Za-z]:|(^|[/\\])\.\.([/\\]|$))'; then return 1; fi
+    return 0
+  }
+
+  if ! archive_is_safe "$DEST_PATH"; then
+    slog "archive preflight rejected"
+    write_failed "The downloaded archive is unsafe, malformed, or exceeds the extraction limits." "unsafe_archive"
+    exit 1
+  fi
+
+  if [ "${EXTRACT_NESTED:-0}" = "1" ]; then
+    STAGE_DIR="$(mktemp -d "${DEST_PATH}.stage.XXXXXX")" || {
+      write_failed "A private staging directory could not be created. Check free space and permissions."
+      exit 1
+    }
+    EXTRACT_WORK="$STAGE_DIR"
   else
-    unzip -o -q "$DEST_PATH" -d "$EXTRACT_DIR"
+    mkdir -p "$EXTRACT_WORK"
+  fi
+  if [ -x "$SEVENZ" ]; then
+    "$SEVENZ" x -bd -y -o"$EXTRACT_WORK" "$DEST_PATH" >/dev/null 2>&1
+  else
+    unzip -o -q "$DEST_PATH" -d "$EXTRACT_WORK"
   fi
   if [ $? -ne 0 ]; then
     slog "extract failed"
     write_failed "The downloaded file could not be opened — it may be corrupt or incomplete. Try another source."
     exit 1
   fi
-  slog "extract ok -> $EXTRACT_DIR"
+  unsafe="$(find "$EXTRACT_WORK" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit 2>/dev/null)"
+  if [ -n "$unsafe" ]; then
+    slog "extracted tree contains a link or special file"
+    write_failed "The downloaded archive contains an unsafe file type." "unsafe_archive"
+    exit 1
+  fi
+  slog "extract ok -> private staging"
 
   # Nested-archive pass (fix-apply path only; EXTRACT_NESTED=1). Some fixes
   # ship the actual crack as a .rar / multi-part .rar INSIDE the zip (the
@@ -176,7 +233,7 @@ if [ -n "$EXTRACT_DIR" ]; then
     # (=n,b) on exactly these so Proton loads the fix DLLs instead of its
     # builtins. Listing the archive(s) (not a dir diff) is reliable even when a
     # crack DLL overwrites a same-named game DLL. Best-effort.
-    MANIFEST="$EXTRACT_DIR/.slssteam_fix_dlls"
+    MANIFEST="$EXTRACT_WORK/.slssteam_fix_dlls"
     DLL_ACC="$(mktemp 2>/dev/null)" || DLL_ACC=""
     list_fix_dlls() {  # $1 = archive -> append shipped .dll basenames to $DLL_ACC
       [ -n "$DLL_ACC" ] || return 0
@@ -194,7 +251,7 @@ if [ -n "$EXTRACT_DIR" ]; then
     # this to redirect Steam's Play button at the launcher via a Proton launch
     # option. Listing the archive (not a dir scan) is what lets us tell a
     # crack-shipped launcher from the game's own pre-existing launcher.exe.
-    LAUNCHER_MANIFEST="$EXTRACT_DIR/.slssteam_fix_launchers"
+    LAUNCHER_MANIFEST="$EXTRACT_WORK/.slssteam_fix_launchers"
     LAUNCHER_ACC="$(mktemp 2>/dev/null)" || LAUNCHER_ACC=""
     list_fix_launchers() {  # $1 = archive -> append launcher exe relpaths to $LAUNCHER_ACC
       [ -n "$LAUNCHER_ACC" ] || return 0
@@ -229,14 +286,17 @@ if [ -n "$EXTRACT_DIR" ]; then
       if ! is_secondary "$arc"; then
         list_fix_dlls "$arc"   # capture nested-archive DLLs BEFORE deletion
         list_fix_launchers "$arc"  # capture nested-archive launcher exes too
-        "$SEVENZ" x -bd -y -o"$EXTRACT_DIR" "$arc" >/dev/null 2>&1 || true
+        if ! archive_is_safe "$arc" \
+            || ! "$SEVENZ" x -bd -y -o"$EXTRACT_WORK" "$arc" >/dev/null 2>&1; then
+          slog "nested archive rejected or unreadable: $(basename "$arc")"
+        fi
       fi
-    done < <(find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
+    done < <(find "$EXTRACT_WORK" -type f \( -iname '*.rar' -o -iname '*.zip' \
               -o -iname '*.7z' -o -iname '*.r[0-9][0-9]' -o -iname '*.z[0-9][0-9]' \) -print0 2>/dev/null)
 
     if [ "$found_archive" = "1" ]; then
       # Remove every archive volume now that their contents are extracted.
-      find "$EXTRACT_DIR" -type f \( -iname '*.rar' -o -iname '*.zip' \
+      find "$EXTRACT_WORK" -type f \( -iname '*.rar' -o -iname '*.zip' \
         -o -iname '*.7z' -o -iname '*.r[0-9][0-9]' -o -iname '*.z[0-9][0-9]' \) \
         -delete 2>/dev/null || true
     fi
@@ -253,6 +313,72 @@ if [ -n "$EXTRACT_DIR" ]; then
       sort -u -f "$LAUNCHER_ACC" > "$LAUNCHER_MANIFEST" 2>/dev/null || true
     fi
     [ -n "$LAUNCHER_ACC" ] && rm -f "$LAUNCHER_ACC"
+  fi
+
+  # Fixes are assembled entirely in STAGE_DIR. Only now overlay that tree onto
+  # the game. Existing files are backed up and restored if any copy fails;
+  # archives that were already in the game directory are never scanned.
+  if [ -n "$STAGE_DIR" ]; then
+    BACKUP_DIR="$(mktemp -d "${DEST_PATH}.backup.XXXXXX")" || {
+      write_failed "A rollback directory could not be created. Check free space and permissions."
+      exit 1
+    }
+    JOURNAL="$BACKUP_DIR/journal"
+    : > "$JOURNAL"
+    apply_failed=0
+
+    while IFS= read -r -d '' source_dir; do
+      rel="${source_dir#"$STAGE_DIR"/}"
+      [ "$source_dir" = "$STAGE_DIR" ] && continue
+      target_dir="$EXTRACT_DIR/$rel"
+      if [ -L "$target_dir" ]; then apply_failed=1; break; fi
+      if [ -e "$target_dir" ] && [ ! -d "$target_dir" ]; then apply_failed=1; break; fi
+      if [ ! -d "$target_dir" ]; then
+        mkdir -p "$target_dir" || { apply_failed=1; break; }
+        printf 'D\t%s\n' "$rel" >> "$JOURNAL"
+      fi
+    done < <(find "$STAGE_DIR" -type d -print0)
+
+    if [ "$apply_failed" -eq 0 ]; then
+      while IFS= read -r -d '' source_file; do
+        rel="${source_file#"$STAGE_DIR"/}"
+        target_file="$EXTRACT_DIR/$rel"
+        backup_file="$BACKUP_DIR/files/$rel"
+        if [ -d "$target_file" ]; then apply_failed=1; break; fi
+        mkdir -p "$(dirname "$target_file")" "$(dirname "$backup_file")" \
+          || { apply_failed=1; break; }
+        if [ -e "$target_file" ] || [ -L "$target_file" ]; then
+          cp -a "$target_file" "$backup_file" || { apply_failed=1; break; }
+          printf 'E\t%s\n' "$rel" >> "$JOURNAL"
+        else
+          printf 'N\t%s\n' "$rel" >> "$JOURNAL"
+        fi
+        temp_file="${target_file}.tmp.luatools.$$"
+        rm -f "$temp_file"
+        cp -a "$source_file" "$temp_file" && mv -f "$temp_file" "$target_file" \
+          || { rm -f "$temp_file"; apply_failed=1; break; }
+      done < <(find "$STAGE_DIR" -type f -print0)
+    fi
+
+    if [ "$apply_failed" -ne 0 ]; then
+      while IFS=$'\t' read -r action rel; do
+        target="$EXTRACT_DIR/$rel"
+        if [ "$action" = "E" ]; then
+          rm -rf "$target"
+          mkdir -p "$(dirname "$target")"
+          cp -a "$BACKUP_DIR/files/$rel" "$target" 2>/dev/null || true
+        elif [ "$action" = "N" ]; then
+          rm -rf "$target"
+        fi
+      done < "$JOURNAL"
+      tac "$JOURNAL" 2>/dev/null | while IFS=$'\t' read -r action rel; do
+        [ "$action" != "D" ] || rmdir "$EXTRACT_DIR/$rel" 2>/dev/null || true
+      done
+      rm -rf "$BACKUP_DIR"
+      write_failed "The fix was extracted safely, but could not be applied. Existing game files were restored." "apply_failed"
+      exit 1
+    fi
+    rm -rf "$BACKUP_DIR"
   fi
 
   slog "extracted -> handing off to finalize"

@@ -10,7 +10,10 @@ umask 077
 : "${SPEED_LIMIT:=1}"
 : "${SPEED_TIME:=120}"
 : "${ACTIVE_PROGRESS_WINDOW:=30}"
-: "${MAX_TRANSFER_TIME:=0}"
+: "${MAX_TRANSFER_TIME:=600}"
+: "${ENRICHMENT_MAX:=8}"
+: "${MAX_ARCHIVE_ENTRIES:=10000}"
+: "${MAX_EXPANDED_BYTES:=1073741824}"
 
 mono_pct() {
   local prev="${1:-0}" raw="${2:-0}"
@@ -25,29 +28,35 @@ STATE_FILE="${2:?state_file required}"
 DEST_ROOT="${3:?dest_root required}"
 CANDIDATES_FILE="${4:?candidates_file required}"
 COVERAGE_FILE="${5:-}"
+STOP_FILE="${6:-}"
 WORK="$DEST_ROOT/collect_${APPID}.$$"
 EXTRACT_DIR="$DEST_ROOT/extracted_${APPID}"
 LOCK="$DEST_ROOT/${APPID}.lock"
-mkdir -p "$WORK"
-rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
-trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" "$COVERAGE_FILE" 2>/dev/null' EXIT
 
 slog() { printf '%s INFO smart_download[%s pid %s]: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APPID" "$$" "$*"; }
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g'; }
 write_state() {
-  local status="$1" current="$2" bytes="$3" total="$4" error="${5:-}" tmp="${STATE_FILE}.tmp.$$"
-  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":{},"error":"%s"}\n' \
-    "$status" "$current" "$bytes" "$total" "$error" > "$tmp"
+  local status="$1" current="$2" bytes="$3" total="$4" error="${5:-}"
+  local error_code="${6:-}" error_phase="${7:-}" tmp="${STATE_FILE}.tmp.$$"
+  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":{},"error":"%s","errorCode":"%s","errorPhase":"%s"}\n' \
+    "$status" "$(json_escape "$current")" "$bytes" "$total" \
+    "$(json_escape "$error")" "$(json_escape "$error_code")" \
+    "$(json_escape "$error_phase")" > "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
 now_ms() { date +%s%3N; }
+mkdir -p "$DEST_ROOT"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK"
   if ! flock -n 9; then slog "worker already active"; exit 0; fi
 fi
+mkdir -p "$WORK"
+rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
+trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" "$COVERAGE_FILE" 2>/dev/null' EXIT
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
 
 # NUL records: source-index, display-name, URL, accepted HTTP status.
-declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE
+declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE C_REASON
 n=0
 exec 3< "$CANDIDATES_FILE"
 while IFS= read -r -d '' idx <&3; do
@@ -58,29 +67,41 @@ while IFS= read -r -d '' idx <&3; do
   C_INDEX[n]="$idx"; C_NAME[n]="$name"; C_URL[n]="$url"; C_CODE[n]="$code"
   C_ZIP[n]="$WORK/source_${n}.zip"; C_HEAD[n]="$WORK/source_${n}.headers"
   C_PIPE[n]="$WORK/source_${n}.stream"; C_TOTAL_FILE[n]="$WORK/source_${n}.total"
-  C_TOTAL[n]=""; C_STATE[n]="pending"
+  C_TOTAL[n]=""; C_STATE[n]="pending"; C_REASON[n]=""
   n=$((n + 1))
 done
 exec 3<&-
 if [[ "$n" -eq 0 ]]; then write_state failed "" 0 0 "No usable API sources"; exit 1; fi
 
-declare -A EXPECTED
-expected_count=0
+declare -A EXPECTED BASE_DEPOTS
+expected_count=0; base_depot_count=0
 if [[ -n "$COVERAGE_FILE" && -f "$COVERAGE_FILE" ]]; then
-  while IFS=$'\t' read -r depot gid; do
+  while IFS=$'\t' read -r depot gid kind relevant; do
     [[ "$depot" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || continue
     if [[ -z "${EXPECTED["${depot}_${gid}.manifest"]+set}" ]]; then
       EXPECTED["${depot}_${gid}.manifest"]=1
       expected_count=$((expected_count + 1))
     fi
+    if [[ "$kind" == "base" && "$relevant" == "1" \
+        && -z "${BASE_DEPOTS[$depot]+set}" ]]; then
+      BASE_DEPOTS[$depot]=1
+      base_depot_count=$((base_depot_count + 1))
+    fi
   done < "$COVERAGE_FILE"
 fi
 
 zip_is_safe_and_usable() {
-  local zip="$1" entries count
+  local zip="$1" entries count expanded
   entries="$(unzip -Z1 "$zip" 2>/dev/null)" || return 1
   [[ -n "$entries" ]] || return 1
-  if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"$entries"; then return 1; fi
+  if grep -Eq '(^/|^[A-Za-z]:|(^|[/\\])\.\.([/\\]|$)|\\)' <<<"$entries"; then return 1; fi
+  if grep -Eq '(^|/)\.source-(name|index|priority)$' <<<"$entries"; then return 1; fi
+  if unzip -Z -l "$zip" 2>/dev/null | grep -Eq '^[lhbcps]'; then return 1; fi
+  count="$(printf '%s\n' "$entries" | wc -l)"
+  [[ "$count" -le "$MAX_ARCHIVE_ENTRIES" ]] || return 1
+  expanded="$(unzip -Z -t "$zip" 2>/dev/null \
+    | awk '/bytes uncompressed/ { for (i=1;i<=NF;i++) if ($i=="bytes") {print $(i-1); exit} }')"
+  [[ "$expanded" =~ ^[0-9]+$ && "$expanded" -le "$MAX_EXPANDED_BYTES" ]] || return 1
   count="$(grep -Ec "(^|/)${APPID}\\.lua$" <<<"$entries")"
   [[ "$count" -eq 1 ]]
 }
@@ -110,13 +131,42 @@ coverage_complete() {
 }
 
 extract_source() {
-  local i="$1" dir
+  local i="$1" dir unsafe
   printf -v dir '%s/source_%04d' "$EXTRACT_DIR" "${C_INDEX[i]}"
   rm -rf "$dir"; mkdir -p "$dir"
   unzip -q "${C_ZIP[i]}" -d "$dir" || { rm -rf "$dir"; return 1; }
+  unsafe="$(find "$dir" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit 2>/dev/null)"
+  [[ -z "$unsafe" ]] || { rm -rf "$dir"; return 1; }
   printf '%s' "${C_NAME[i]}" > "$dir/.source-name"
   printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-index"
   printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-priority"
+}
+
+aggregate_is_usable() {
+  shopt -s nullglob globstar
+  local files=("$EXTRACT_DIR"/source_*/**/"${APPID}.lua") file cleaned depot
+  [[ "${#files[@]}" -gt 0 ]] || return 1
+  local has_app=0 has_key=0
+  for file in "${files[@]}"; do
+    cleaned="$(sed 's/--.*$//' "$file" 2>/dev/null)"
+    if grep -Eq "^[[:space:]]*addappid[[:space:]]*\\([[:space:]]*${APPID}([[:space:]]*\\)|[[:space:]]*,)" \
+        <<<"$cleaned"; then
+      has_app=1
+    fi
+    if [[ "$base_depot_count" -gt 0 ]]; then
+      for depot in "${!BASE_DEPOTS[@]}"; do
+        if grep -Eq "^[[:space:]]*addappid[[:space:]]*\\([[:space:]]*${depot}[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,[[:space:]]*['\"][0-9A-Fa-f]{64}['\"]" \
+            <<<"$cleaned"; then
+          has_key=1
+          break
+        fi
+      done
+    elif grep -Eq "^[[:space:]]*addappid[[:space:]]*\\([[:space:]]*[0-9]+[[:space:]]*,[[:space:]]*[0-9]+[[:space:]]*,[[:space:]]*['\"][0-9A-Fa-f]{64}['\"]" \
+        <<<"$cleaned"; then
+      has_key=1
+    fi
+  done
+  [[ "$has_app" -eq 1 && "$has_key" -eq 1 ]]
 }
 
 capture_curl_headers() {
@@ -163,15 +213,21 @@ for ((i=0; i<n; i++)); do
 done
 
 start_ms="$(now_ms)"
-deadline_ms="$(awk -v s="$start_ms" -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", s+d*1000}')"
+quiet_ms="$(awk -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", d*1000}')"
+enrichment_max_ms="$(awk -v d="$ENRICHMENT_MAX" 'BEGIN{printf "%.0f", d*1000}')"
 grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
 active_window_ms="$(awk -v s="$ACTIVE_PROGRESS_WINDOW" 'BEGIN{printf "%.0f", s*1000}')"
-coverage_at=""; completed=0; progress_bytes=0; extension_logged=0; first_source_wait_logged=0
+coverage_at=""; usable_at=""; completed=0; progress_bytes=0; extension_logged=0; cancelled=0
 for ((i=0; i<n; i++)); do
   C_SIZE[i]=0
   C_LAST_PROGRESS[i]="$start_ms"
 done
 while :; do
+  if [[ -n "$STOP_FILE" && -f "$STOP_FILE" ]]; then
+    slog "cancellation requested"
+    cancelled=1
+    break
+  fi
   running=0; bytes=0; poll_ms="$(now_ms)"
   for ((i=0; i<n; i++)); do
     size="$(stat -c %s "${C_ZIP[i]}" 2>/dev/null || echo 0)"
@@ -189,12 +245,22 @@ while :; do
     wait "${C_PARSE_PID[i]}"; parse_rc=$?
     http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
       "${C_HEAD[i]}" 2>/dev/null)"
-    if [[ "$rc" -eq 0 && "$parse_rc" -eq 0 \
-        && "${http:-0}" == "${C_CODE[i]}" ]] \
-        && zip_is_safe_and_usable "${C_ZIP[i]}" && extract_source "$i"; then
+    if [[ "$rc" -ne 0 || "$parse_rc" -ne 0 ]]; then
+      C_STATE[i]="failed"
+      if [[ "$rc" -eq 28 ]]; then C_REASON[i]="timeout"; else C_REASON[i]="transfer"; fi
+      slog "source index=${C_INDEX[i]} failed reason=${C_REASON[i]} rc=$rc http=${http:-0}"
+    elif [[ "${http:-0}" != "${C_CODE[i]}" ]]; then
+      C_STATE[i]="failed"
+      if [[ "${http:-0}" == "404" ]]; then C_REASON[i]="not_found"; else C_REASON[i]="rejected"; fi
+      slog "source index=${C_INDEX[i]} failed reason=${C_REASON[i]} rc=$rc http=${http:-0}"
+    elif ! zip_is_safe_and_usable "${C_ZIP[i]}"; then
+      C_STATE[i]="failed"; C_REASON[i]="invalid_package"
+      slog "source index=${C_INDEX[i]} failed reason=invalid_package rc=$rc http=${http:-0}"
+    elif extract_source "$i"; then
       C_STATE[i]="ok"; completed=$((completed + 1)); slog "source index=${C_INDEX[i]} collected"
     else
-      C_STATE[i]="failed"; slog "source index=${C_INDEX[i]} failed rc=$rc http=${http:-0}"
+      C_STATE[i]="failed"; C_REASON[i]="extract"
+      slog "source index=${C_INDEX[i]} failed reason=extract rc=$rc http=${http:-0}"
     fi
   done
 
@@ -218,44 +284,39 @@ while :; do
   [[ "$totals_known" -eq 1 ]] || aggregate_total=0
   write_state downloading "" "$progress_bytes" "$aggregate_total"
   current_ms="$(now_ms)"
-  if [[ -z "$coverage_at" ]] && coverage_complete; then coverage_at="$current_ms"; fi
+  if [[ -z "$usable_at" ]] && aggregate_is_usable; then
+    usable_at="$current_ms"
+    slog "usable aggregate available"
+  fi
+  if [[ -n "$usable_at" && -z "$coverage_at" ]] && coverage_complete; then
+    coverage_at="$current_ms"
+  fi
   if [[ "$running" -eq 0 ]]; then break; fi
 
   close_reason=""
   if [[ -n "$coverage_at" && $((current_ms - coverage_at)) -ge "$grace_ms" ]]; then
     close_reason="coverage grace"
-  elif [[ "$current_ms" -ge "$deadline_ms" ]]; then
-    close_reason="startup deadline"
+  elif [[ -n "$usable_at" && $((current_ms - usable_at)) -ge "$quiet_ms" ]]; then
+    close_reason="enrichment quiet window"
   fi
 
   if [[ -n "$close_reason" ]]; then
-    # The short deadline is an optimization, never a failure deadline. Until a
-    # complete source exists, let each request reach its own connection or
-    # inactivity result; otherwise every slow user can lose all candidates at
-    # once. Once a usable source exists, retain only peers that are still making
-    # recent progress so healthy fast-path latency stays bounded.
-    if [[ "$completed" -eq 0 ]]; then
-      if [[ "$first_source_wait_logged" -eq 0 ]]; then
-        slog "continuing past $close_reason while awaiting first usable source"
-        first_source_wait_logged=1
+    active_pending=0
+    for ((i=0; i<n; i++)); do
+      [[ "${C_STATE[i]}" == pending ]] || continue
+      if [[ "${C_SIZE[i]:-0}" -gt 0 \
+          && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
+        active_pending=$((active_pending + 1))
       fi
-    else
-      active_pending=0
-      for ((i=0; i<n; i++)); do
-        [[ "${C_STATE[i]}" == pending ]] || continue
-        if [[ "${C_SIZE[i]:-0}" -gt 0 \
-            && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
-          active_pending=$((active_pending + 1))
-        fi
-      done
-      if [[ "$active_pending" -eq 0 ]]; then
-        slog "closing after $close_reason; usable result exists and no productive peers remain"
-        break
-      fi
-      if [[ "$extension_logged" -eq 0 ]]; then
-        slog "extending past $close_reason for active_sources=$active_pending"
-        extension_logged=1
-      fi
+    done
+    if [[ "$active_pending" -eq 0 \
+        || $((current_ms - usable_at)) -ge "$enrichment_max_ms" ]]; then
+      slog "closing after $close_reason; usable result retained active_sources=$active_pending"
+      break
+    fi
+    if [[ "$extension_logged" -eq 0 ]]; then
+      slog "extending past $close_reason for active_sources=$active_pending"
+      extension_logged=1
     fi
   fi
   sleep 0.05
@@ -270,9 +331,36 @@ for ((i=0; i<n; i++)); do
   fi
 done
 
+if [[ "$cancelled" -eq 1 ]]; then
+  rm -rf "$EXTRACT_DIR"
+  write_state cancelled "" "$progress_bytes" 0 "" cancelled download
+  exit 0
+fi
+
 if [[ "$completed" -eq 0 ]]; then
   rm -rf "$EXTRACT_DIR"
-  write_state failed "" "$progress_bytes" 0 "No configured source returned a valid package; check the connection and try again"
+  not_found=0; invalid=0; unavailable=0; rejected=0
+  for ((i=0; i<n; i++)); do
+    case "${C_REASON[i]:-}" in
+      not_found) not_found=$((not_found + 1)) ;;
+      invalid_package|extract) invalid=$((invalid + 1)) ;;
+      rejected) rejected=$((rejected + 1)) ;;
+      *) unavailable=$((unavailable + 1)) ;;
+    esac
+  done
+  if [[ "$not_found" -eq "$n" ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "The configured sources do not have this app yet." not_found source
+  elif [[ "$invalid" -gt 0 && "$unavailable" -eq 0 ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "Sources responded, but none returned recognizable game data for this app." invalid_package validate
+  elif [[ "$rejected" -gt 0 && "$unavailable" -eq 0 && "$invalid" -eq 0 ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "The configured sources rejected the request or returned an unexpected status." source_rejected source
+  else
+    write_state failed "" "$progress_bytes" 0 \
+      "No configured source completed a usable download. Check the connection and try again." source_unavailable download
+  fi
   exit 1
 fi
 [[ "$progress_bytes" -gt 0 ]] || progress_bytes=1

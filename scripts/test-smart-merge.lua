@@ -59,6 +59,52 @@ check("emission starts with base app grant", emitted:match("^addappid%(10%)\n") 
 check("emission contains merged depot key", emitted:find('addappid(12, 1, "' .. K3 .. '")', 1, true) ~= nil)
 check("emission drops arbitrary source Lua", emitted:find("print", 1, true) == nil)
 
+local appinfo = '"appinfo" { "depots" {'
+  .. ' "11" { "config" { "oslist" "windows" }'
+  .. ' "manifests" { "public" { "gid" "9001" } } }'
+  .. ' "12" { "config" { "oslist" "linux" } "dlcappid" "1200"'
+  .. ' "manifests" { "public" { "gid" "9002" } } }'
+  .. ' "1201" { "dlcappid" "1201" }'
+  .. ' "13" { "config" { "oslist" "macos" }'
+  .. ' "manifests" { "public" { "gid" "9003" } } }'
+  .. ' } }'
+local depots = assert(merge.parse_appinfo_depots(appinfo))
+check("appinfo classifies relevant base depot", depots[11]
+  and depots[11].kind == "base" and depots[11].relevant == true)
+check("appinfo classifies DLC content depot", depots[12]
+  and depots[12].kind == "dlc" and depots[12].relevant == true)
+check("appinfo classifies virtual DLC without requiring a key", depots[1201]
+  and depots[1201].kind == "virtual_dlc")
+check("appinfo excludes macOS-only depot from Linux viability", depots[13]
+  and depots[13].relevant == false)
+
+local base_only = assert(merge.evaluate_sources(10, {
+  { index = 0, priority = 0, name = "Base", lua_text =
+      'addappid(10)\naddappid(11,1,"' .. K1 .. '")\n' },
+}, appinfo))
+check("usable base key succeeds without DLC key", base_only.usable == true
+  and base_only.base_key_count == 1 and base_only.dlc_key_count == 0)
+
+local dlc_only = assert(merge.evaluate_sources(10, {
+  { index = 0, priority = 0, name = "DLC only", lua_text =
+      'addappid(10)\naddappid(12,1,"' .. K2 .. '")\n' },
+}, appinfo))
+check("DLC key alone is not mistaken for usable base content",
+  dlc_only.usable == false and dlc_only.reason == "no_usable_base_key")
+
+local fallback = assert(merge.evaluate_sources(10, {
+  { index = 0, priority = 0, name = "Token limited", lua_text =
+      'addappid(10)\naddappid(99,1,"' .. K3 .. '")\n' },
+}, '"appinfo" { "depots" { } }'))
+check("unclassifiable appinfo falls back to any valid key", fallback.usable == true)
+
+local newest = merge.select_preferred({
+  { depot = 11, gid = "9001", creation_time = 100, priority = 0, source_index = 0 },
+  { depot = 11, gid = "9002", creation_time = 200, priority = 1, source_index = 1 },
+}, { [11] = "9001" })
+check("newest manifest wins even when older candidate is current public GID",
+  newest[11] == "9002")
+
 local function u32(n)
   local b1 = n % 256; n = math.floor(n / 256)
   local b2 = n % 256; n = math.floor(n / 256)
@@ -113,7 +159,7 @@ local preferred = merge.select_preferred({
   { depot = 11, gid = "100", creation_time = 200, priority = 0 },
   { depot = 11, gid = BIG_GID, creation_time = 100, priority = 2 },
 }, { [11] = BIG_GID })
-check("exact appinfo gid outranks timestamp", preferred[11] == BIG_GID)
+check("newer timestamp outranks exact appinfo gid", preferred[11] == "100")
 local newest = merge.select_preferred({
   { depot = 11, gid = "9999999999999999999", creation_time = 100, priority = 0 },
   { depot = 11, gid = "2", creation_time = 200, priority = 2 },

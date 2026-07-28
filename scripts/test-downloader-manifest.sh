@@ -66,6 +66,10 @@ OSRC="$TMP/t2outer"; mkdir -p "$OSRC"; cp "$TMP/inner.7z" "$OSRC/"
 ( cd "$OSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t2.zip" . >/dev/null 2>&1 )
 
 GAME2="$TMP/game2"; mkdir -p "$GAME2"
+# A game may legitimately keep its own archive. The fix worker must never scan,
+# extract, or delete files that existed before this operation.
+PREEXISTING_SRC="$TMP/preexisting-src"; mkfile "$PREEXISTING_SRC/user-owned.txt"
+( cd "$PREEXISTING_SRC" && "$SEVENZ_SYS" a -tzip "$GAME2/user-backup.zip" . >/dev/null 2>&1 )
 EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
   "file://$TMP/t2.zip" "$TMP/t2dl.zip" "$GAME2" "$TMP/t2state.json" >/dev/null 2>&1
 
@@ -74,6 +78,8 @@ check "T2 manifest exists" "[ -f '$MAN2' ]"
 check "T2 lists nested OnlineFix64" "grep -qix 'OnlineFix64.dll' '$MAN2'"
 check "T2 lists nested winhttp" "grep -qix 'winhttp.dll' '$MAN2'"
 check "T2 inner archive removed" "[ -z \"\$(find '$GAME2' -iname '*.7z')\" ]"
+check "T2 preserves pre-existing game archive" "[ -f '$GAME2/user-backup.zip' ]"
+check "T2 never extracts pre-existing game archive" "[ ! -f '$GAME2/user-owned.txt' ]"
 
 # ---------------------------------------------------------------------------
 # T3: a crack that ships its OWN launcher (FC25-style). The launcher manifest
@@ -114,5 +120,35 @@ GAME4="$TMP/game4"; mkdir -p "$GAME4"
 EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
   "file://$TMP/t4.zip" "$TMP/t4dl.zip" "$GAME4" "$TMP/t4state.json" >/dev/null 2>&1
 check "T4 no launcher manifest" "[ ! -f '$GAME4/.slssteam_fix_launchers' ]"
+
+# ---------------------------------------------------------------------------
+# T5: publication is transactional. A late path-type conflict must restore an
+# earlier overwritten file instead of leaving half of the fix applied.
+# ---------------------------------------------------------------------------
+RSRC="$TMP/t5src"
+mkfile "$RSRC/a-overwrite.dll"; printf 'NEW' > "$RSRC/a-overwrite.dll"
+mkfile "$RSRC/z-target"; printf 'NEW-TARGET' > "$RSRC/z-target"
+( cd "$RSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t5.zip" . >/dev/null 2>&1 )
+GAME5="$TMP/game5"; mkdir -p "$GAME5/z-target"
+printf 'ORIGINAL' > "$GAME5/a-overwrite.dll"
+EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
+  "file://$TMP/t5.zip" "$TMP/t5dl.zip" "$GAME5" "$TMP/t5state.json" >/dev/null 2>&1 || true
+check "T5 conflict reports apply failure" \
+  "grep -q '\"errorCode\": \"apply_failed\"' '$TMP/t5state.json'"
+check "T5 rollback restores overwritten file" \
+  "[ \"\$(cat '$GAME5/a-overwrite.dll')\" = ORIGINAL ]"
+check "T5 rollback preserves conflicting directory" "[ -d '$GAME5/z-target' ]"
+
+# T6: a pre-existing directory symlink must not redirect staged files outside
+# the game installation.
+SSRC="$TMP/t6src"; mkfile "$SSRC/linked/escape.dll"
+( cd "$SSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t6.zip" . >/dev/null 2>&1 )
+GAME6="$TMP/game6"; OUTSIDE="$TMP/outside"; mkdir -p "$GAME6" "$OUTSIDE"
+ln -s "$OUTSIDE" "$GAME6/linked"
+EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
+  "file://$TMP/t6.zip" "$TMP/t6dl.zip" "$GAME6" "$TMP/t6state.json" >/dev/null 2>&1 || true
+check "T6 target symlink is rejected" \
+  "grep -q '\"errorCode\": \"apply_failed\"' '$TMP/t6state.json'"
+check "T6 target symlink cannot escape game directory" "[ ! -e '$OUTSIDE/escape.dll' ]"
 
 if [ "$fails" -eq 0 ]; then echo; echo "ALL TESTS OK"; else echo; echo "$fails FAILED"; exit 1; fi

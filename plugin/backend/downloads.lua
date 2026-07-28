@@ -13,6 +13,40 @@ local smart_merge = require("smart_merge")
 
 local downloads = {}
 local DOWNLOAD_STATE = {}
+local FINALIZING = {}
+local _start_smart_records
+
+local function _atomic_write(path, content)
+    local temp = path .. ".tmp." .. tostring(os.time()) .. "." .. tostring(math.random(100000, 999999))
+    local ok, written = pcall(m_utils.write_file, temp, content)
+    if not ok or written == false then
+        pcall(fs.remove, temp)
+        return false
+    end
+    local renamed = os.rename(temp, path)
+    if not renamed then pcall(fs.remove, temp) end
+    return renamed and true or false
+end
+
+local function _job_paths(appid)
+    local root = utils.ensure_temp_download_dir()
+    local stem = tostring(appid)
+    return {
+        root = root,
+        state = fs.join(root, stem .. "_state.json"),
+        candidates = fs.join(root, stem .. "_candidates.bin"),
+        coverage = fs.join(root, stem .. "_coverage.tsv"),
+        collection = fs.join(root, "extracted_" .. stem),
+        stop = fs.join(root, stem .. "_stop"),
+    }
+end
+
+local function _cleanup_job_files(job, keep_stop)
+    pcall(fs.remove, job.state)
+    pcall(fs.remove, job.candidates)
+    pcall(fs.remove, job.coverage)
+    if not keep_stop then pcall(fs.remove, job.stop) end
+end
 
 local function _get_hubcap_api_key()
     if settings_manager.get_hubcap_api_key then
@@ -50,8 +84,8 @@ end
 function downloads.get_add_status(appid)
     if type(appid) == "string" then appid = tonumber(appid) end
 
-    local dest_root = utils.ensure_temp_download_dir()
-    local state_file = fs.join(dest_root, tostring(appid) .. "_state.json")
+    local job = _job_paths(appid)
+    local state_file = job.state
 
     if fs.exists(state_file) then
         local content = m_utils.read_file(state_file)
@@ -71,31 +105,36 @@ function downloads.get_add_status(appid)
                     bytesRead = data.bytesRead,
                     totalBytes = data.totalBytes,
                     currentApi = data.currentApi,
+                    apiErrors = data.apiErrors,
+                    errorCode = data.errorCode,
+                    errorPhase = data.errorPhase,
                 })
 
                 if data.status == "collected" or data.status == "extracted" then
-                    -- Both the parallel collector (collected) and the manual
-                    -- single-source downloader (extracted) use the same strict
-                    -- merge/validation/publication path.
-                    local collection_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
-                    local apiName = _get_download_state(appid).currentApi or "Merged sources"
-
-                    local ok, res = pcall(downloads._finalize_install_lua,
-                        appid, collection_dir, nil, apiName)
-                    if not ok then
-                        _set_download_state(appid, { status = "failed", error = tostring(res) })
+                    -- Claim the handoff before publishing. This closes the
+                    -- window where overlapping frontend polls could run the
+                    -- merge twice against the same collection.
+                    if not FINALIZING[appid] then
+                        FINALIZING[appid] = true
+                        _atomic_write(state_file, '{"status":"processing"}\n')
+                        local apiName = _get_download_state(appid).currentApi or "Merged sources"
+                        local ok, res = pcall(downloads._finalize_install_lua,
+                            appid, job.collection, nil, apiName)
+                        FINALIZING[appid] = nil
+                        if not ok then
+                            _set_download_state(appid, {
+                                status = "failed", error = tostring(res),
+                                errorCode = "finalize_exception", errorPhase = "publish",
+                            })
+                        end
+                        _cleanup_job_files(job)
                     end
-
-                    -- Cleanup background script files
-                    pcall(fs.remove, state_file)
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.ps1"))
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.sh"))
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.bin"))
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_coverage.tsv"))
                 elseif data.status == "failed" then
-                    pcall(fs.remove, state_file)
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.bin"))
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_coverage.tsv"))
+                    _cleanup_job_files(job)
+                elseif data.status == "cancelled" then
+                    -- The worker consumes this marker and terminates its curl
+                    -- children. A fast frontend poll must not remove it first.
+                    _cleanup_job_files(job, true)
                 end
             end
         end
@@ -132,9 +171,29 @@ function downloads._finalize_install_lua(appid, collection_dir, _, api_name)
     if not result then
         logger.warn("LuaTools: aggregate finalize appid=" .. tostring(appid)
             .. " -> " .. tostring(err))
+        local error_code, error_phase, message = "invalid_game_data", "validate",
+            "The downloaded packages did not contain recognizable game data for this app."
+        if err == "no_usable_base_key" then
+            error_code = "missing_base_key"
+            message = "The sources responded, but none contained a usable key for the base game. Optional DLC data was kept from blocking the result."
+        elseif err == "wrong_app" then
+            error_code = "wrong_app"
+            message = "The downloaded packages were for a different app."
+        elseif err == "install paths unavailable" then
+            error_code, error_phase = "install_path_unavailable", "publish"
+            message = "Steam's install path could not be resolved. Start Steam once and try again."
+        elseif tostring(err):match("^failed to stage ") then
+            error_code, error_phase = "stage_failed", "publish"
+            message = "The game data was valid, but it could not be staged locally. Check free space and permissions."
+        elseif tostring(err):match("^failed to publish ") then
+            error_code, error_phase = "publish_failed", "publish"
+            message = "The game data was valid, but it could not be installed locally. Check free space and permissions."
+        end
         _set_download_state(appid, {
             status = "failed",
-            error = "No valid game data was available from the configured sources.",
+            error = message,
+            errorCode = error_code,
+            errorPhase = error_phase,
         })
         return false
     end
@@ -155,146 +214,23 @@ function downloads._finalize_install_lua(appid, collection_dir, _, api_name)
     return true
 end
 
-local function _launch_async_download(appid, url, dest_path, extract_dir)
-    local is_windows = m_utils.getenv("OS") == "Windows_NT"
-    local dest_root = utils.ensure_temp_download_dir()
-    local state_file = fs.join(dest_root, tostring(appid) .. "_state.json")
-
-    m_utils.write_file(state_file, '{"status": "downloading"}')
-    if not fs.exists(extract_dir) then fs.create_directories(extract_dir) end
-
-    if is_windows then
-        local ps1_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "downloader.ps1")
-        local cmd = string.format(
-            'powershell -WindowStyle Hidden -Command "Start-Process -FilePath powershell -WindowStyle Hidden -ArgumentList \'-ExecutionPolicy Bypass -File \\"%s\\" -Url \\"%s\\" -DestPath \\"%s\\" -ExtractDir \\"%s\\" -StateFile \\"%s\\"\'"',
-            ps1_path, url, dest_path, extract_dir, state_file
-        )
-        m_utils.exec(cmd)
-    else
-        local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "downloader.sh")
-        m_utils.exec('chmod +x "' .. sh_path .. '"')
-        local cmd = string.format(
-            'nohup bash "%s" "%s" "%s" "%s" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &',
-            sh_path, url, dest_path, extract_dir, state_file
-        )
-        m_utils.exec(cmd)
-    end
-end
-
-local function _prepare_single_source_dir(appid, api_name)
-    local dest_root = utils.ensure_temp_download_dir()
-    local collection_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
-    local source_dir = fs.join(collection_dir, "source_0000")
-    -- Never allow a prior successful extraction to satisfy a later broken ZIP.
-    pcall(fs.remove_all, collection_dir)
-    fs.create_directories(source_dir)
-    m_utils.write_file(fs.join(source_dir, ".source-name"),
-        tostring(api_name or "Manual source"):gsub("%z", ""))
-    m_utils.write_file(fs.join(source_dir, ".source-priority"), "0\n")
-    return dest_root, source_dir
-end
-
-function downloads.start_add_via_luatools_from_url(appid, url, apiName)
+function downloads.start_add_via_luatools_from_url(appid, url, apiName, success_code)
     if type(appid) == "string" then appid = tonumber(appid) end
     if not appid then return { success = false, error = "Invalid appid" } end
 
     logger.log("LuaTools: StartAddViaLuaToolsFromUrl appid=" .. tostring(appid) .. " api=" .. tostring(apiName))
-    _set_download_state(appid, { status = "downloading", currentApi = apiName, bytesRead = 0, totalBytes = 0 })
-
-    local ok, res = pcall(function()
-        if not url or url == "" then error("Invalid URL provided") end
-        local dest_root, extract_dir = _prepare_single_source_dir(appid, apiName)
-        local dest_path = fs.join(dest_root, tostring(appid) .. ".zip")
-        _launch_async_download(appid, url, dest_path, extract_dir)
-    end)
-
-    if not ok then
-        logger.warn("LuaTools: Async Download crashed - " .. tostring(res))
-        _set_download_state(appid, { status = "failed", error = tostring(res) })
-        return { success = false, error = tostring(res) }
+    if type(url) ~= "string" or url == "" or url:find("\0", 1, true) then
+        return { success = false, error = "Invalid URL provided" }
     end
-
-    return { success = true }
+    local code = tonumber(success_code) or 200
+    if code < 100 or code > 599 then code = 200 end
+    local name = tostring(apiName or "Manual source"):gsub("%z", "")
+    local records = { table.concat({ "0", name, url, tostring(code), "" }, "\0") }
+    return _start_smart_records(appid, records, name)
 end
 
 function downloads.start_add_via_luatools(appid)
-    if type(appid) == "string" then appid = tonumber(appid) end
-    if not appid then return { success = false, error = "Invalid appid" } end
-
-    logger.log("LuaTools: StartAddViaLuaTools appid=" .. tostring(appid))
-    _set_download_state(appid, { status = "queued", bytesRead = 0, totalBytes = 0 })
-
-    local apis = api_manifest.load_api_manifest()
-    if not apis or #apis == 0 then
-        _set_download_state(appid, { status = "failed", error = "No APIs available" })
-        return { success = true }
-    end
-
-    local dest_root = utils.ensure_temp_download_dir()
-    local dest_path = fs.join(dest_root, tostring(appid) .. ".zip")
-    local hubcap_api_key = _get_hubcap_api_key()
-
-    local ok, res = pcall(function()
-        -- Legacy automatic path: probe APIs in configured order and hand the
-        -- first available source to the validated single-source finalizer.
-        local target_url = nil
-        local target_name = nil
-        for _, api in ipairs(apis) do
-            local name = api.name or "Unknown"
-            local template = api.url or ""
-            local success_code = tonumber(api.success_code) or 200
-
-            if string.find(template, "<moapikey>") then
-                if not hubcap_api_key or hubcap_api_key == "" then goto continue end
-                template = template:gsub("<moapikey>", hubcap_api_key)
-            end
-            if string.find(template, "<apikey>") then
-                if not api.api_key or api.api_key == "" then goto continue end
-                template = template:gsub("<apikey>", api.api_key)
-            end
-
-            local url = template:gsub("<appid>", tostring(appid))
-
-            local success = false
-            if _is_hubcap_api(api) then
-                local status_url = "https://hubcapmanifest.com/api/v1/status/" .. tostring(appid) .. "?api_key=" .. tostring(hubcap_api_key)
-                local s_resp = http_client.get(status_url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-                if s_resp and s_resp.status == success_code then
-                    success = true
-                end
-            else
-                local resp = http_client.head(url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-                if resp and resp.status == success_code then
-                    success = true
-                else
-                    local get_resp = http_client.get(url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-                    if get_resp and get_resp.status == success_code then
-                        success = true
-                    end
-                end
-            end
-
-            if success then
-                target_url = url
-                target_name = name
-                break
-            end
-            ::continue::
-        end
-        if not target_url then error("Not available on any API") end
-
-        _set_download_state(appid, { status = "downloading", currentApi = target_name })
-        local _, extract_dir = _prepare_single_source_dir(appid, target_name)
-        _launch_async_download(appid, target_url, dest_path, extract_dir)
-    end)
-
-    if not ok then
-        logger.warn("LuaTools: start_add_via_luatools crashed - " .. tostring(res))
-        _set_download_state(appid, { status = "failed", error = tostring(res) })
-        return { success = false, error = tostring(res) }
-    end
-
-    return { success = true }
+    return downloads.start_add_via_luatools_smart(appid)
 end
 
 function downloads.check_apis_for_app(appid)
@@ -357,7 +293,8 @@ function downloads.check_apis_for_app(appid)
         table.insert(results, {
             name = name,
             available = available,
-            url = available and url or nil
+            url = available and url or nil,
+            successCode = success_code,
         })
 
         ::continue::
@@ -380,17 +317,22 @@ local function _lumen_log_path()
     return home .. "/.lumen.log"
 end
 
-local function _launch_smart_download(appid, candidates_file, coverage_file, dest_root, state_file)
+local function _shell_quote(value)
+    return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+end
+
+local function _launch_smart_download(appid, candidates_file, coverage_file, dest_root, state_file, stop_file)
     local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "smart_download.sh")
-    m_utils.exec('chmod +x "' .. sh_path .. '"')
+    m_utils.exec("chmod +x -- " .. _shell_quote(sh_path))
     -- Capture the detached worker's stdout+stderr into ~/.lumen.log (was
     -- /dev/null, which hid download/extract/collection failures -> the
     -- frontend's only signal was a bare "failed" state, surfaced as the
     -- opaque "Unknown error"). The worker emits ISO-8601 UTC diagnostics.
     local cmd = string.format(
-        'nohup bash "%s" "%s" "%s" "%s" "%s" "%s" >> "%s" 2>&1 &',
-        sh_path, tostring(appid), state_file, dest_root, candidates_file,
-        coverage_file, _lumen_log_path()
+        "nohup bash %s %s %s %s %s %s %s >> %s 2>&1 &",
+        _shell_quote(sh_path), _shell_quote(appid), _shell_quote(state_file),
+        _shell_quote(dest_root), _shell_quote(candidates_file), _shell_quote(coverage_file),
+        _shell_quote(stop_file), _shell_quote(_lumen_log_path())
     )
     m_utils.exec(cmd)
 end
@@ -420,46 +362,95 @@ local function _smart_state_age(state_file)
     return os.time() - mtime
 end
 
+local INFLIGHT_STATUS = {
+    downloading = true, extracting = true, extracted = true,
+    collected = true, processing = true, queued = true,
+}
+
+local function _has_fresh_job(appid)
+    local job = _job_paths(appid)
+    local status = _smart_inflight_status(job.state)
+    if status and INFLIGHT_STATUS[status] then
+        local age = _smart_state_age(job.state)
+        if age <= 60 then
+            logger.log("LuaTools: appid=" .. tostring(appid)
+                .. " already in flight (status=" .. tostring(status)
+                .. ", age=" .. tostring(age) .. "s) -> skipping duplicate")
+            return true
+        end
+        logger.warn("LuaTools: appid=" .. tostring(appid)
+            .. " stale in-flight state (status=" .. tostring(status)
+            .. ", age=" .. tostring(age) .. "s) -> relaunching")
+    end
+    return false
+end
+
+local function _write_coverage(appid, coverage_file)
+    local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
+    local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
+        "picsbuffer_" .. tostring(appid) .. ".bin")
+    local depot_info = {}
+    if fs.exists(appinfo_path) then
+        depot_info = smart_merge.parse_appinfo_depots(m_utils.read_file(appinfo_path) or "")
+    end
+    local coverage_lines, depots = {}, {}
+    for depot, info in pairs(depot_info) do
+        if info.gid then depots[#depots + 1] = depot end
+    end
+    table.sort(depots)
+    for _, depot in ipairs(depots) do
+        local info = depot_info[depot]
+        coverage_lines[#coverage_lines + 1] = table.concat({
+            tostring(depot), tostring(info.gid), tostring(info.kind),
+            info.relevant and "1" or "0",
+        }, "\t")
+    end
+    return m_utils.write_file(coverage_file,
+        #coverage_lines > 0 and (table.concat(coverage_lines, "\n") .. "\n") or "") ~= false
+end
+
+_start_smart_records = function(appid, records, current_api)
+    if _has_fresh_job(appid) then return { success = true } end
+    local job = _job_paths(appid)
+    local ok, err = pcall(function()
+        if type(records) ~= "table" or #records == 0 then error("No usable API sources") end
+        pcall(fs.remove, job.stop)
+        pcall(fs.remove_all, job.collection)
+        if m_utils.write_file(job.candidates, table.concat(records)) == false then
+            error("Could not prepare source list")
+        end
+        os.execute("chmod 600 -- " .. _shell_quote(job.candidates))
+        if not _write_coverage(appid, job.coverage) then error("Could not prepare depot coverage") end
+        os.execute("chmod 600 -- " .. _shell_quote(job.coverage))
+        if not _atomic_write(job.state, '{"status":"downloading"}\n') then
+            error("Could not create download state")
+        end
+        DOWNLOAD_STATE[appid] = {}
+        _set_download_state(appid, {
+            status = "downloading", currentApi = current_api or "",
+            bytesRead = 0, totalBytes = 0,
+        })
+        _launch_smart_download(appid, job.candidates, job.coverage,
+            job.root, job.state, job.stop)
+    end)
+    if not ok then
+        logger.warn("LuaTools: download launch failed appid=" .. tostring(appid)
+            .. " -> " .. tostring(err))
+        _cleanup_job_files(job)
+        _set_download_state(appid, {
+            status = "failed", error = tostring(err),
+            errorCode = "launch_failed", errorPhase = "prepare",
+        })
+        return { success = false, error = tostring(err) }
+    end
+    return { success = true }
+end
+
 function downloads.start_add_via_luatools_smart(appid)
     if type(appid) == "string" then appid = tonumber(appid) end
     if not appid then return { success = false, error = "Invalid appid" } end
 
-    -- Dedup duplicate add requests for the same appid. The fast-download click
-    -- can fire twice (the frontend is re-injected on CEF context recreation,
-    -- attaching the delegated click listener more than once, and its in-page
-    -- reentry guard is set only AFTER an async API check), producing two RPC
-    -- calls within the same second. The Lumen RPC host is single-threaded, so
-    -- the first call has already written the worker's state file before the
-    -- second is dispatched. Two workers for the same appid share the same
-    -- appid-keyed scratch/state/output paths and clobber each other -> spurious
-    -- "failed" and the install flapping users see. If a non-terminal add is
-    -- already in flight AND its state file is fresh (a crashed worker's stale
-    -- file, older than the freshness window, is ignored so a real retry still
-    -- works), skip relaunching a second worker.
-    do
-        local dest_root = utils.ensure_temp_download_dir()
-        local state_file = fs.join(dest_root, tostring(appid) .. "_state.json")
-        local st = _smart_inflight_status(state_file)
-        local INFLIGHT = {
-            downloading = true, extracting = true, extracted = true,
-            collected = true, processing = true, queued = true,
-        }
-        if st and INFLIGHT[st] then
-            local age = _smart_state_age(state_file)
-            if age <= 60 then
-                logger.log("LuaTools: StartAddViaLuaToolsSmart appid=" .. tostring(appid)
-                    .. " already in flight (status=" .. tostring(st)
-                    .. ", age=" .. tostring(age) .. "s) -> skipping duplicate")
-                return { success = true }
-            end
-            logger.warn("LuaTools: StartAddViaLuaToolsSmart appid=" .. tostring(appid)
-                .. " stale in-flight state (status=" .. tostring(st)
-                .. ", age=" .. tostring(age) .. "s) -> relaunching")
-        end
-    end
-
     logger.log("LuaTools: StartAddViaLuaToolsSmart appid=" .. tostring(appid))
-    _set_download_state(appid, { status = "downloading", currentApi = "", bytesRead = 0, totalBytes = 0 })
 
     local apis = api_manifest.load_api_manifest()
     if not apis or #apis == 0 then
@@ -467,7 +458,7 @@ function downloads.start_add_via_luatools_smart(appid)
         return { success = true }
     end
 
-    local ok, res = pcall(function()
+    local ok, records_or_error = pcall(function()
         local hubcap_api_key = _get_hubcap_api_key()
         local records = {}
         for index, api in ipairs(apis) do
@@ -499,40 +490,31 @@ function downloads.start_add_via_luatools_smart(appid)
             end
         end
         if #records == 0 then error("No usable API sources") end
-
-        local dest_root = utils.ensure_temp_download_dir()
-        local state_file = fs.join(dest_root, tostring(appid) .. "_state.json")
-        local candidates_file = fs.join(dest_root, tostring(appid) .. "_candidates.bin")
-        local coverage_file = fs.join(dest_root, tostring(appid) .. "_coverage.tsv")
-        m_utils.write_file(candidates_file, table.concat(records))
-        os.execute('chmod 600 "' .. candidates_file .. '"')
-
-        local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
-        local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
-            "picsbuffer_" .. tostring(appid) .. ".bin")
-        local gids = {}
-        if fs.exists(appinfo_path) then
-            gids = smart_merge.parse_appinfo_gids(m_utils.read_file(appinfo_path) or "")
-        end
-        local coverage_lines, depots = {}, {}
-        for depot in pairs(gids) do depots[#depots + 1] = depot end
-        table.sort(depots)
-        for _, depot in ipairs(depots) do
-            coverage_lines[#coverage_lines + 1] = tostring(depot) .. "\t" .. gids[depot]
-        end
-        m_utils.write_file(coverage_file,
-            #coverage_lines > 0 and (table.concat(coverage_lines, "\n") .. "\n") or "")
-        os.execute('chmod 600 "' .. coverage_file .. '"')
-        m_utils.write_file(state_file, '{"status": "downloading"}')
-        _launch_smart_download(appid, candidates_file, coverage_file, dest_root, state_file)
+        return records
     end)
 
     if not ok then
-        logger.warn("LuaTools: StartAddViaLuaToolsSmart crashed - " .. tostring(res))
-        _set_download_state(appid, { status = "failed", error = tostring(res) })
-        return { success = false, error = tostring(res) }
+        logger.warn("LuaTools: StartAddViaLuaToolsSmart crashed - " .. tostring(records_or_error))
+        _set_download_state(appid, { status = "failed", error = tostring(records_or_error) })
+        return { success = false, error = tostring(records_or_error) }
     end
+    return _start_smart_records(appid, records_or_error, "")
+end
 
+function downloads.cancel_add(appid)
+    if type(appid) == "string" then appid = tonumber(appid) end
+    if not appid then return { success = false, error = "Invalid appid" } end
+    local job = _job_paths(appid)
+    if m_utils.write_file(job.stop, "cancel\n") == false then
+        return { success = false, error = "Could not request cancellation" }
+    end
+    _atomic_write(job.state,
+        '{"status":"cancelled","errorCode":"cancelled","errorPhase":"download"}\n')
+    _set_download_state(appid, {
+        status = "cancelled", error = nil,
+        errorCode = "cancelled", errorPhase = "download",
+    })
+    logger.log("LuaTools: cancellation requested appid=" .. tostring(appid))
     return { success = true }
 end
 

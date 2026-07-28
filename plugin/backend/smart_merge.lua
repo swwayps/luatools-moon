@@ -183,7 +183,7 @@ local function parse_vdf_map(tokens, pos)
     return out, pos + 1
 end
 
-function smart_merge.parse_appinfo_gids(text)
+local function parse_appinfo_body(text)
     local tokens = lex_vdf(tostring(text or ""))
     local root, pos = {}, 1
     while pos <= #tokens do
@@ -191,16 +191,104 @@ function smart_merge.parse_appinfo_gids(text)
         if tokens[pos] == "{" then root[key], pos = parse_vdf_map(tokens, pos + 1)
         else pos = pos + 1 end
     end
-    local body = root.appinfo or root
+    return root.appinfo or root
+end
+
+local function depot_is_relevant(oslist)
+    oslist = tostring(oslist or ""):lower()
+    if oslist == "" then return true end
+    for item in oslist:gmatch("[^,%s]+") do
+        if item == "linux" or item == "windows" or item == "win" then return true end
+    end
+    return false
+end
+
+function smart_merge.parse_appinfo_depots(text)
+    local body = parse_appinfo_body(text)
     local result = {}
     for depot, node in pairs(type(body.depots) == "table" and body.depots or {}) do
         local id = positive_integer(depot)
         local public = type(node) == "table" and type(node.manifests) == "table"
             and node.manifests.public or nil
         local gid = type(public) == "table" and normalize_decimal(public.gid) or nil
-        if id and gid then result[id] = gid end
+        local dlcappid = type(node) == "table" and positive_integer(node.dlcappid) or nil
+        if id then
+            local kind = gid and (dlcappid and "dlc" or "base")
+                or (dlcappid and "virtual_dlc" or "unknown")
+            local config = type(node) == "table" and node.config or nil
+            local oslist = type(config) == "table" and tostring(config.oslist or "") or ""
+            result[id] = {
+                id = id, gid = gid, dlcappid = dlcappid, kind = kind,
+                oslist = oslist,
+                relevant = kind == "virtual_dlc" or depot_is_relevant(oslist),
+            }
+        end
     end
     return result
+end
+
+function smart_merge.parse_appinfo_gids(text)
+    local result = {}
+    for depot, info in pairs(smart_merge.parse_appinfo_depots(text)) do
+        if info.gid then result[depot] = info.gid end
+    end
+    return result
+end
+
+function smart_merge.evaluate_sources(appid, sources, appinfo_text)
+    appid = positive_integer(appid)
+    if not appid then return nil, "invalid appid" end
+
+    local prepared, has_app_declaration = {}, false
+    for _, source in ipairs(sources or {}) do
+        local parsed = source.parsed or smart_merge.parse_lua(source.lua_text)
+        if next(parsed.bare) ~= nil or next(parsed.keys) ~= nil
+            or next(parsed.manifests) ~= nil then
+            local item = {}
+            for key, value in pairs(source) do item[key] = value end
+            item.parsed = parsed
+            prepared[#prepared + 1] = item
+            if parsed.bare[appid] or parsed.keys[appid] then
+                has_app_declaration = true
+            end
+        end
+    end
+
+    local depots = smart_merge.parse_appinfo_depots(appinfo_text or "")
+    local current_gids = {}
+    local known_base_count = 0
+    for depot, info in pairs(depots) do
+        if info.gid then current_gids[depot] = info.gid end
+        if info.kind == "base" then known_base_count = known_base_count + 1 end
+    end
+    local merged = smart_merge.merge_sources(appid, prepared, current_gids)
+    local base_key_count, dlc_key_count, other_key_count = 0, 0, 0
+    for depot in pairs(merged.keys or {}) do
+        local info = depots[depot]
+        if info and info.kind == "base" and info.relevant then
+            base_key_count = base_key_count + 1
+        elseif info and info.kind == "dlc" then
+            dlc_key_count = dlc_key_count + 1
+        else
+            other_key_count = other_key_count + 1
+        end
+    end
+
+    local has_fallback_key = next(merged.keys or {}) ~= nil
+    local usable = has_app_declaration and
+        ((known_base_count > 0 and base_key_count > 0)
+          or (known_base_count == 0 and has_fallback_key))
+    local reason
+    if #prepared == 0 then reason = "no_usable_game_lua"
+    elseif not has_app_declaration then reason = "wrong_app"
+    elseif not usable then reason = "no_usable_base_key" end
+
+    return {
+        usable = usable, reason = reason, result = merged, sources = prepared,
+        depots = depots, current_gids = current_gids,
+        base_key_count = base_key_count, dlc_key_count = dlc_key_count,
+        other_key_count = other_key_count,
+    }
 end
 
 local function u32le(bytes, pos)
@@ -309,10 +397,23 @@ function smart_merge.select_preferred(manifests, current_gids)
         for _, item in ipairs(items) do
             local exact = current and item.gid == current or false
             local best_exact = best and current and best.gid == current or false
-            if not best or (exact ~= best_exact and exact)
-                or (exact == best_exact and (item.creation_time or -1) > (best.creation_time or -1))
-                or (exact == best_exact and (item.creation_time or -1) == (best.creation_time or -1)
-                    and (item.priority or math.huge) < (best.priority or math.huge)) then
+            local created = item.creation_time or -1
+            local best_created = best and (best.creation_time or -1) or -1
+            local same_time = best and created == best_created
+            local same_exact = same_time and exact == best_exact
+            local priority = item.priority or math.huge
+            local best_priority = best and (best.priority or math.huge) or math.huge
+            local source_index = item.source_index or math.huge
+            local best_source_index = best and (best.source_index or math.huge) or math.huge
+            local gid = tostring(item.gid or "")
+            local best_gid = best and tostring(best.gid or "") or ""
+            local gid_before = #gid ~= #best_gid and #gid < #best_gid or gid < best_gid
+            if not best or created > best_created
+                or (same_time and exact ~= best_exact and exact)
+                or (same_exact and priority < best_priority)
+                or (same_exact and priority == best_priority and source_index < best_source_index)
+                or (same_exact and priority == best_priority and source_index == best_source_index
+                    and gid_before) then
                 best = item
             end
         end
@@ -411,28 +512,19 @@ function smart_merge.install(appid, collection_dir, supplied_opts)
         source.entries = nil
     end
 
-    local sources, manifests = {}, {}
-    local has_app_declaration, keyed_count = false, 0
+    local source_candidates, manifests = {}, {}
     for _, source in pairs(by_root) do
         if source.lua_text then
-            local parsed = smart_merge.parse_lua(source.lua_text)
-            local recognized = next(parsed.bare) ~= nil or next(parsed.keys) ~= nil
-                or next(parsed.manifests) ~= nil
-            if recognized then
-                source.parsed = parsed
-                sources[#sources + 1] = source
-                if parsed.bare[appid] or parsed.keys[appid] then has_app_declaration = true end
-                for _ in pairs(parsed.keys) do keyed_count = keyed_count + 1 end
-            end
+            source_candidates[#source_candidates + 1] = source
         end
     end
-    if #sources == 0 then return nil, "No usable game Lua was collected" end
-    if not has_app_declaration then return nil, "Collected Lua does not declare the requested app" end
-    if keyed_count == 0 then return nil, "Collected Lua contains no depot keys" end
+    local evaluation, evaluation_error = smart_merge.evaluate_sources(
+        appid, source_candidates, opts.appinfo_text or "")
+    if not evaluation then return nil, evaluation_error end
+    if not evaluation.usable then return nil, evaluation.reason end
+    local sources, result = evaluation.sources, evaluation.result
     table.sort(sources, function(a, b) return a.index < b.index end)
     for _, item in pairs(manifest_by_name) do manifests[#manifests + 1] = item end
-    local result, merge_error = smart_merge.merge_sources(appid, sources, current_gids)
-    if not result then return nil, merge_error end
 
     local lua_text = smart_merge.emit_lua(appid, result)
     local preferred = smart_merge.select_preferred(manifests, current_gids)

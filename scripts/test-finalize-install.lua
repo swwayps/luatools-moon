@@ -119,6 +119,22 @@ local partial_result=merge.install(APP,root,partial_opts)
 check("lua remains valid when referenced manifests are unavailable",partial_result~=nil and
   (partial_files["/steam/config/stplug-in/"..APP..".lua"] or ""):find(K2,1,true)~=nil)
 
+local dlc_only_files,dlc_only_opts=harness({
+  [root.."/source_0000/.source-name"]="DLC only",
+  [root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(12,1,"'..K2..'")\n',
+})
+dlc_only_opts.appinfo_text='"appinfo" { "depots" {'
+  ..' "11" { "config" { "oslist" "windows" }'
+  ..' "manifests" { "public" { "gid" "'..G11..'" } } }'
+  ..' "12" { "config" { "oslist" "windows" } "dlcappid" "1200"'
+  ..' "manifests" { "public" { "gid" "'..G12..'" } } }'
+  ..'} }'
+local dlc_only_result,dlc_only_error=merge.install(APP,root,dlc_only_opts)
+check("DLC-only key set cannot masquerade as a usable base game",
+  dlc_only_result==nil and dlc_only_error=="no_usable_base_key"
+  and dlc_only_files["/steam/config/stplug-in/"..APP..".lua"]==nil)
+
 local rollback_files,rollback_opts,set_fail=harness({
   ["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
   ["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]="old-manifest",

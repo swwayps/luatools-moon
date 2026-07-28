@@ -300,8 +300,10 @@ function ReorderApis(params, contentScriptQuery)
 end
 
 function CancelAddViaLuaTools(appid)
-    -- No-op cancel stub; download is synchronous in Lua
-    return json_ok({ success = true })
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, res = pcall(downloads.cancel_add, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
 end
 
 function CheckApisForApp(appid)
@@ -342,15 +344,17 @@ end
 -- Keep the old RPC name callable while installed frontends transition.
 GetMorrenusStats = GetHubcapStats
 
-function StartAddViaLuaToolsFromUrl(apiName, appid, contentScriptQuery, url)
+function StartAddViaLuaToolsFromUrl(apiName, appid, contentScriptQuery, successCode, url)
     -- Millennium's IPC bridge sorts JS object keys alphabetically and passes their values as positional arguments.
-    -- The JS passes: { apiName: ..., appid: ..., contentScriptQuery: "", url: ... }
-    -- So the Lua signature MUST be (apiName, appid, contentScriptQuery, url)
+    -- New clients also pass successCode. Keep the four-argument layout working
+    -- while frontends update: in that form the URL arrives in argument four.
+    if url == nil then url, successCode = successCode, nil end
 
     logger.log("StartAddViaLuaToolsFromUrl CALLED: appid=" ..
-    tostring(appid) .. ", url=" .. tostring(url) .. ", apiName=" .. tostring(apiName))
+    tostring(appid) .. ", apiName=" .. tostring(apiName))
 
-    local ok, res = pcall(downloads.start_add_via_luatools_from_url, appid, url, apiName)
+    local ok, res = pcall(downloads.start_add_via_luatools_from_url,
+        appid, url, apiName, successCode)
     if not ok then
         logger.warn("StartAddViaLuaToolsFromUrl CRASHED inside pcall: " .. tostring(res))
         return json_err(res)

@@ -1204,10 +1204,9 @@
     existsOnce: false,
   };
   // click/run debounce state
-  const runState = {
-    inProgress: false,
-    appid: null,
-  };
+  const runState =
+    window.__LuaToolsRunState ||
+    (window.__LuaToolsRunState = { inProgress: false, appid: null });
 
   // Games Database - backend handles caching
   function fetchGamesDatabase() {
@@ -9066,7 +9065,9 @@
 
   // Delegate click handling in case the DOM is re-rendered and listeners are lost
   // Use bubble phase instead of capture phase to avoid interfering with gamepad navigation
-  document.addEventListener(
+  if (!window.__LuaToolsAddClickBound) {
+    window.__LuaToolsAddClickBound = true;
+    document.addEventListener(
     "click",
     function (evt) {
       // Quick exit if target doesn't have closest method or isn't an element
@@ -9276,6 +9277,7 @@
                     appid,
                     url,
                     apiName,
+                    successCode: source.successCode || 200,
                     contentScriptQuery: "",
                   },
                 );
@@ -9533,18 +9535,26 @@
       }
     },
     false,
-  ); // Changed from true to false (bubble phase instead of capture phase)
+    ); // Changed from true to false (bubble phase instead of capture phase)
+  }
 
   // Poll backend for progress and update progress bar and text
   function startPolling(appid, onFailedCallback) {
     let done = false;
     let lastCheckedApi = null;
     let successfulApi = null; // Track which API successfully found the file
+    const pollers =
+      window.__LuaToolsPollers || (window.__LuaToolsPollers = Object.create(null));
+    if (pollers[appid]) clearInterval(pollers[appid]);
+    let requestInFlight = false;
     const timer = setInterval(() => {
       if (done) {
         clearInterval(timer);
+        if (pollers[appid] === timer) delete pollers[appid];
         return;
       }
+      if (requestInFlight) return;
+      requestInFlight = true;
       try {
         Millennium.callServerMethod("luatools", "GetAddViaLuaToolsStatus", {
           appid,
@@ -10032,12 +10042,26 @@
                 onFailedCallback(st.error || "Unknown error");
               }
             }
+            if (st.status === "cancelled") {
+              done = true;
+              clearInterval(timer);
+              if (pollers[appid] === timer) delete pollers[appid];
+              runState.inProgress = false;
+              runState.appid = null;
+            }
           } catch (_) {}
+        }).catch(function (err) {
+          backendLog("LuaTools: status poll failed: " + err);
+        }).finally(function () {
+          requestInFlight = false;
         });
       } catch (_) {
+        requestInFlight = false;
         clearInterval(timer);
+        if (pollers[appid] === timer) delete pollers[appid];
       }
     }, 300);
+    pollers[appid] = timer;
   }
 
   // Also try after a delay to catch dynamically loaded content

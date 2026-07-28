@@ -76,6 +76,20 @@ local downloads = dofile("dist/luatools/backend/downloads.lua")
 local APPID = 367520
 local SF = TMP .. "/" .. APPID .. "_state.json"
 
+os.execute("mkdir -p '" .. TMP .. "/home/.config/SLSsteam/cache'")
+do
+  local f = assert(io.open(TMP .. "/home/.config/SLSsteam/cache/picsbuffer_" .. APPID .. ".bin", "w"))
+  f:write('"appinfo" { "depots" {'
+    .. ' "367521" { "config" { "oslist" "windows" }'
+    .. ' "manifests" { "public" { "gid" "9001" } } }'
+    .. ' "367522" { "config" { "oslist" "linux" } "dlcappid" "400000"'
+    .. ' "manifests" { "public" { "gid" "9002" } } }'
+    .. ' "367523" { "config" { "oslist" "macos" }'
+    .. ' "manifests" { "public" { "gid" "9003" } } }'
+    .. '} }')
+  f:close()
+end
+
 local fails = 0
 local function check(cond, msg) if cond then print("ok   " .. msg) else print("FAIL " .. msg); fails = fails + 1 end end
 
@@ -127,29 +141,54 @@ check(mode == "600", "(D6) candidate file is private mode 0600")
 local coverage_path = TMP .. "/" .. APPID .. "_coverage.tsv"
 local coverage = io.open(coverage_path, "rb")
 check(coverage ~= nil, "(D7) coverage handoff exists even without cached appinfo")
+local coverage_data = coverage and coverage:read("*a") or ""
 if coverage then coverage:close() end
+check(coverage_data:find("367521\t9001\tbase\t1", 1, true) ~= nil,
+  "(D7a) coverage marks Windows/Proton base depot as relevant")
+check(coverage_data:find("367522\t9002\tdlc\t1", 1, true) ~= nil,
+  "(D7b) coverage marks DLC depot as optional content")
+check(coverage_data:find("367523\t9003\tbase\t0", 1, true) ~= nil,
+  "(D7c) coverage marks macOS-only base depot as irrelevant")
 local launched_with_coverage = false
 for _, cmd in ipairs(exec_commands) do
   if tostring(cmd):find(coverage_path, 1, true) then launched_with_coverage = true end
 end
 check(launched_with_coverage, "(D8) worker launch receives coverage path")
 
--- Manual source selection uses downloader.sh, whose terminal handoff is
--- "extracted". It must extract into a fresh indexed source directory so the
--- same validated finalizer handles it without seeing stale prior files.
+-- Manual source selection must use the same NUL-safe smart worker. The URL is
+-- data in the private candidate file, never shell syntax in the launch command.
 os.remove(SF)
 exec_commands = {}
 exec_count = 0
+local hostile_url = "https://manual.test/" .. APPID .. ".zip?x=';touch /tmp/lt-injected;#"
 local manual = downloads.start_add_via_luatools_from_url(APPID,
-  "https://manual.test/" .. APPID .. ".zip", "Manual")
+  hostile_url, "Manual", 201)
 check(manual and manual.success == true, "(D9) manual download starts")
-local manual_indexed = false
+local manual_smart, url_in_command = false, false
 for _, cmd in ipairs(exec_commands) do
-  if tostring(cmd):find("extracted_" .. APPID .. "/source_0000", 1, true) then
-    manual_indexed = true
-  end
+  if tostring(cmd):find("smart_download.sh", 1, true) then manual_smart = true end
+  if tostring(cmd):find(hostile_url, 1, true) then url_in_command = true end
 end
-check(manual_indexed, "(D10) manual download extracts into indexed source directory")
+check(manual_smart, "(D10) manual download uses the validated smart worker")
+check(not url_in_command, "(D11) manual URL is never interpolated into shell")
+local manual_candidate = io.open(candidate_path, "rb")
+local manual_data = manual_candidate and manual_candidate:read("*a") or ""
+if manual_candidate then manual_candidate:close() end
+check(manual_data:find(hostile_url, 1, true) ~= nil,
+  "(D12) manual URL is preserved as candidate-file data")
+check(manual_data:find("201%z", 1) ~= nil,
+  "(D13) manual custom source keeps its accepted HTTP status")
+
+local cancelled = downloads.cancel_add(APPID)
+check(cancelled and cancelled.success == true,
+  "(D14) cancellation request succeeds")
+local stop = io.open(TMP .. "/" .. APPID .. "_stop", "r")
+check(stop ~= nil, "(D15) cancellation reaches the worker through a stop marker")
+if stop then stop:close() end
+local cancel_status = downloads.get_add_status(APPID)
+check(cancel_status and cancel_status.state and cancel_status.state.status == "cancelled",
+  "(D16) cancelled is a terminal state")
+os.remove(TMP .. "/" .. APPID .. "_stop")
 
 -- ── terminal-latch (get_add_status) ─────────────────────────────────────────
 -- Prepare a source tree so both manual 'extracted' and smart 'collected'
@@ -166,7 +205,8 @@ local function prepare_source()
   f:close()
 end
 
--- (E0) downloader.sh manual handoff must finalize, not poll forever.
+-- (E0) Keep accepting the legacy "extracted" handoff while installed clients
+-- transition to the unified smart collector.
 prepare_source()
 os.execute("printf '%s' '{\"status\":\"extracted\",\"currentApi\":\"Manual\"}' > " .. SF)
 local manual_done = downloads.get_add_status(APPID)
