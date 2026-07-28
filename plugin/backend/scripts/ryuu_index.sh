@@ -1,12 +1,10 @@
 #!/bin/bash
 # ryuu_index.sh — build the Crack/Bypass index (appid -> fix archive) from the
-# ryuu.lol fixes catalogue page.
+# ryuu.lol public fixes catalogue.
 #
-# The catalogue at https://generator.ryuu.lol/fixes is an HTML page that embeds
-# every fix as  data-appid="<id>" data-filename="<file>"  on its vote row, with
-# preceding  data-badge-key="<badge>"  spans. There is no JSON index, so we
-# scrape those attributes into a small JSON map the backend can look up by
-# appid offline:
+# The current catalogue is public JSON at
+# https://generator.ryuu.lol/files/fixes.json. Older releases consumed HTML
+# data-* rows; that parser remains below so local legacy fixtures still work.
 #
 #   { "generated": "<iso8601>", "source": "...", "count": N,
 #     "fixes": { "<appid>": [ { "file": "<name>.zip", "badge": "<badge>" } ] } }
@@ -27,12 +25,12 @@
 #
 # Usage:
 #   ryuu_index.sh <out.json> [src]
-#     src = a URL (default https://generator.ryuu.lol/fixes) or a local HTML file.
+#     src = a URL (default .../files/fixes.json) or a local JSON/HTML file.
 
 set -u
 
 OUT="${1:-}"
-SRC="${2:-https://generator.ryuu.lol/fixes}"
+SRC="${2:-https://generator.ryuu.lol/files/fixes.json}"
 if [ -z "$OUT" ]; then
   echo "usage: ryuu_index.sh <out.json> [src-url-or-file]" >&2
   exit 2
@@ -58,7 +56,21 @@ else
     echo "ryuu_index: download failed" >&2; exit 1; }
 fi
 
-# Bail if the page looks empty/wrong (don't clobber a good index with garbage).
+# The current endpoint already supplies the exact decoded structure used by
+# crackfix.lua. Preserve it byte-for-byte; this also avoids losing abbreviated
+# filenames such as GTA SA DE.zip in an HTML scraper.
+if grep -q '^[[:space:]]*\[' "$TMP_HTML" \
+    && grep -q '"appid"[[:space:]]*:' "$TMP_HTML" \
+    && grep -q '"fixes"[[:space:]]*:' "$TMP_HTML"; then
+  cp "$TMP_HTML" "$TMP_JSON" || exit 1
+  mkdir -p "$(dirname "$OUT")" 2>/dev/null
+  mv -f "$TMP_JSON" "$OUT" || exit 1
+  trap 'rm -f "$TMP_HTML"' EXIT
+  echo "ryuu_index: wrote $OUT"
+  exit 0
+fi
+
+# Bail if a legacy page looks empty/wrong (don't clobber a good index).
 if ! grep -q 'data-filename="' "$TMP_HTML"; then
   echo "ryuu_index: no fix entries found in source" >&2
   exit 1

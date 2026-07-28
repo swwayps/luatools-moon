@@ -1,13 +1,14 @@
 -- crackfix.lua  (Linux overlay for luatools-moon)
 --
 -- Resolves a Steam appid to a Crack/Bypass archive on the ryuu.lol fixes
--- catalogue. There is no appid index endpoint on the source, so we ship a
--- pre-scraped JSON map (backend/ryuu_index.json, built by scripts/ryuu_index.sh)
+-- catalogue. We ship a cached copy of its public appid JSON catalogue
+-- (backend/ryuu_index.json, refreshed by
+-- scripts/ryuu_index.sh)
 -- and look it up offline. A user-local cache copy is refreshed in the
 -- background (non-blocking) so newly added fixes appear without a new release.
 --
---   index schema: { generated, source, count,
---                   fixes = { ["<appid>"] = { { file=, badge= }, ... } } }
+--   current schema: [ { appid, name, fixes={ {href,filename,badges}, ... } } ]
+--   legacy schema:  { fixes = { ["<appid>"]={ {file,badge}, ... } } }
 --   download URL : https://generator.ryuu.lol/fixes/<url-encoded file>
 --
 -- The PURE helpers (url_encode, build_url, pick_entry, is_hypervisor,
@@ -18,7 +19,7 @@
 local crackfix = {}
 
 local BASE_URL = "https://generator.ryuu.lol/fixes/"
-local SOURCE_URL = "https://generator.ryuu.lol/fixes"
+local SOURCE_URL = "https://generator.ryuu.lol/files/fixes.json"
 -- Refresh the user-local cache at most this often (seconds).
 local REFRESH_TTL = 6 * 60 * 60
 
@@ -44,8 +45,36 @@ end
 function crackfix.is_hypervisor(entry)
   if type(entry) ~= "table" then return false end
   local badge = tostring(entry.badge or ""):lower()
-  local file = tostring(entry.file or ""):lower()
-  return badge == "hypervisor" or file:find("hypervisor", 1, true) ~= nil
+  local file = tostring(entry.file or entry.filename or ""):lower()
+  if badge == "hypervisor" or file:find("hypervisor", 1, true) ~= nil then return true end
+  for _, b in ipairs(entry.badges or {}) do
+    if tostring(b):lower() == "hypervisor" then return true end
+  end
+  return false
+end
+
+local function entry_badge(entry)
+  local badge = tostring(entry.badge or ""):lower()
+  if badge ~= "" then return badge end
+  local first = ""
+  for _, b in ipairs(entry.badges or {}) do
+    b = tostring(b):lower()
+    if first == "" then first = b end
+    if b == "bypass" then return b end
+  end
+  return first
+end
+
+-- sanitize_url(href) -> url | nil
+-- Escape the characters that cannot appear literally in a URL, leaving existing
+-- %XX sequences intact so an already-encoded href is not encoded twice. Used only
+-- for entries that carry no filename to build from.
+function crackfix.sanitize_url(href)
+  href = tostring(href or "")
+  if href == "" then return nil end
+  return (href:gsub("[%s\"<>\\%^`{|}]", function(c)
+    return string.format("%%%02X", c:byte())
+  end))
 end
 
 -- Choose the best entry from a list for one appid. Skips hypervisor entries.
@@ -55,8 +84,8 @@ function crackfix.pick_entry(entries)
   if type(entries) ~= "table" then return nil end
   local first
   for _, e in ipairs(entries) do
-    if type(e) == "table" and e.file and not crackfix.is_hypervisor(e) then
-      if tostring(e.badge or ""):lower() == "bypass" then return e end
+    if type(e) == "table" and (e.file or e.filename or e.href) and not crackfix.is_hypervisor(e) then
+      if entry_badge(e) == "bypass" then return e end
       if not first then first = e end
     end
   end
@@ -67,15 +96,33 @@ end
 -- like the other fix entries: { status = 200|404, url?, file?, badge? }.
 function crackfix.lookup(index, appid)
   local res = { status = 404, available = false }
-  if type(index) ~= "table" or type(index.fixes) ~= "table" then return res end
-  local entries = index.fixes[tostring(appid)]
+  if type(index) ~= "table" then return res end
+  local entries
+  if type(index.fixes) == "table" then
+    entries = index.fixes[tostring(appid)]
+  else
+    for _, game in ipairs(index) do
+      if type(game) == "table" and tonumber(game.appid) == tonumber(appid) then
+        entries = game.fixes
+        res.gameName = game.name
+        break
+      end
+    end
+  end
   local entry = crackfix.pick_entry(entries)
   if not entry then return res end
+  local file = entry.file or entry.filename
   res.status = 200
   res.available = true
-  res.url = crackfix.build_url(entry.file)
-  res.file = entry.file
-  res.badge = entry.badge
+  -- The catalogue's href is NOT url-encoded: live entries carry raw spaces
+  -- ("/fixes/Gang Beasts.zip"), which curl rejects outright (rc=3, "URL using
+  -- bad/illegal format"). Build from the filename whenever there is one — that
+  -- path goes through url_encode — and only fall back to sanitizing the href.
+  res.url = file and crackfix.build_url(file) or crackfix.sanitize_url(entry.href)
+  res.file = file
+  res.badge = entry_badge(entry)
+  res.requiresAuth = type(res.url) == "string"
+    and res.url:match("^https://generator%.ryuu%.lol/fixes/") ~= nil
   return res
 end
 

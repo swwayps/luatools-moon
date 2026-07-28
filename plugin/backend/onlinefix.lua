@@ -28,12 +28,41 @@ function onlinefix.url_decode(s)
   end))
 end
 
--- Normalize a title for matching: lowercase, keep only [a-z0-9]. This
--- collapses spaces, punctuation, colons, ™/® and any UTF-8 high bytes, so
--- "Age of Mythology: Extended Edition" == "Age of Mythology Extended Edition".
+-- Normalize a title for matching. Most games only need lowercase ASCII words;
+-- GTA mirrors also abbreviate the franchise, subtitles and edition names.
+-- Expand only those GTA tokens so original and Definitive editions remain
+-- distinct while "GTA SA DE" matches Steam's full display name.
 function onlinefix.normalize(name)
   if type(name) ~= "string" then return "" end
-  return (name:lower():gsub("[^a-z0-9]", ""))
+  local words = {}
+  for word in name:lower():gmatch("[a-z0-9]+") do words[#words + 1] = word end
+  if #words == 0 then return "" end
+
+  local gta = words[1] == "gta"
+    or (words[1] == "grand" and words[2] == "theft" and words[3] == "auto")
+  if not gta then return table.concat(words) end
+
+  local out, start = { "grand", "theft", "auto" }, 1
+  if words[1] == "gta" then start = 2 else start = 4 end
+  local romans = { i = "1", ii = "2", iii = "3", iv = "4", v = "5", vi = "6" }
+  for i = start, #words do
+    local word = words[i]
+    if word == "the" then
+      -- Articles vary between Steam and mirror filenames.
+    elseif word == "sa" then
+      out[#out + 1] = "san"
+      out[#out + 1] = "andreas"
+    elseif word == "de" then
+      out[#out + 1] = "definitive"
+      out[#out + 1] = "edition"
+    elseif word == "vice" and words[i + 1] ~= "city" then
+      out[#out + 1] = "vice"
+      out[#out + 1] = "city"
+    else
+      out[#out + 1] = romans[word] or word
+    end
+  end
+  return table.concat(out)
 end
 
 -- Extract the clean game name from a decoded ".rar" filename. The naming is
@@ -90,6 +119,52 @@ function onlinefix.find_fix(html, game_name)
     end
   end
   return nil
+end
+
+-- fetch_index(deps) -> body|nil, source
+-- Get the mirror's index, cheaply and with a hard ceiling on how long it may
+-- take. This matters more than it looks: the plugin backend runs inside Lumen's
+-- SINGLE-THREADED loop, so every second spent waiting on this third party is a
+-- second in which no other RPC is answered. A mirror answering in 23s (measured)
+-- used to freeze the whole Fixes Menu — a click on Crack/Bypass simply queued
+-- behind it. So: serve a fresh cache without any request, bound the retries by a
+-- total time budget, and prefer a stale copy over hanging.
+--
+-- deps = { get(url, opts), now(), read() -> {body=, at=}, write(body), ttl, budget }
+onlinefix.INDEX_URL = "http://api.perondepot.xyz/all/"
+onlinefix.INDEX_TTL = 600      -- seconds a cached index stays fresh
+onlinefix.INDEX_BUDGET = 12    -- seconds of wall clock this call may consume
+onlinefix.INDEX_TIMEOUT = 6    -- seconds per attempt
+
+function onlinefix.fetch_index(deps)
+  deps = deps or {}
+  local now = deps.now or function() return os.time() end
+  local ttl = deps.ttl or onlinefix.INDEX_TTL
+  local budget = deps.budget or onlinefix.INDEX_BUDGET
+
+  local cached = deps.read and deps.read() or nil
+  local started = now()
+  if type(cached) == "table" and cached.body and cached.body ~= ""
+      and type(cached.at) == "number" and (started - cached.at) < ttl then
+    return cached.body, "cache"
+  end
+
+  if deps.get then
+    repeat
+      local resp = deps.get(onlinefix.INDEX_URL, { timeout = onlinefix.INDEX_TIMEOUT })
+      if type(resp) == "table" and resp.status == 200 and resp.body and resp.body ~= "" then
+        if deps.write then deps.write(resp.body) end
+        return resp.body, "network"
+      end
+    until (now() - started) >= budget
+  end
+
+  -- Unreachable or too slow: a stale index still answers the question for every
+  -- fix that already existed, which beats a spinner that never resolves.
+  if type(cached) == "table" and cached.body and cached.body ~= "" then
+    return cached.body, "stale"
+  end
+  return nil, "unavailable"
 end
 
 return onlinefix

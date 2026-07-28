@@ -9,6 +9,7 @@ local utils = require("plugin_utils")
 local api_manifest = require("api_manifest")
 local settings_manager = require("settings.manager")
 local cjson = require("json")
+local smart_merge = require("smart_merge")
 
 local downloads = {}
 local DOWNLOAD_STATE = {}
@@ -72,13 +73,15 @@ function downloads.get_add_status(appid)
                     currentApi = data.currentApi,
                 })
 
-                if data.status == "extracted" then
-                    -- Background script finished! Complete the installation synchronously.
-                    local dest_path = fs.join(dest_root, tostring(appid) .. ".zip")
-                    local extract_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
-                    local apiName = _get_download_state(appid).currentApi or "Unknown"
+                if data.status == "collected" or data.status == "extracted" then
+                    -- Both the parallel collector (collected) and the manual
+                    -- single-source downloader (extracted) use the same strict
+                    -- merge/validation/publication path.
+                    local collection_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
+                    local apiName = _get_download_state(appid).currentApi or "Merged sources"
 
-                    local ok, res = pcall(downloads._finalize_install_lua, appid, extract_dir, dest_path, apiName)
+                    local ok, res = pcall(downloads._finalize_install_lua,
+                        appid, collection_dir, nil, apiName)
                     if not ok then
                         _set_download_state(appid, { status = "failed", error = tostring(res) })
                     end
@@ -87,10 +90,12 @@ function downloads.get_add_status(appid)
                     pcall(fs.remove, state_file)
                     pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.ps1"))
                     pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_dl.sh"))
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.tsv"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.bin"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_coverage.tsv"))
                 elseif data.status == "failed" then
                     pcall(fs.remove, state_file)
-                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.tsv"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_candidates.bin"))
+                    pcall(fs.remove, fs.join(dest_root, tostring(appid) .. "_coverage.tsv"))
                 end
             end
         end
@@ -99,81 +104,55 @@ function downloads.get_add_status(appid)
     return { success = true, state = _get_download_state(appid) }
 end
 
-function downloads._finalize_install_lua(appid, extract_dir, dest_path, api_name)
+function downloads._finalize_install_lua(appid, collection_dir, _, api_name)
     _set_download_state(appid, { status = "processing" })
     local base_path = steam_utils.detect_steam_install_path()
-    local target_dir = fs.join(base_path, "config", "stplug-in")
-    if not fs.exists(target_dir) then fs.create_directories(target_dir) end
+    local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
+    local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
+        "picsbuffer_" .. tostring(appid) .. ".bin")
+    local appinfo_text = fs.exists(appinfo_path) and (m_utils.read_file(appinfo_path) or "") or ""
 
-    local depot_cache = fs.join(base_path, "depotcache")
-    if not fs.exists(depot_cache) then fs.create_directories(depot_cache) end
+    local result, err = smart_merge.install(appid, collection_dir, {
+        home = home,
+        steam_root = base_path,
+        appinfo_text = appinfo_text,
+        read_file = m_utils.read_file,
+        write_file = function(path, content)
+            local ok, written = pcall(m_utils.write_file, path, content)
+            return ok and written ~= false
+        end,
+        exists = fs.exists,
+        list_recursive = fs.list_recursive,
+        mkdir = fs.create_directories,
+        rename = os.rename,
+        remove = function(path) local ok = pcall(fs.remove, path); return ok end,
+    })
 
-    local target_lua = fs.join(target_dir, tostring(appid) .. ".lua")
-    local extracted_lua_path = nil
-
-    local success_list, files = pcall(fs.list_recursive, extract_dir)
-    if success_list and files then
-        for _, entry in ipairs(files) do
-            if entry.is_directory then goto continue end
-            if entry.name:match("%.manifest$") then
-                local content = m_utils.read_file(entry.path)
-                if content then
-                    m_utils.write_file(fs.join(depot_cache, entry.name), content)
-                    -- slsteammoon: also seed slsteam-moon's persistent
-                    -- manifest store so the bundled (LuaTools) build is archived
-                    -- as soon as the game is added -- before any install or
-                    -- Steam restart -- so it shows in the Game Updates tab and
-                    -- survives Steam's depotcache purges. Non-fatal.
-                    local sls_store = fs.join(os.getenv("HOME") or "", ".config", "SLSsteam", "manifests")
-                    pcall(fs.create_directories, sls_store)
-                    pcall(m_utils.write_file, fs.join(sls_store, entry.name), content)
-                end
-            end
-            if entry.name == tostring(appid) .. ".lua" then
-                extracted_lua_path = entry.path
-            elseif not extracted_lua_path and entry.name:match("^%d+%.lua$") then
-                extracted_lua_path = entry.path
-            end
-            ::continue::
-        end
-    end
-
-    if extracted_lua_path and fs.exists(extracted_lua_path) then
-        local text = m_utils.read_file(extracted_lua_path)
-        if text then
-            local new_lines = {}
-            for line in text:gmatch("([^\n]*)\n?") do
-                if line:match("^%s*setManifestid%(") then
-                    line = line:gsub("^(%s*)(setManifestid)", "%1-- %2")
-                end
-                table.insert(new_lines, line)
-            end
-            if new_lines[#new_lines] == "" then table.remove(new_lines) end
-            text = table.concat(new_lines, "\n")
-            m_utils.write_file(target_lua, text)
-            _set_download_state(appid, { installedPath = target_lua })
-        end
-    end
-
-    pcall(fs.remove_all, extract_dir)
-    pcall(fs.remove, dest_path)
-    -- slsteam-moon discovers apps from the script filenames in stplug-in. A
-    -- package without a usable <appid>.lua has no game data, so fail instead
-    -- of reporting a successful zero-byte install.
-    if not fs.exists(target_lua) then
-        logger.warn("LuaTools: finalize appid=" .. tostring(appid)
-            .. " api=" .. tostring(api_name)
-            .. " -> NO .lua in downloaded package (no game data)")
+    pcall(fs.remove_all, collection_dir)
+    if not result then
+        logger.warn("LuaTools: aggregate finalize appid=" .. tostring(appid)
+            .. " -> " .. tostring(err))
         _set_download_state(appid, {
             status = "failed",
-            error = "The download from " .. tostring(api_name)
-                .. " did not include this game data. Try another source.",
+            error = "No valid game data was available from the configured sources.",
         })
-        return
+        return false
     end
-    logger.log("LuaTools: finalize appid=" .. tostring(appid)
-        .. " api=" .. tostring(api_name) .. " -> installed " .. tostring(target_lua))
-    _set_download_state(appid, { status = "done", success = true, api = api_name })
+
+    for _, conflict in ipairs(result.conflicts or {}) do
+        logger.warn("LuaTools: key conflict appid=" .. tostring(appid)
+            .. " depot=" .. tostring(conflict.id) .. " resolved automatically")
+    end
+    local contributors = table.concat(result.contributors or {}, ", ")
+    logger.log("LuaTools: aggregate finalize appid=" .. tostring(appid)
+        .. " sources=" .. contributors
+        .. " manifests=" .. tostring(result.manifest_count or 0)
+        .. " -> installed " .. tostring(result.installed_path))
+    _set_download_state(appid, {
+        status = "done", success = true, api = contributors,
+        installedPath = result.installed_path,
+    })
+    return true
 end
 
 local function _launch_async_download(appid, url, dest_path, extract_dir)
@@ -202,6 +181,19 @@ local function _launch_async_download(appid, url, dest_path, extract_dir)
     end
 end
 
+local function _prepare_single_source_dir(appid, api_name)
+    local dest_root = utils.ensure_temp_download_dir()
+    local collection_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
+    local source_dir = fs.join(collection_dir, "source_0000")
+    -- Never allow a prior successful extraction to satisfy a later broken ZIP.
+    pcall(fs.remove_all, collection_dir)
+    fs.create_directories(source_dir)
+    m_utils.write_file(fs.join(source_dir, ".source-name"),
+        tostring(api_name or "Manual source"):gsub("%z", ""))
+    m_utils.write_file(fs.join(source_dir, ".source-priority"), "0\n")
+    return dest_root, source_dir
+end
+
 function downloads.start_add_via_luatools_from_url(appid, url, apiName)
     if type(appid) == "string" then appid = tonumber(appid) end
     if not appid then return { success = false, error = "Invalid appid" } end
@@ -211,9 +203,8 @@ function downloads.start_add_via_luatools_from_url(appid, url, apiName)
 
     local ok, res = pcall(function()
         if not url or url == "" then error("Invalid URL provided") end
-        local dest_root = utils.ensure_temp_download_dir()
+        local dest_root, extract_dir = _prepare_single_source_dir(appid, apiName)
         local dest_path = fs.join(dest_root, tostring(appid) .. ".zip")
-        local extract_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
         _launch_async_download(appid, url, dest_path, extract_dir)
     end)
 
@@ -241,13 +232,11 @@ function downloads.start_add_via_luatools(appid)
 
     local dest_root = utils.ensure_temp_download_dir()
     local dest_path = fs.join(dest_root, tostring(appid) .. ".zip")
-    local extract_dir = fs.join(dest_root, "extracted_" .. tostring(appid))
     local hubcap_api_key = _get_hubcap_api_key()
 
     local ok, res = pcall(function()
-        -- Note: For auto-add we only try the FIRST valid URL without verifying it via a synchronous HTTP request,
-        -- because verifying it synchronously would defeat the purpose of async downloads.
-        -- We assume CheckApisForApp already verified availability before user clicked this!
+        -- Legacy automatic path: probe APIs in configured order and hand the
+        -- first available source to the validated single-source finalizer.
         local target_url = nil
         local target_name = nil
         for _, api in ipairs(apis) do
@@ -295,6 +284,7 @@ function downloads.start_add_via_luatools(appid)
         if not target_url then error("Not available on any API") end
 
         _set_download_state(appid, { status = "downloading", currentApi = target_name })
+        local _, extract_dir = _prepare_single_source_dir(appid, target_name)
         _launch_async_download(appid, target_url, dest_path, extract_dir)
     end)
 
@@ -376,14 +366,11 @@ function downloads.check_apis_for_app(appid)
     return { success = true, results = results }
 end
 
--- slsteammoon: smart source selection (speed-first, completeness-aware).
--- Inlined into upstream downloads.lua before `return downloads` by build.sh.
--- Builds the candidate list from the enabled APIs (reusing the same
--- <moapikey>/<apikey>/<appid> substitution and skip-if-key-missing rules as
--- start_add_via_luatools) and launches scripts/smart_download.sh, which races
--- all sources in parallel, scores completeness, picks the best of the fast
--- ones, and reports progress/errors through the <appid>_state.json contract
--- that get_add_status already polls.
+-- slsteammoon: bounded parallel Smart Download aggregation.
+-- Builds candidates from every enabled API (including custom entries), reusing
+-- the <moapikey>/<apikey>/<appid> substitution and missing-key skip rules. The
+-- worker downloads each source once, preserves every source completed before
+-- coverage/deadline closure, and hands the isolated trees to smart_merge.
 
 -- ~/.lumen.log path (the file the plugin logger writes to). HOME-based, with
 -- the same /tmp fallback as lumen/lua/logger.lua, so the detached worker's
@@ -393,16 +380,17 @@ local function _lumen_log_path()
     return home .. "/.lumen.log"
 end
 
-local function _launch_smart_download(appid, candidates_file, dest_root, state_file)
+local function _launch_smart_download(appid, candidates_file, coverage_file, dest_root, state_file)
     local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "smart_download.sh")
     m_utils.exec('chmod +x "' .. sh_path .. '"')
     -- Capture the detached worker's stdout+stderr into ~/.lumen.log (was
-    -- /dev/null, which hid every race/download/extract failure -> the
+    -- /dev/null, which hid download/extract/collection failures -> the
     -- frontend's only signal was a bare "failed" state, surfaced as the
     -- opaque "Unknown error"). The worker emits ISO-8601 UTC diagnostics.
     local cmd = string.format(
-        'nohup bash "%s" "%s" "%s" "%s" "%s" >> "%s" 2>&1 &',
-        sh_path, tostring(appid), state_file, dest_root, candidates_file, _lumen_log_path()
+        'nohup bash "%s" "%s" "%s" "%s" "%s" "%s" >> "%s" 2>&1 &',
+        sh_path, tostring(appid), state_file, dest_root, candidates_file,
+        coverage_file, _lumen_log_path()
     )
     m_utils.exec(cmd)
 end
@@ -446,7 +434,7 @@ function downloads.start_add_via_luatools_smart(appid)
     -- appid-keyed scratch/state/output paths and clobber each other -> spurious
     -- "failed" and the install flapping users see. If a non-terminal add is
     -- already in flight AND its state file is fresh (a crashed worker's stale
-    -- file, older than the grace window, is ignored so a real retry still
+    -- file, older than the freshness window, is ignored so a real retry still
     -- works), skip relaunching a second worker.
     do
         local dest_root = utils.ensure_temp_download_dir()
@@ -454,7 +442,7 @@ function downloads.start_add_via_luatools_smart(appid)
         local st = _smart_inflight_status(state_file)
         local INFLIGHT = {
             downloading = true, extracting = true, extracted = true,
-            processing = true, queued = true,
+            collected = true, processing = true, queued = true,
         }
         if st and INFLIGHT[st] then
             local age = _smart_state_age(state_file)
@@ -481,20 +469,20 @@ function downloads.start_add_via_luatools_smart(appid)
 
     local ok, res = pcall(function()
         local hubcap_api_key = _get_hubcap_api_key()
-        local lines = {}
-        for _, api in ipairs(apis) do
-            local name = api.name or "Unknown"
-            local template = api.url or ""
-            local skip = false
+        local records = {}
+        for index, api in ipairs(apis) do
+            local name = tostring(api.name or "Unknown"):gsub("%z", "")
+            local template = tostring(api.url or ""):gsub("%z", "")
+            local skip = template == ""
 
-            if string.find(template, "<moapikey>") then
+            if string.find(template, "<moapikey>", 1, true) then
                 if not hubcap_api_key or hubcap_api_key == "" then
                     skip = true
                 else
                     template = template:gsub("<moapikey>", hubcap_api_key)
                 end
             end
-            if not skip and string.find(template, "<apikey>") then
+            if not skip and string.find(template, "<apikey>", 1, true) then
                 if not api.api_key or api.api_key == "" then
                     skip = true
                 else
@@ -504,18 +492,39 @@ function downloads.start_add_via_luatools_smart(appid)
 
             if not skip then
                 local url = template:gsub("<appid>", tostring(appid))
-                -- name<TAB>url, one candidate per line
-                table.insert(lines, name .. "\t" .. url)
+                records[#records + 1] = table.concat({
+                    tostring(index - 1), name, url,
+                    tostring(tonumber(api.success_code) or 200), "",
+                }, "\0")
             end
         end
-        if #lines == 0 then error("No usable API sources") end
+        if #records == 0 then error("No usable API sources") end
 
         local dest_root = utils.ensure_temp_download_dir()
         local state_file = fs.join(dest_root, tostring(appid) .. "_state.json")
-        local candidates_file = fs.join(dest_root, tostring(appid) .. "_candidates.tsv")
-        m_utils.write_file(candidates_file, table.concat(lines, "\n") .. "\n")
+        local candidates_file = fs.join(dest_root, tostring(appid) .. "_candidates.bin")
+        local coverage_file = fs.join(dest_root, tostring(appid) .. "_coverage.tsv")
+        m_utils.write_file(candidates_file, table.concat(records))
+        os.execute('chmod 600 "' .. candidates_file .. '"')
+
+        local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
+        local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
+            "picsbuffer_" .. tostring(appid) .. ".bin")
+        local gids = {}
+        if fs.exists(appinfo_path) then
+            gids = smart_merge.parse_appinfo_gids(m_utils.read_file(appinfo_path) or "")
+        end
+        local coverage_lines, depots = {}, {}
+        for depot in pairs(gids) do depots[#depots + 1] = depot end
+        table.sort(depots)
+        for _, depot in ipairs(depots) do
+            coverage_lines[#coverage_lines + 1] = tostring(depot) .. "\t" .. gids[depot]
+        end
+        m_utils.write_file(coverage_file,
+            #coverage_lines > 0 and (table.concat(coverage_lines, "\n") .. "\n") or "")
+        os.execute('chmod 600 "' .. coverage_file .. '"')
         m_utils.write_file(state_file, '{"status": "downloading"}')
-        _launch_smart_download(appid, candidates_file, dest_root, state_file)
+        _launch_smart_download(appid, candidates_file, coverage_file, dest_root, state_file)
     end)
 
     if not ok then

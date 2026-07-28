@@ -16,6 +16,7 @@ local locales_mod      = require("locales.manager")
 local api_manifest     = require("api_manifest")
 local downloads        = require("downloads")
 local fixes            = require("fixes")
+local ryuu_auth        = require("ryuu_auth")
 local settings_manager = require("settings.manager")
 local auto_update      = require("auto_update")
 
@@ -464,6 +465,7 @@ function CheckForFixes(appid)
             bundled_path = (plugin_dir ~= "") and (plugin_dir .. "/backend/ryuu_index.json") or nil,
             refresh_script = (plugin_dir ~= "") and (plugin_dir .. "/backend/scripts/ryuu_index.sh") or nil,
         })
+        res.crackFix.authConfigured = ryuu_auth.status().configured == true
     end)
     if type(res) == "table" and type(res.crackFix) ~= "table" then
         res.crackFix = { status = 404, available = false }
@@ -516,6 +518,39 @@ function ApplyGameFix(appid, contentScriptQuery, downloadUrl, fixType, gameName,
     return json_ok(res)
 end
 
+function GetRyuuAuthStatus()
+    local ok, status = pcall(ryuu_auth.status)
+    if not ok then return json_err(status) end
+    status.success = true
+    return json_ok(status)
+end
+
+function SaveRyuuAuthCredential(contentScriptQuery, credential)
+    local ok, status, err = pcall(ryuu_auth.save, tostring(credential or ""))
+    if not ok then return json_err(status) end
+    if not status then return json_err(err or "Invalid Ryuu authentication.") end
+    status.success = true
+    return json_ok(status)
+end
+
+-- Adopt the session cookie Steam's own browser holds after the in-client Ryuu
+-- login. Called by Lumen's injector with a value read from the CEF cookie jar,
+-- never by JavaScript: the secret stays inside Lua.
+function AdoptRyuuSessionValue(contentScriptQuery, session)
+    local ok, status, err = pcall(ryuu_auth.adopt_session_value, tostring(session or ""))
+    if not ok then return json_err(status) end
+    if not status then return json_err(err or "Ryuu has not accepted this session yet.") end
+    status.success = true
+    return json_ok(status)
+end
+
+function ClearRyuuAuthCredential()
+    local ok, removed = pcall(ryuu_auth.clear)
+    if not ok then return json_err(removed) end
+    if not removed then return json_err("Could not remove Ryuu authentication.") end
+    return json_ok({ success = true, configured = false })
+end
+
 function ApplySpaceFix(appid, contentScriptQuery)
     -- AIO fix on Linux: enable slsteam-moon FakeAppIds { appid: 480 } so the
     -- game runs as Spacewar on the real client layer. No download/extract.
@@ -553,20 +588,33 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
     end
     local ok, res = pcall(function()
         local onlinefix = require("onlinefix")
-        -- Retry a few times: the mirror is behind Cloudflare and the index
-        -- fetch occasionally times out transiently (e.g. right after a Steam
-        -- restart). A couple of immediate retries avoids a spurious
-        -- "unavailable" on an otherwise-reachable mirror.
-        local resp
-        for _ = 1, 3 do
-            resp = http_client.get("http://api.perondepot.xyz/all/", { timeout = 15 })
-            if resp and resp.status == 200 and resp.body then break end
-            resp = nil
-        end
-        if not resp then
+        -- The mirror is a third party and its response time varies wildly (0.3s
+        -- from one machine, 23s from another at the same moment). This handler
+        -- runs inside Lumen's single-threaded loop, so a slow mirror used to
+        -- freeze every other RPC — a Crack/Bypass click just queued behind it.
+        -- onlinefix.fetch_index caches, bounds the wait, and prefers a stale
+        -- index over hanging. See scripts/test-onlinefix.lua (X1..X10).
+        local cache_path = paths.backend_path("data/onlinefix_index.json")
+        local body = onlinefix.fetch_index({
+            get = function(url, opts) return http_client.get(url, opts) end,
+            read = function()
+                local raw = m_utils.read_file(cache_path)
+                if not raw or raw == "" then return nil end
+                local ok_decode, decoded = pcall(cjson.decode, raw)
+                if not ok_decode or type(decoded) ~= "table" then return nil end
+                return decoded
+            end,
+            write = function(index_body)
+                local ok_encode, encoded = pcall(cjson.encode,
+                    { at = os.time(), body = index_body })
+                if ok_encode then m_utils.write_file(cache_path, encoded) end
+                return true
+            end,
+        })
+        if not body then
             error("online-fix index unavailable")
         end
-        local entry = onlinefix.find_fix(resp.body, tostring(gameName or ""))
+        local entry = onlinefix.find_fix(body, tostring(gameName or ""))
         if not entry then
             return { success = true, found = false }
         end
@@ -889,7 +937,8 @@ function ApplySettingsChanges(changes)
         return json_err("Invalid payload format")
     end
 
-    logger.log("ApplySettingsChanges payload: " .. (pcall(cjson.encode, payload) and cjson.encode(payload) or "?"))
+    -- Settings may contain API credentials. Never serialize them into the log.
+    logger.log("ApplySettingsChanges: applying validated settings payload")
 
     local ok, res = pcall(settings_manager.apply_settings_changes, payload)
     if not ok then

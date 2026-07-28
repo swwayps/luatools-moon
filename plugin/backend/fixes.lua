@@ -5,6 +5,7 @@ local logger = require("plugin_logger")
 local utils = require("plugin_utils")
 local paths = require("paths")
 local cjson = require("json")
+local ryuu_auth = require("ryuu_auth")
 
 local fixes = {}
 
@@ -55,6 +56,23 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
     local dest_root = utils.ensure_temp_download_dir()
     local dest_zip = fs.join(dest_root, "fix_" .. tostring(appid) .. ".zip")
     local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
+    local header_file = ""
+
+    if tostring(download_url):match("^https://generator%.ryuu%.lol/fixes/") then
+        local auth_header = ryuu_auth.get_header_line()
+        if not auth_header then
+            return {
+                success = false,
+                errorCode = "authentication",
+                error = "Ryuu authentication is required. Add a current session cookie or auth key.",
+            }
+        end
+        header_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_headers.txt")
+        if m_utils.write_file(header_file, auth_header) == false then
+            return { success = false, error = "Could not prepare Ryuu authentication." }
+        end
+        m_utils.exec('chmod 600 "' .. header_file .. '"')
+    end
 
     logger.log("LuaTools: Applying fix to " .. tostring(install_path))
     m_utils.write_file(state_file, '{"status": "downloading"}')
@@ -70,9 +88,14 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
     else
         local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "downloader.sh")
         m_utils.exec('chmod +x "' .. sh_path .. '"')
+-- SPEED_LIMIT/SPEED_TIME: the shared downloader defaults (20 KB/s over 5s) are
+        -- tuned for small manifest fetches and kill a fix archive on a slow link
+        -- (measured: the same 11 MB file took 2s on one connection and had not
+        -- finished after 5 minutes on another). Here only a transfer that is
+        -- effectively dead should abort, so the floor is 1 KB/s over 45s.
         local cmd = string.format(
-            'nohup env MAX_TIME=0 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &',
-            sh_path, download_url, dest_zip, install_path, state_file
+            'nohup env MAX_TIME=0 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash "%s" "%s" "%s" "%s" "%s" "" "%s" >> "${HOME:-/tmp}/.lumen.log" 2>&1 &',
+            sh_path, download_url, dest_zip, install_path, state_file, header_file
         )
         m_utils.exec(cmd)
     end
@@ -84,6 +107,7 @@ function fixes.get_apply_status(appid)
     local dest_root = utils.ensure_temp_download_dir()
     local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
     local dest_zip = fs.join(dest_root, "fix_" .. tostring(appid) .. ".zip")
+    local header_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_headers.txt")
 
     if not fs.exists(state_file) then
         return { success = true, state = { status = "done" } }
@@ -97,8 +121,15 @@ function fixes.get_apply_status(appid)
                 data.status = "done"
                 pcall(fs.remove, state_file)
                 pcall(fs.remove, dest_zip)
+                pcall(fs.remove, header_file)
             elseif data.status == "failed" then
                 pcall(fs.remove, state_file)
+                pcall(fs.remove, header_file)
+                if data.errorCode == "authentication" then
+                    -- A rejected session is no longer useful. Clear it so the
+                    -- next card click opens the guided authentication modal.
+                    pcall(ryuu_auth.clear)
+                end
             end
             return { success = true, state = data }
         end

@@ -1,123 +1,160 @@
 #!/usr/bin/env luajit
--- Tests for downloads._finalize_install_lua's script-install gate.
---
--- App discovery is driven directly by config/stplug-in/<appid>.lua. A valid
--- download must install that script and report success without maintaining a
--- parallel AdditionalApps registry. An archive with no usable script must fail
--- with a clear reason and leave no target behind.
---
--- Runs against the BUILT dist backend (that's what ships). Load with a small
--- in-memory VFS + module shims so we can drive finalize without the network
--- or a real Steam tree.
---
--- Run from the repo root:  luajit scripts/test-finalize-install.lua
-
-local REPO = (arg and arg[0] or ""):gsub("scripts/[^/]*$", "")
-if REPO == "" then REPO = "./" end
-local BACKEND = REPO .. "dist/luatools/backend"
-
--- ---- in-memory VFS -------------------------------------------------------
-local FILES = {}    -- path -> content
-local DIRS = {}     -- path -> true
-local LIST = {}     -- dir  -> { {name=, path=, is_directory=}, ... }
-
-local function join(...)
-  local parts = { ... }
-  return table.concat(parts, "/")
-end
-
--- ---- observation sinks ---------------------------------------------------
-local REGISTERED = {}   -- appids passed to slsteam.register_app
-local LOGS = { info = {}, warn = {}, error = {} }
-
--- ---- module shims (installed before requiring downloads.lua) -------------
-package.loaded["utils"] = {
-  read_file = function(p) return FILES[p] end,
-  write_file = function(p, c) FILES[p] = c; return true end,
-  getenv = function(k) return os.getenv(k) end,
-  exec = function() return true end,
-}
-package.loaded["fs"] = {
-  join = join,
-  exists = function(p) return FILES[p] ~= nil or DIRS[p] == true end,
-  create_directories = function(p) DIRS[p] = true; return true end,
-  list_recursive = function(dir) return LIST[dir] or {} end,
-  remove_all = function() return true end,
-  remove = function(p) FILES[p] = nil; return true end,
-}
-package.loaded["http_client"] = { get = function() end, head = function() end, post = function() end }
-package.loaded["config"] = { USER_AGENT = "test", HTTP_TIMEOUT_SECONDS = 5 }
-package.loaded["plugin_logger"] = {
-  log = function(m) table.insert(LOGS.info, tostring(m)) end,
-  info = function(m) table.insert(LOGS.info, tostring(m)) end,
-  warn = function(m) table.insert(LOGS.warn, tostring(m)) end,
-  error = function(m) table.insert(LOGS.error, tostring(m)) end,
-}
-package.loaded["paths"] = {
-  get_plugin_dir = function() return "/tmp/plugin" end,
-  backend_path = function(p) return "/tmp/plugin/backend/" .. tostring(p) end,
-}
-package.loaded["steam_utils"] = {
-  detect_steam_install_path = function() return "/tmp/steam" end,
-}
-package.loaded["plugin_utils"] = {
-  ensure_temp_download_dir = function() return "/tmp/dl" end,
-}
-package.loaded["api_manifest"] = { load_api_manifest = function() return {} end }
-package.loaded["settings.manager"] = { get_hubcap_api_key = function() return "" end }
-package.loaded["json"] = {
-  decode = function() return nil end,
-  encode = function() return "{}" end,
-}
-package.loaded["slsteam"] = {
-  register_app = function(appid) table.insert(REGISTERED, tonumber(appid)); return true, "added" end,
-}
-
-local downloads = dofile(BACKEND .. "/downloads.lua")
-
--- ---- harness -------------------------------------------------------------
+local merge = dofile("plugin/backend/smart_merge.lua")
 local fails = 0
 local function check(name, cond)
-  if cond then print("ok " .. name) else print("FAIL " .. name); fails = fails + 1 end
-end
-local function reset()
-  FILES, DIRS, LIST = {}, {}, {}
-  REGISTERED = {}
-  LOGS = { info = {}, warn = {}, error = {} }
-end
-local function logs_match(bucket, pat)
-  for _, m in ipairs(LOGS[bucket]) do if m:find(pat, 1, true) then return true end end
-  return false
+  if cond then print("ok   - " .. name) else print("FAIL - " .. name); fails = fails + 1 end
 end
 
--- ==========================================================================
--- C1: archive HAS the game's <appid>.lua -> install it without registration.
--- ==========================================================================
-reset()
-local APP1 = 2830030
-local ex1 = "/tmp/extract1"
-local lua1 = ex1 .. "/" .. APP1 .. ".lua"
-FILES[lua1] = 'addappid(' .. APP1 .. ', 1, "' .. string.rep("a", 64) .. '")\n'
-LIST[ex1] = { { name = APP1 .. ".lua", path = lua1, is_directory = false } }
-downloads._finalize_install_lua(APP1, ex1, "/tmp/d1.zip", "TestSource")
+local function u32(n)
+  local b1=n%256; n=math.floor(n/256); local b2=n%256; n=math.floor(n/256)
+  local b3=n%256; n=math.floor(n/256); return string.char(b1,b2,b3,n%256)
+end
+local function divdec(text, divisor)
+  local out, carry = {}, 0
+  for digit in text:gmatch("%d") do
+    local value=carry*10+tonumber(digit); local q=math.floor(value/divisor); carry=value%divisor
+    if #out>0 or q>0 then out[#out+1]=tostring(q) end
+  end
+  return #out==0 and "0" or table.concat(out), carry
+end
+local function varint(value)
+  local out, text = {}, tostring(value)
+  repeat
+    local quotient, remainder = divdec(text,128)
+    out[#out+1]=string.char(remainder+(quotient~="0" and 128 or 0)); text=quotient
+  until text=="0"
+  return table.concat(out)
+end
+local function manifest(depot,gid,created)
+  local meta=string.char(8)..varint(depot)..string.char(16)..varint(gid)..string.char(24)..varint(created)
+  return u32(0x71F617D0)..u32(0)..u32(0x1F4812BE)..u32(#meta)..meta
+end
 
-check("C1 does not register the app", #REGISTERED == 0)
-check("C1 wrote target lua", FILES["/tmp/steam/config/stplug-in/" .. APP1 .. ".lua"] ~= nil)
-check("C1 logged the install", logs_match("info", "installed"))
+local function harness(initial)
+  local files, dirs = {}, {}
+  for path, content in pairs(initial or {}) do files[path]=content end
+  local fail_destination
+  local function list_recursive(root)
+    local out={}
+    for path in pairs(files) do
+      if path:sub(1,#root+1)==root.."/" then
+        out[#out+1]={name=path:match("[^/]+$"),path=path,is_directory=false}
+      end
+    end
+    table.sort(out,function(a,b) return a.path<b.path end); return out
+  end
+  local opts={home="/home/test",steam_root="/steam",read_file=function(p) return files[p] end,
+    write_file=function(p,c) files[p]=c; return true end,exists=function(p) return files[p]~=nil or dirs[p] end,
+    list_recursive=list_recursive,mkdir=function(p) dirs[p]=true; return true end,
+    remove=function(p) files[p]=nil; return true end,
+    rename=function(src,dst)
+      if dst==fail_destination then fail_destination=nil; return false end
+      if files[src]==nil then return false end; files[dst]=files[src]; files[src]=nil; return true
+    end}
+  return files,opts,function(path) fail_destination=path end
+end
+local APP=250900; local G11="3238948344654627795"; local G12="9223372036854770000"
+local K1=string.rep("a",64); local K2=string.rep("b",64); local KX=string.rep("c",64)
+local root="/collect"
+local files,opts,fail_on=harness({
+  [root.."/source_0000/.source-name"]="Hubcap", [root.."/source_0000/.source-priority"]="0\n",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+  [root.."/source_0001/.source-name"]="Ryuu", [root.."/source_0001/.source-priority"]="1\n",
+  [root.."/source_0001/"..APP..".lua"]='addappid(11,1,"'..KX..'")\naddappid(12,1,"'..K2..'")\n',
+  [root.."/source_0001/12_"..G12..".manifest"]=manifest(12,G12,200),
+  [root.."/source_0001/99_1.manifest"]="bad",
+})
+opts.appinfo_text='"appinfo" { "depots" { "11" { "manifests" { "public" { "gid" "'..G11..'" } } } } }'
+local installed,err=merge.install(APP,root,opts)
+check("transaction installs merged result",installed~=nil and err==nil)
+local target=files["/steam/config/stplug-in/"..APP..".lua"] or ""
+check("exact-current source resolves conflict",target:find(K1,1,true)~=nil and target:find(KX,1,true)==nil)
+check("complementary key included",target:find(K2,1,true)~=nil)
+check("windows manifest archived",files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]~=nil)
+check("linux manifest archived",files["/home/test/.config/SLSsteam/manifests/12_"..G12..".manifest"]~=nil)
+check("invalid manifest rejected",files["/home/test/.config/SLSsteam/manifests/99_1.manifest"]==nil)
+check("nothing written to depotcache",files["/steam/depotcache/11_"..G11..".manifest"]==nil)
+check("exact gid marked preferred",files["/home/test/.config/SLSsteam/manifests/.preferred_11"]==G11.."\n")
+check("conflict recorded without prompt",#installed.conflicts==1)
 
--- ==========================================================================
--- C2: archive has NO <appid>.lua -> fail without a target or registration.
--- ==========================================================================
-reset()
-local APP2 = 2393730
-local ex2 = "/tmp/extract2"
--- only a stray manifest, no lua
-LIST[ex2] = { { name = "123_456.manifest", path = ex2 .. "/123_456.manifest", is_directory = false } }
-FILES[ex2 .. "/123_456.manifest"] = "x"
-downloads._finalize_install_lua(APP2, ex2, "/tmp/d2.zip", "TestSource")
+local oldlua='addappid('..APP..')\n-- old\n'
+local empty_files,empty_opts=harness({["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
+  [root.."/source_0000/.source-name"]="Empty",[root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100)})
+local no_result=merge.install(APP,root,empty_opts)
+check("missing source lua fails",no_result==nil)
+check("old target cannot mask failed collection",empty_files["/steam/config/stplug-in/"..APP..".lua"]==oldlua)
+check("failed collection publishes no manifest",empty_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]==nil)
 
-check("C2 did NOT register the app", #REGISTERED == 0)
-check("C2 did NOT write a target lua", FILES["/tmp/steam/config/stplug-in/" .. APP2 .. ".lua"] == nil)
-check("C2 warned about missing game data", logs_match("warn", "NO .lua") or logs_match("warn", "no game data"))
+local garbage_files,garbage_opts=harness({
+  [root.."/source_0000/.source-name"]="Broken",
+  [root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='<html>temporary upstream error</html>',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+})
+local garbage_result=merge.install(APP,root,garbage_opts)
+check("unrecognized lua cannot produce success",garbage_result==nil and
+  garbage_files["/steam/config/stplug-in/"..APP..".lua"]==nil)
 
-if fails == 0 then print("\nALL TESTS OK") else print("\n" .. fails .. " FAILED"); os.exit(1) end
+local no_manifest_files,no_manifest_opts=harness({
+  [root.."/source_0000/.source-name"]="Keys only",
+  [root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+})
+local lua_only_result=merge.install(APP,root,no_manifest_opts)
+check("valid lua without manifests is accepted",lua_only_result~=nil and
+  (no_manifest_files["/steam/config/stplug-in/"..APP..".lua"] or ""):find(K1,1,true)~=nil and
+  lua_only_result.manifest_count==0)
+
+local partial_files,partial_opts=harness({
+  [root.."/source_0000/.source-name"]="Partial",
+  [root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n'
+    ..'setManifestid(11,"'..G11..'")\naddappid(12,1,"'..K2..'")\n'
+    ..'setManifestid(12,"'..G12..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+})
+local partial_result=merge.install(APP,root,partial_opts)
+check("lua remains valid when referenced manifests are unavailable",partial_result~=nil and
+  (partial_files["/steam/config/stplug-in/"..APP..".lua"] or ""):find(K2,1,true)~=nil)
+
+local rollback_files,rollback_opts,set_fail=harness({
+  ["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
+  ["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]="old-manifest",
+  [root.."/source_0000/.source-name"]="Hubcap",[root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+})
+set_fail("/steam/config/stplug-in/"..APP..".lua")
+local rolled=merge.install(APP,root,rollback_opts)
+check("publication failure reports failure",rolled==nil)
+check("publication failure restores target lua",rollback_files["/steam/config/stplug-in/"..APP..".lua"]==oldlua)
+check("publication failure restores manifest",rollback_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]=="old-manifest")
+
+-- Filesystem traversal order must not affect source metadata. Deliberately
+-- enumerate source_0000's manifest before its priority/name metadata.
+local ordered_files,ordered_opts=harness({
+  [root.."/source_0000/.source-name"]="Preferred",
+  [root.."/source_0000/.source-priority"]="0\n",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+  [root.."/source_0001/.source-name"]="Fallback",
+  [root.."/source_0001/.source-priority"]="1\n",
+  [root.."/source_0001/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0001/11_"..G11..".manifest"]=manifest(11,G11,200),
+})
+ordered_opts.list_recursive=function()
+  local function item(path) return {name=path:match("[^/]+$"),path=path,is_directory=false} end
+  return {
+    item(root.."/source_0001/.source-name"), item(root.."/source_0001/.source-priority"),
+    item(root.."/source_0001/"..APP..".lua"), item(root.."/source_0001/11_"..G11..".manifest"),
+    item(root.."/source_0000/11_"..G11..".manifest"), item(root.."/source_0000/"..APP..".lua"),
+    item(root.."/source_0000/.source-name"), item(root.."/source_0000/.source-priority"),
+  }
+end
+local ordered=merge.install(APP,root,ordered_opts)
+check("source priority is independent of traversal order",ordered~=nil and
+  ordered_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]==manifest(11,G11,100))
+
+if fails==0 then print("\nALL TESTS OK") else print("\n"..fails.." FAILED"); os.exit(1) end

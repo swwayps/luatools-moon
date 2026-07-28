@@ -7,6 +7,12 @@ local TMP = "/tmp/lt-dedup-test"
 os.execute("rm -rf " .. TMP .. " && mkdir -p " .. TMP .. "/steam")
 
 local exec_count = 0
+local exec_commands = {}
+local APIS = {
+  { name = "Hubcap", url = "https://example.test/<appid>", success_code = 200 },
+  { name = "custom/name\tline\nbreak", url = "https://custom.test/<appid>", success_code = 201 },
+  { name = "Missing Key", url = "https://key.test/<appid>?key=<apikey>", success_code = 200 },
+}
 
 local function isdir(p)
   local h = io.popen("[ -d '" .. p .. "' ] && echo d || echo f")
@@ -38,8 +44,8 @@ preload("fs", {
 preload("utils", { -- m_utils
   read_file = function(p) local f = io.open(p, "r"); if not f then return nil end local s = f:read("*a"); f:close(); return s end,
   write_file = function(p, s) local f = io.open(p, "w"); if f then f:write(s); f:close() end return true end,
-  getenv = function(k) return os.getenv(k) end,
-  exec = function() exec_count = exec_count + 1 end, -- count launches, don't spawn
+  getenv = function(k) if k == "HOME" then return TMP .. "/home" end return os.getenv(k) end,
+  exec = function(cmd) exec_count = exec_count + 1; exec_commands[#exec_commands + 1] = cmd end, -- count launches, don't spawn
 })
 preload("http_client", {})
 preload("config", {})
@@ -48,11 +54,15 @@ preload("plugin_logger", {
   warn = function(m) print("  [warn] " .. tostring(m)) end,
   info = function() end, error = function() end,
 })
-preload("paths", { get_plugin_dir = function() return "/tmp" end })
+preload("paths", {
+  get_plugin_dir = function() return "/tmp" end,
+  backend_path = function(p) return TMP .. "/" .. tostring(p) end,
+})
 preload("steam_utils", { detect_steam_install_path = function() return TMP .. "/steam" end })
 preload("plugin_utils", { ensure_temp_download_dir = function() return TMP end })
-preload("api_manifest", { load_api_manifest = function() return { { name = "Test", url = "http://127.0.0.1/<appid>" } } end })
+preload("api_manifest", { load_api_manifest = function() return APIS end })
 preload("settings.manager", { get_hubcap_api_key = function() return "" end })
+preload("smart_merge", dofile("plugin/backend/smart_merge.lua"))
 preload("json", { -- decode the fields downloads.lua reads from the state file
   decode = function(s)
     local status = s:match('"status"%s*:%s*"([^"]*)"')
@@ -96,19 +106,78 @@ exec_count = 0
 downloads.start_add_via_luatools_smart(APPID)
 check(exec_count >= 1, "(D) terminal 'done' -> proceed (exec_count=" .. exec_count .. ")")
 
+-- (D2) candidate handoff is NUL-safe, ordered, custom-API aware, and private.
+local candidate_path = TMP .. "/" .. APPID .. "_candidates.bin"
+local candidate = io.open(candidate_path, "rb")
+local candidate_data = candidate and candidate:read("*a") or ""
+if candidate then candidate:close() end
+local fields = {}
+for field in candidate_data:gmatch("([^%z]*)%z") do fields[#fields + 1] = field end
+check(#fields == 8, "(D2) two usable APIs produce two four-field NUL records")
+check(fields[1] == "0" and fields[2] == "Hubcap"
+  and fields[3] == "https://example.test/" .. APPID and fields[4] == "200",
+  "(D3) first API preserves priority, URL substitution, and success code")
+check(fields[5] == "1" and fields[6] == "custom/name\tline\nbreak"
+  and fields[7] == "https://custom.test/" .. APPID and fields[8] == "201",
+  "(D4) arbitrary custom API name survives NUL handoff")
+check(not candidate_data:find("Missing Key", 1, true), "(D5) API missing required key is skipped")
+local mode_pipe = io.popen("stat -c %a '" .. candidate_path .. "' 2>/dev/null")
+local mode = mode_pipe and mode_pipe:read("*l") or ""; if mode_pipe then mode_pipe:close() end
+check(mode == "600", "(D6) candidate file is private mode 0600")
+local coverage_path = TMP .. "/" .. APPID .. "_coverage.tsv"
+local coverage = io.open(coverage_path, "rb")
+check(coverage ~= nil, "(D7) coverage handoff exists even without cached appinfo")
+if coverage then coverage:close() end
+local launched_with_coverage = false
+for _, cmd in ipairs(exec_commands) do
+  if tostring(cmd):find(coverage_path, 1, true) then launched_with_coverage = true end
+end
+check(launched_with_coverage, "(D8) worker launch receives coverage path")
+
+-- Manual source selection uses downloader.sh, whose terminal handoff is
+-- "extracted". It must extract into a fresh indexed source directory so the
+-- same validated finalizer handles it without seeing stale prior files.
+os.remove(SF)
+exec_commands = {}
+exec_count = 0
+local manual = downloads.start_add_via_luatools_from_url(APPID,
+  "https://manual.test/" .. APPID .. ".zip", "Manual")
+check(manual and manual.success == true, "(D9) manual download starts")
+local manual_indexed = false
+for _, cmd in ipairs(exec_commands) do
+  if tostring(cmd):find("extracted_" .. APPID .. "/source_0000", 1, true) then
+    manual_indexed = true
+  end
+end
+check(manual_indexed, "(D10) manual download extracts into indexed source directory")
+
 -- ── terminal-latch (get_add_status) ─────────────────────────────────────────
--- Prepare an extracted package so get_add_status('extracted') finalizes to done.
+-- Prepare a source tree so both manual 'extracted' and smart 'collected'
+-- handoffs use the same strict finalizer.
 local exdir = TMP .. "/extracted_" .. APPID
-os.execute("mkdir -p '" .. exdir .. "'")
-do
-  local f = io.open(exdir .. "/" .. APPID .. ".lua", "w")
-  f:write("addappid(" .. APPID .. ")\naddappid(" .. APPID .. ',0,"abc")\n')
+local source_dir = exdir .. "/source_0000"
+local function prepare_source()
+  os.execute("mkdir -p '" .. source_dir .. "'")
+  local f = io.open(source_dir .. "/.source-name", "w"); f:write("Test"); f:close()
+  f = io.open(source_dir .. "/.source-priority", "w"); f:write("0\n"); f:close()
+  f = io.open(source_dir .. "/" .. APPID .. ".lua", "w")
+  f:write("addappid(" .. APPID .. ")\naddappid(" .. (APPID + 1)
+    .. ",1,\"" .. string.rep("a", 64) .. "\")\n")
   f:close()
 end
--- (E1) extracted -> finalize -> done
-os.execute("printf '%s' '{\"status\":\"extracted\",\"currentApi\":\"Test\"}' > " .. SF)
+
+-- (E0) downloader.sh manual handoff must finalize, not poll forever.
+prepare_source()
+os.execute("printf '%s' '{\"status\":\"extracted\",\"currentApi\":\"Manual\"}' > " .. SF)
+local manual_done = downloads.get_add_status(APPID)
+check(manual_done and manual_done.state and manual_done.state.status == "done",
+  "(E0) manual extracted -> validated finalize -> done")
+
+-- (E1) collected -> merge/finalize -> done
+prepare_source()
+os.execute("printf '%s' '{\"status\":\"collected\",\"currentApi\":\"Merged 1 sources\"}' > " .. SF)
 local r1 = downloads.get_add_status(APPID)
-check(r1 and r1.state and r1.state.status == "done", "(E1) extracted -> finalize -> done")
+check(r1 and r1.state and r1.state.status == "done", "(E1) collected -> merge/finalize -> done")
 -- (E2) a straggler worker writes 'failed' AFTER done -> latch must hold done
 os.execute("printf '%s' '{\"status\":\"failed\",\"error\":\"boom\"}' > " .. SF)
 local r2 = downloads.get_add_status(APPID)

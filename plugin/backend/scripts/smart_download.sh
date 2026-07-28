@@ -1,507 +1,281 @@
 #!/usr/bin/env bash
-# smart_download.sh — smart source selector + download worker for slsteammoon.
-#
-# Replaces the fast-download "first available source" auto-select with a
-# speed-first, completeness-aware race:
-#   - download every candidate source in parallel; a source is dropped only by
-#     its own curl guards (a connect timeout, and a speed floor that cancels a
-#     stalled/dead host like a 25 KB/s one), never by a shared wall clock;
-#   - apply a relative window: once the first COMPLETE source finishes, wait a
-#     short grace for an even-more-complete peer, then take everyone done and
-#     cancel the rest. While no complete source exists, keep awaiting whoever is
-#     still actively downloading — the leading source is never cut for being slow;
-#   - score each finished candidate for completeness (presence of the
-#     app-depot key that enables Workshop, then total depot keys, then
-#     bundled manifests) and pick the most complete, tie-broken by speed;
-#   - report real progress + per-source errors through the <appid>_state.json
-#     contract the frontend already polls.
-#
-# The pure logic is exposed as subcommands so it can be unit-tested without
-# the network (see scripts/test-smart-download.sh):
-#   smart_download.sh score  <appid> <candidate_dir>  -> "<app_key> <key_count> <manifest_count>"
-#   smart_download.sh select <appid> <work_dir>       -> winning candidate name
-#
-# Full worker (network):
-#   smart_download.sh <appid> <state_file> <dest_root> <candidates_file>
-
+# Bounded parallel collector for LuaTools game-data APIs.
 set -uo pipefail
-
-# Force a dot decimal separator everywhere. Under comma-decimal locales
-# (pt_BR, de_DE, ...) awk's printf emits "3,050"; downstream numeric awk
-# comparisons then fail (a comma-bearing token isn't a clean number, so awk
-# silently falls back to STRING comparison: "3,050" >= "25" tests '3' > '2'
-# = true, slamming the race window shut at ~3s regardless of CAP). Pinning
-# LC_ALL=C makes date/awk/curl all use dots and compare numerically.
 export LC_ALL=C
+umask 077
 
-# --- tunables (env-overridable for tests) ---------------------------------
-# The race is cut RELATIVELY, never by a wall clock: a source is only dropped
-# when (a) a faster, COMPLETE peer already won (speed-first GRACE), or (b) the
-# source itself goes dead / extremely slow (the curl speed floor below). The
-# leading source is never cancelled just for taking a while.
-: "${GRACE_SECS:=3}"        # speed-first grace once a COMPLETE source exists:
-                            # how long to await an even-more-complete peer before
-                            # committing the winner and cancelling the rest.
-: "${CONNECT_TIMEOUT:=10}"  # curl --connect-timeout: a source that can't even
-                            # establish a connection fails fast.
-: "${SPEED_LIMIT:=1000}"    # curl --speed-limit (bytes/s): THE limiter. A source
-: "${SPEED_TIME:=20}"       # transferring below SPEED_LIMIT for SPEED_TIME
-                            # sustained seconds is "dead/extremely slow" -> abort.
-                            # A momentary dip recovers (the window is sustained),
-                            # so the leading-but-temporarily-slow source survives.
-                            # On-demand zip builders (e.g. Ryuu) with high TTFB are
-                            # tolerated as long as bytes eventually flow.
-: "${MAX_TIME:=600}"        # curl --max-time per source: anti-runaway ceiling
-                            # ONLY (a misbehaving host streaming forever). It is
-                            # deliberately huge — normal healthy downloads finish
-                            # well before it; the speed floor, not this, is what
-                            # drops dead sources.
+: "${COLLECTION_DEADLINE:=8}"
+: "${COVERAGE_GRACE:=0.3}"
+: "${CONNECT_TIMEOUT:=20}"
+: "${SPEED_LIMIT:=1}"
+: "${SPEED_TIME:=120}"
+: "${ACTIVE_PROGRESS_WINDOW:=30}"
+: "${MAX_TRANSFER_TIME:=0}"
 
-# ==========================================================================
-# Pure logic
-# ==========================================================================
-
-# strip_lua_comments < file : echo the lua with `-- ...` comments removed
-strip_lua_comments() {
-  sed 's/--.*$//'
-}
-
-# score_candidate <appid> <candidate_dir>
-# Prints "<app_key> <key_count> <manifest_count>".
-#   app_key       = 1 if an addappid(<appid>, N, "<64hex>") line exists, else 0
-#   key_count     = number of addappid(d, N, "<64hex>") lines (real depot keys)
-#   manifest_count= number of *.manifest files in the directory
-score_candidate() {
-  local appid="$1" dir="$2"
-  local lua
-  lua="$(find "$dir" -maxdepth 1 -name '*.lua' -print -quit 2>/dev/null)"
-
-  local app_key=0 key_count=0 manifest_count=0
-  if [[ -n "$lua" && -f "$lua" ]]; then
-    local stripped
-    stripped="$(strip_lua_comments < "$lua")"
-    if grep -Eq "addappid\s*\(\s*${appid}\s*,\s*[0-9]+\s*,\s*\"[0-9A-Fa-f]{64}\"" <<<"$stripped"; then
-      app_key=1
-    fi
-    key_count="$(grep -Ec "addappid\s*\(\s*[0-9]+\s*,\s*[0-9]+\s*,\s*\"[0-9A-Fa-f]{64}\"" <<<"$stripped")"
-    [[ -z "$key_count" ]] && key_count=0
-  fi
-  manifest_count="$(find "$dir" -maxdepth 1 -name '*.manifest' -type f 2>/dev/null | wc -l | tr -d ' ')"
-
-  echo "$app_key $key_count $manifest_count"
-}
-
-# select_winner <appid> <work_dir>
-# work_dir holds, per candidate, a subdir <name>/ with extracted files and a
-# sibling <name>.time file with the download time (seconds). Prints the name
-# of the most complete candidate (score tuple), tie-broken by smallest time.
-select_winner() {
-  local appid="$1" wd="$2"
-  local best_name="" best_ak=-1 best_kc=-1 best_mc=-1 best_t=""
-  local dir
-  for dir in "$wd"/*/; do
-    [[ -d "$dir" ]] || continue
-    local name ak kc mc t
-    name="$(basename "$dir")"
-    read -r ak kc mc <<<"$(score_candidate "$appid" "$dir")"
-    t=999999
-    [[ -f "$wd/$name.time" ]] && t="$(cat "$wd/$name.time")"
-
-    local verdict
-    verdict="$(awk -v ak="$ak" -v kc="$kc" -v mc="$mc" -v t="$t" \
-                   -v bak="$best_ak" -v bkc="$best_kc" -v bmc="$best_mc" -v bt="$best_t" 'BEGIN{
-      if (bak < 0)   { print "yes"; exit }
-      if (ak != bak) { print (ak > bak) ? "yes" : "no"; exit }
-      if (kc != bkc) { print (kc > bkc) ? "yes" : "no"; exit }
-      if (mc != bmc) { print (mc > bmc) ? "yes" : "no"; exit }
-      print (t < bt) ? "yes" : "no"
-    }')"
-
-    if [[ "$verdict" == "yes" ]]; then
-      best_name="$name"; best_ak="$ak"; best_kc="$kc"; best_mc="$mc"; best_t="$t"
-    fi
-  done
-  echo "$best_name"
-}
-
-# zip_has_app_key <appid> <zipfile>
-# Peek inside a downloaded zip (without full extraction) and report whether
-# its <appid>.lua carries a real app-depot key: addappid(<appid>, N, "<64hex>")
-# with Lua comments stripped. Prints "yes"/"no". This is the mid-race signal
-# that a completed candidate is already "complete enough" (has the app/Workshop
-# depot key) so the race can stop early instead of waiting out the cap.
-zip_has_app_key() {
-  local appid="$1" zip="$2"
-  [[ -f "$zip" ]] || { echo "no"; return; }
-  local entry
-  entry="$(unzip -Z1 "$zip" 2>/dev/null | grep -E "(^|/)${appid}\.lua$" | head -1)"
-  [[ -n "$entry" ]] || { echo "no"; return; }
-  if unzip -p "$zip" "$entry" 2>/dev/null | strip_lua_comments \
-       | grep -Eq "addappid\s*\(\s*${appid}\s*,\s*[0-9]+\s*,\s*\"[0-9A-Fa-f]{64}\""; then
-    echo "yes"
-  else
-    echo "no"
-  fi
-}
-
-# window_decide <satisfied> <running> <elapsed> <since_satisfied>
-# Decide whether to keep waiting for more racers ("wait") or close the
-# collection window ("stop"). Relative-cut, completeness-aware — NEVER a
-# wall-clock cap:
-#   - all racers finished/died             -> stop
-#   - a complete source already won        -> speed-first: stop GRACE_SECS after it
-#                                             (its slower/still-running peers are
-#                                              then cancelled — a faster, complete
-#                                              source beat them)
-#   - otherwise (no complete source yet, a racer still in flight) -> WAIT,
-#     no matter how long it takes. A healthy source is never cut by time; only
-#     its OWN curl (connect-timeout + speed floor) drops it when it goes dead or
-#     extremely slow. This is what lets a slow-but-more-complete source (e.g. a
-#     host that builds the zip on the fly, high TTFB) run to completion.
-# `elapsed` is accepted for diagnostics/back-compat but no longer caps the wait.
-# Honours GRACE_SECS from the environment.
-window_decide() {
-  local satisfied="$1" running="$2" elapsed="$3" since_sat="$4"
-  # Defensive: normalise a comma decimal separator to a dot so the numeric
-  # awk comparison below never degrades into string comparison, even if a
-  # caller (or a comma-decimal locale) hands us "3,050" instead of "3.050".
-  since_sat="${since_sat//,/.}"
-  if [[ "${running:-0}" -eq 0 ]]; then echo "stop"; return; fi
-  if [[ "${satisfied:-0}" -eq 1 ]]; then
-    if awk -v s="$since_sat" -v g="$GRACE_SECS" 'BEGIN{exit !(s>=g)}'; then echo "stop"; return; fi
-  fi
-  echo "wait"
-}
-
-# mono_pct <prev_pct> <raw_pct>
-# Progress-bar smoothing: the displayed percentage must never go backwards
-# (the bar is a single 0..100 number but several differently-sized sources
-# race in parallel, so the raw fraction can drop when the anchor switches),
-# and must stay below 100 until the winner is committed (the extract phase
-# reports 100). Returns max(prev, min(raw, 99)).
 mono_pct() {
   local prev="${1:-0}" raw="${2:-0}"
   [[ "$raw" -gt 99 ]] && raw=99
   [[ "$raw" -lt 0 ]] && raw=0
   if [[ "$raw" -gt "$prev" ]]; then echo "$raw"; else echo "$prev"; fi
 }
-
-# ==========================================================================
-# Subcommand dispatch
-# ==========================================================================
-case "${1:-}" in
-  score)
-    score_candidate "$2" "$3"
-    exit 0
-    ;;
-  select)
-    select_winner "$2" "$3"
-    exit 0
-    ;;
-  appkey)
-    zip_has_app_key "$2" "$3"
-    exit 0
-    ;;
-  window)
-    window_decide "$2" "$3" "$4" "$5"
-    exit 0
-    ;;
-  mono_pct)
-    mono_pct "$2" "$3"
-    exit 0
-    ;;
-esac
-
-# ==========================================================================
-# Full worker (network): race -> window -> score -> select -> install
-#   smart_download.sh <appid> <state_file> <dest_root> <candidates_file>
-# ==========================================================================
+if [[ "${1:-}" == "mono_pct" ]]; then mono_pct "$2" "$3"; exit 0; fi
 
 APPID="${1:?appid required}"
 STATE_FILE="${2:?state_file required}"
 DEST_ROOT="${3:?dest_root required}"
 CANDIDATES_FILE="${4:?candidates_file required}"
-
-# Diagnostics. This worker is launched detached with stdout+stderr appended to
-# ~/.lumen.log (see smart_downloads.inc.lua::_launch_smart_download), so these
-# lines land in the same log as the rest of the plugin. ISO-8601 UTC prefix
-# mirrors logger.lua's format; the appid + pid tie interleaved lines (parallel
-# sources, possibly more than one worker) back to their run.
-slog() { printf '%s INFO smart_download[%s pid %s]: %s\n' \
-  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APPID" "$$" "$*"; }
-slog "worker start: state=$STATE_FILE dest=$DEST_ROOT candidates=$CANDIDATES_FILE"
-
-# Use system libraries, not the Steam Runtime's pinned ones (see downloader.sh).
-unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
-
-# Single-worker-per-appid lock. The fast-download click can fire more than once
-# (the frontend is re-injected on CEF context recreation) and the backend
-# dedups, but guard here too: two workers for the same appid would fight over
-# the shared appid-keyed handoff paths (the state file, <appid>.zip,
-# extracted_<appid>) and corrupt the install -> the spurious "failed"/flapping
-# users saw. The lock (fd 9) is held for this worker's whole lifetime; a second
-# worker that can't acquire it exits immediately without touching any state.
+COVERAGE_FILE="${5:-}"
+WORK="$DEST_ROOT/collect_${APPID}.$$"
+EXTRACT_DIR="$DEST_ROOT/extracted_${APPID}"
 LOCK="$DEST_ROOT/${APPID}.lock"
+mkdir -p "$WORK"
+rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
+trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" "$COVERAGE_FILE" 2>/dev/null' EXIT
+
+slog() { printf '%s INFO smart_download[%s pid %s]: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$APPID" "$$" "$*"; }
+write_state() {
+  local status="$1" current="$2" bytes="$3" total="$4" error="${5:-}" tmp="${STATE_FILE}.tmp.$$"
+  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":{},"error":"%s"}\n' \
+    "$status" "$current" "$bytes" "$total" "$error" > "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+now_ms() { date +%s%3N; }
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK"
-  if ! flock -n 9; then
-    slog "another worker already holds the lock for appid $APPID -> exiting (no-op)"
-    exit 0
-  fi
+  if ! flock -n 9; then slog "worker already active"; exit 0; fi
+fi
+unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
+
+# NUL records: source-index, display-name, URL, accepted HTTP status.
+declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE
+n=0
+exec 3< "$CANDIDATES_FILE"
+while IFS= read -r -d '' idx <&3; do
+  IFS= read -r -d '' name <&3 || break
+  IFS= read -r -d '' url <&3 || break
+  IFS= read -r -d '' code <&3 || break
+  [[ "$idx" =~ ^[0-9]+$ && "$code" =~ ^[0-9]+$ && -n "$url" ]] || continue
+  C_INDEX[n]="$idx"; C_NAME[n]="$name"; C_URL[n]="$url"; C_CODE[n]="$code"
+  C_ZIP[n]="$WORK/source_${n}.zip"; C_HEAD[n]="$WORK/source_${n}.headers"
+  C_PIPE[n]="$WORK/source_${n}.stream"; C_TOTAL_FILE[n]="$WORK/source_${n}.total"
+  C_TOTAL[n]=""; C_STATE[n]="pending"
+  n=$((n + 1))
+done
+exec 3<&-
+if [[ "$n" -eq 0 ]]; then write_state failed "" 0 0 "No usable API sources"; exit 1; fi
+
+declare -A EXPECTED
+expected_count=0
+if [[ -n "$COVERAGE_FILE" && -f "$COVERAGE_FILE" ]]; then
+  while IFS=$'\t' read -r depot gid; do
+    [[ "$depot" =~ ^[0-9]+$ && "$gid" =~ ^[0-9]+$ ]] || continue
+    if [[ -z "${EXPECTED["${depot}_${gid}.manifest"]+set}" ]]; then
+      EXPECTED["${depot}_${gid}.manifest"]=1
+      expected_count=$((expected_count + 1))
+    fi
+  done < "$COVERAGE_FILE"
 fi
 
-UA="discord(dot)gg/luatools"
-# Per-worker (pid-suffixed) scratch dir so concurrent workers — should one ever
-# slip past the lock + backend dedup — never share the race scratch. The
-# appid-keyed HANDOFF paths (<appid>.zip, extracted_<appid>, the state file)
-# stay as-is: get_add_status reads them by appid, and the lock guarantees a
-# single writer.
-WORK="$DEST_ROOT/race_${APPID}.$$"
-rm -rf "$WORK"; mkdir -p "$WORK"
-# Always remove the race scratch dir (all candidate downloads, winner and
-# losers alike) AND the candidates manifest on any exit — success or failure —
-# so unused source zips and the candidates list never linger on the user's
-# disk. The winning zip is copied out to DEST_ROOT/<appid>.zip before exit,
-# so this is safe.
-trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" 2>/dev/null' EXIT
-
-declare -A API_ERR_TYPE
-declare -A API_ERR_CODE
-
-json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
-
-write_state() {
-  # write_state <status> <currentApi> <bytesRead> <totalBytes> [error]
-  local status="$1" capi="$2" br="$3" tb="$4" err="${5:-}"
-  local errs="{" first=1 k
-  for k in "${!API_ERR_TYPE[@]}"; do
-    [[ $first -eq 0 ]] && errs+=","
-    first=0
-    errs+="\"$(json_escape "$k")\":{\"type\":\"${API_ERR_TYPE[$k]}\",\"code\":${API_ERR_CODE[$k]:-0}}"
-  done
-  errs+="}"
-  # "error" carries a human-readable reason on the failure paths so the frontend
-  # shows it instead of the opaque "Unknown error"; it is "" for live/ok states.
-  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":%s,"error":"%s"}\n' \
-    "$status" "$(json_escape "$capi")" "$br" "$tb" "$errs" "$(json_escape "$err")" > "$STATE_FILE"
+zip_is_safe_and_usable() {
+  local zip="$1" entries count
+  entries="$(unzip -Z1 "$zip" 2>/dev/null)" || return 1
+  [[ -n "$entries" ]] || return 1
+  if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"$entries"; then return 1; fi
+  count="$(grep -Ec "(^|/)${APPID}\\.lua$" <<<"$entries")"
+  [[ "$count" -eq 1 ]]
 }
 
-now() { date +%s.%N; }
+manifest_has_payload_magic() {
+  local signature
+  signature="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')"
+  [[ "$signature" == "d017f671" ]]
+}
 
-# --- load candidates ------------------------------------------------------
-declare -a C_NAME C_URL C_ZIP C_STAT C_HDR C_PID C_TOTAL C_STATE
-n=0
-while IFS=$'\t' read -r name url; do
-  [[ -z "${name:-}" || -z "${url:-}" ]] && continue
-  C_NAME[n]="$name"
-  C_URL[n]="$url"
-  C_ZIP[n]="$WORK/cand_${n}.zip"
-  C_STAT[n]="$WORK/cand_${n}.stat"
-  C_HDR[n]="$WORK/cand_${n}.hdr"
-  C_TOTAL[n]=0
-  C_STATE[n]="pending"
-  n=$((n + 1))
-done < "$CANDIDATES_FILE"
+coverage_complete() {
+  [[ "$expected_count" -gt 0 ]] || return 1
+  shopt -s nullglob globstar
+  local file candidate matches found
+  for file in "${!EXPECTED[@]}"; do
+    matches=("$EXTRACT_DIR"/source_*/**/"$file")
+    found=0
+    for candidate in "${matches[@]}"; do
+      if manifest_has_payload_magic "$candidate"; then
+        found=1
+        break
+      fi
+    done
+    [[ "$found" -eq 1 ]] || return 1
+  done
+  return 0
+}
 
-if [[ $n -eq 0 ]]; then
-  slog "no candidates parsed from $CANDIDATES_FILE -> failed"
-  write_state "failed" "" 0 0 "No sources are configured for this game"
-  exit 1
-fi
-slog "loaded $n candidate source(s): ${C_NAME[*]}"
+extract_source() {
+  local i="$1" dir
+  printf -v dir '%s/source_%04d' "$EXTRACT_DIR" "${C_INDEX[i]}"
+  rm -rf "$dir"; mkdir -p "$dir"
+  unzip -q "${C_ZIP[i]}" -d "$dir" || { rm -rf "$dir"; return 1; }
+  printf '%s' "${C_NAME[i]}" > "$dir/.source-name"
+  printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-index"
+  printf '%s\n' "${C_INDEX[i]}" > "$dir/.source-priority"
+}
 
-write_state "downloading" "" 0 0
+capture_curl_headers() {
+  local header_file="$1" total_file="$2"
+  local line clean plain status=0 content_length="" total_tmp="${total_file}.tmp"
+  : > "$header_file"
+  rm -f "$total_file" "$total_tmp"
+  while IFS= read -r line; do
+    clean="${line%$'\r'}"
+    if [[ "$clean" =~ ^\<\ HTTP/[0-9.]+[[:space:]]+([0-9]+) ]]; then
+      status="${BASH_REMATCH[1]}"
+      content_length=""
+      plain="${clean#< }"
+      printf '%s\n' "$plain" >> "$header_file"
+    elif [[ "${clean,,}" =~ ^\<\ content-length:[[:space:]]*([0-9]+)$ ]]; then
+      content_length="${BASH_REMATCH[1]}"
+      plain="${clean#< }"
+      printf '%s\n' "$plain" >> "$header_file"
+    elif [[ "$clean" == "< " && "$status" -ge 200 \
+        && ( "$status" -lt 300 || "$status" -ge 400 ) ]]; then
+      if [[ "$content_length" =~ ^[0-9]+$ ]]; then
+        printf '%s\n' "$content_length" > "$total_tmp"
+        mv -f "$total_tmp" "$total_file"
+      fi
+    fi
+  done
+}
 
-# --- best-effort HEAD burst for content lengths (for a real progress bar) -
-for ((i = 0; i < n; i++)); do
-  (
-    len="$(curl -sIL -A "$UA" --connect-timeout 3 --max-time 3 "${C_URL[i]}" 2>/dev/null \
-           | tr -d '\r' | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
-    echo "${len:-0}" > "$WORK/cand_${i}.len"
-  ) &
-done
-wait
-RACE_TOTAL=0
-for ((i = 0; i < n; i++)); do
-  if [[ -f "$WORK/cand_${i}.len" ]]; then
-    C_TOTAL[i]="$(cat "$WORK/cand_${i}.len")"
-    RACE_TOTAL=$((RACE_TOTAL + C_TOTAL[i]))
-  fi
-done
-
-# --- launch the parallel GET race -----------------------------------------
-for ((i = 0; i < n; i++)); do
-  (
-    code="$(curl -sL -A "$UA" \
-      --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
-      --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
-      -D "${C_HDR[i]}" \
-      -o "${C_ZIP[i]}" -w '%{http_code} %{size_download} %{time_total}' \
-      "${C_URL[i]}" 2>/dev/null)"
-    rc=$?
-    echo "$code $rc" > "${C_STAT[i]}"
-  ) &
+write_state downloading "" 0 0
+for ((i=0; i<n; i++)); do
+  mkfifo "${C_PIPE[i]}"
+  capture_curl_headers "${C_HEAD[i]}" "${C_TOTAL_FILE[i]}" < "${C_PIPE[i]}" &
+  C_PARSE_PID[i]=$!
+  # The verbose stream carries only metadata through the FIFO; the response
+  # body is written directly to the ZIP and this remains the source's only GET.
+  # COLLECTION_DEADLINE is only a fast-path cutoff after another source has
+  # succeeded. Before that, curl owns the generous connection/inactivity guards
+  # so slow links and delayed archive generation cannot become false failures.
+  stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' \
+    --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TRANSFER_TIME" \
+    --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
+    -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
   C_PID[i]=$!
 done
 
-# --- poll loop with completeness-aware window -----------------------------
-t0="$(now)"
-first_satisfied=""   # time the first COMPLETE (app-key) candidate finished
-satisfied=0          # 1 once any completed candidate carries the app-key
-disp_pct=0           # monotonic progress percentage shown to the frontend
-zip_has_lua() { unzip -Z1 "$1" 2>/dev/null | grep -Eq "(^|/)${APPID}\.lua$"; }
-
-# read_total <idx> : best-known total bytes for a racer. Prefer the HEAD
-# length; if missing (some hosts don't answer HEAD), parse Content-Length from
-# the live GET response headers dumped by curl -D.
-read_total() {
-  local i="$1" t="${C_TOTAL[$1]}"
-  if [[ "${t:-0}" -le 0 && -f "${C_HDR[i]}" ]]; then
-    t="$(tr -d '\r' < "${C_HDR[i]}" | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
-    [[ "${t:-0}" -gt 0 ]] && C_TOTAL[i]="$t"
-  fi
-  echo "${C_TOTAL[$1]:-0}"
-}
-
+start_ms="$(now_ms)"
+deadline_ms="$(awk -v s="$start_ms" -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", s+d*1000}')"
+grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
+active_window_ms="$(awk -v s="$ACTIVE_PROGRESS_WINDOW" 'BEGIN{printf "%.0f", s*1000}')"
+coverage_at=""; completed=0; progress_bytes=0; extension_logged=0; first_source_wait_logged=0
+for ((i=0; i<n; i++)); do
+  C_SIZE[i]=0
+  C_LAST_PROGRESS[i]="$start_ms"
+done
 while :; do
-  running=0
-
-  for ((i = 0; i < n; i++)); do
-    [[ "${C_STATE[i]}" != "pending" ]] && continue
+  running=0; bytes=0; poll_ms="$(now_ms)"
+  for ((i=0; i<n; i++)); do
+    size="$(stat -c %s "${C_ZIP[i]}" 2>/dev/null || echo 0)"
+    bytes=$((bytes + size))
+    if [[ "$size" -gt "${C_SIZE[i]:-0}" ]]; then
+      C_SIZE[i]="$size"
+      C_LAST_PROGRESS[i]="$poll_ms"
+    fi
+    [[ "${C_STATE[i]}" == pending ]] || continue
     if kill -0 "${C_PID[i]}" 2>/dev/null; then
       running=$((running + 1))
       continue
     fi
-    # this candidate's curl finished — classify it
-    local_line="$(cat "${C_STAT[i]}" 2>/dev/null)"
-    http="$(awk '{print $1}' <<<"$local_line")"
-    rc="$(awk '{print $4}' <<<"$local_line")"
-    if [[ "${rc:-1}" == "0" && "${http:-0}" == "200" ]] && zip_has_lua "${C_ZIP[i]}"; then
-      C_STATE[i]="ok"
-      # A completed candidate that already carries the app/Workshop depot key
-      # makes the window "satisfied": from here, speed-first grace applies. A
-      # completed candidate WITHOUT the key does NOT satisfy the window, so the
-      # race keeps waiting for a slower source that might have
-      # it — this is what stops a fast-but-incomplete source winning by default.
-      if [[ "$(zip_has_app_key "$APPID" "${C_ZIP[i]}")" == "yes" ]]; then
-        satisfied=1
-        [[ -z "$first_satisfied" ]] && first_satisfied="$(now)"
-        slog "source '${C_NAME[i]}' ok + has app key (http=${http:-?})"
-      else
-        slog "source '${C_NAME[i]}' ok but no app key (http=${http:-?})"
-      fi
+    wait "${C_PID[i]}"; rc=$?
+    wait "${C_PARSE_PID[i]}"; parse_rc=$?
+    http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
+      "${C_HEAD[i]}" 2>/dev/null)"
+    if [[ "$rc" -eq 0 && "$parse_rc" -eq 0 \
+        && "${http:-0}" == "${C_CODE[i]}" ]] \
+        && zip_is_safe_and_usable "${C_ZIP[i]}" && extract_source "$i"; then
+      C_STATE[i]="ok"; completed=$((completed + 1)); slog "source index=${C_INDEX[i]} collected"
     else
-      C_STATE[i]="failed"
-      if [[ "${rc:-1}" == "28" ]]; then
-        API_ERR_TYPE["${C_NAME[i]}"]="timeout"; API_ERR_CODE["${C_NAME[i]}"]=0
-        slog "source '${C_NAME[i]}' failed: timeout (rc=28)"
-      else
-        API_ERR_TYPE["${C_NAME[i]}"]="error"; API_ERR_CODE["${C_NAME[i]}"]="${http:-0}"
-        slog "source '${C_NAME[i]}' failed (http=${http:-0} rc=${rc:-?})"
-      fi
+      C_STATE[i]="failed"; slog "source index=${C_INDEX[i]} failed rc=$rc http=${http:-0}"
     fi
   done
 
-  # progress: anchor the bar to the racer with the LARGEST known total — the
-  # most representative of the real install (the biggest archive is usually
-  # the most complete one we end up picking). totalBytes is learned from HEAD
-  # or, for hosts that don't answer HEAD, from the live GET response headers.
-  # mono_pct keeps the displayed percentage monotonic and < 100, so a small
-  # source finishing first can't slam the bar to 100% and a later anchor
-  # switch can't make it jump backwards. currentApi stays EMPTY during the
-  # race; only the winner is named at the extract phase below.
-  anchor_idx=-1; anchor_total=0
-  for ((i = 0; i < n; i++)); do
-    [[ "${C_STATE[i]}" == "failed" || "${C_STATE[i]}" == "cancelled" ]] && continue
-    it="$(read_total "$i")"
-    if [[ "${it:-0}" -gt "$anchor_total" ]]; then anchor_total="$it"; anchor_idx=$i; fi
-  done
-  raw_pct=0
-  if [[ "$anchor_idx" -ge 0 && "$anchor_total" -gt 0 ]]; then
-    ab="$(stat -c %s "${C_ZIP[anchor_idx]}" 2>/dev/null || echo 0)"
-    raw_pct=$(( ab * 100 / anchor_total ))
-  fi
-  disp_pct="$(mono_pct "$disp_pct" "$raw_pct")"
-  tb="$anchor_total"
-  br=$(( disp_pct * tb / 100 ))
-  write_state "downloading" "" "$br" "$tb"
+  if [[ "$bytes" -gt "$progress_bytes" ]]; then progress_bytes="$bytes"; fi
 
-  # window: completeness-aware decision (see window_decide). Stop when all
-  # racers are done, or — once a COMPLETE source exists — GRACE_SECS after it.
-  # Keep waiting while no complete source has arrived yet and a racer is still
-  # in flight; the still-running racer is never cut here by elapsed time, only
-  # by its own curl speed floor (which marks it failed -> running drops).
-  t="$(now)"
-  elapsed="$(awk -v a="$t0" -v b="$t" 'BEGIN{printf "%.3f", b-a}')"
-  since_sat="-1"
-  [[ -n "$first_satisfied" ]] && since_sat="$(awk -v a="$first_satisfied" -v b="$t" 'BEGIN{printf "%.3f", b-a}')"
-  [[ "$(window_decide "$satisfied" "$running" "$elapsed" "$since_sat")" == "stop" ]] && break
-  sleep 0.2
+  # curl writes every response header block while following redirects. Use a
+  # Content-Length only from the latest non-redirect response, then expose an
+  # aggregate total only when every participating source has a known size.
+  aggregate_total=0; totals_known=1
+  for ((i=0; i<n; i++)); do
+    C_TOTAL[i]=""
+    if [[ -f "${C_TOTAL_FILE[i]}" ]]; then
+      IFS= read -r 'C_TOTAL[i]' < "${C_TOTAL_FILE[i]}" || true
+    fi
+    if [[ "${C_TOTAL[i]}" =~ ^[0-9]+$ ]]; then
+      aggregate_total=$((aggregate_total + 10#${C_TOTAL[i]}))
+    else
+      totals_known=0
+    fi
+  done
+  [[ "$totals_known" -eq 1 ]] || aggregate_total=0
+  write_state downloading "" "$progress_bytes" "$aggregate_total"
+  current_ms="$(now_ms)"
+  if [[ -z "$coverage_at" ]] && coverage_complete; then coverage_at="$current_ms"; fi
+  if [[ "$running" -eq 0 ]]; then break; fi
+
+  close_reason=""
+  if [[ -n "$coverage_at" && $((current_ms - coverage_at)) -ge "$grace_ms" ]]; then
+    close_reason="coverage grace"
+  elif [[ "$current_ms" -ge "$deadline_ms" ]]; then
+    close_reason="startup deadline"
+  fi
+
+  if [[ -n "$close_reason" ]]; then
+    # The short deadline is an optimization, never a failure deadline. Until a
+    # complete source exists, let each request reach its own connection or
+    # inactivity result; otherwise every slow user can lose all candidates at
+    # once. Once a usable source exists, retain only peers that are still making
+    # recent progress so healthy fast-path latency stays bounded.
+    if [[ "$completed" -eq 0 ]]; then
+      if [[ "$first_source_wait_logged" -eq 0 ]]; then
+        slog "continuing past $close_reason while awaiting first usable source"
+        first_source_wait_logged=1
+      fi
+    else
+      active_pending=0
+      for ((i=0; i<n; i++)); do
+        [[ "${C_STATE[i]}" == pending ]] || continue
+        if [[ "${C_SIZE[i]:-0}" -gt 0 \
+            && $((current_ms - ${C_LAST_PROGRESS[i]:-$start_ms})) -le "$active_window_ms" ]]; then
+          active_pending=$((active_pending + 1))
+        fi
+      done
+      if [[ "$active_pending" -eq 0 ]]; then
+        slog "closing after $close_reason; usable result exists and no productive peers remain"
+        break
+      fi
+      if [[ "$extension_logged" -eq 0 ]]; then
+        slog "extending past $close_reason for active_sources=$active_pending"
+        extension_logged=1
+      fi
+    fi
+  fi
+  sleep 0.05
 done
 
-# --- kill stragglers ------------------------------------------------------
-for ((i = 0; i < n; i++)); do
-  if [[ "${C_STATE[i]}" == "pending" ]]; then
-    kill "${C_PID[i]}" 2>/dev/null
+for ((i=0; i<n; i++)); do
+  if [[ "${C_STATE[i]}" == pending ]]; then
+    kill "${C_PID[i]}" 2>/dev/null || true
+    wait "${C_PID[i]}" 2>/dev/null || true
+    wait "${C_PARSE_PID[i]}" 2>/dev/null || true
     C_STATE[i]="cancelled"
   fi
 done
 
-# --- build selection dir from successfully completed candidates -----------
-SEL="$WORK/sel"
-mkdir -p "$SEL"
-completed=0
-for ((i = 0; i < n; i++)); do
-  [[ "${C_STATE[i]}" == "ok" ]] || continue
-  d="$SEL/${C_NAME[i]}"
-  mkdir -p "$d"
-  unzip -o -q "${C_ZIP[i]}" -d "$d" 2>/dev/null || continue
-  ttime="$(awk '{print $3}' "${C_STAT[i]}" 2>/dev/null)"
-  echo "${ttime:-999999}" > "$SEL/${C_NAME[i]}.time"
-  completed=$((completed + 1))
-done
-
-if [[ $completed -eq 0 ]]; then
-  errkeys="${!API_ERR_TYPE[*]}"; [[ -z "$errkeys" ]] && errkeys="none"
-  slog "no source completed successfully -> failed (errored sources: $errkeys)"
-  write_state "failed" "" 0 0 "All $n source(s) failed — no usable package was downloaded"
+if [[ "$completed" -eq 0 ]]; then
+  rm -rf "$EXTRACT_DIR"
+  write_state failed "" "$progress_bytes" 0 "No configured source returned a valid package; check the connection and try again"
   exit 1
 fi
-slog "completed=$completed -> selecting winner"
-
-winner="$(select_winner "$APPID" "$SEL")"
-if [[ -z "$winner" ]]; then
-  slog "select_winner returned empty -> failed"
-  write_state "failed" "" 0 0 "Could not select a source from the downloaded packages"
-  exit 1
-fi
-slog "winner='$winner'"
-
-# --- install the winner: place zip + extracted dir for _finalize_install_lua
-DEST_ZIP="$DEST_ROOT/${APPID}.zip"
-EXTRACT_DIR="$DEST_ROOT/extracted_${APPID}"
-win_zip=""
-for ((i = 0; i < n; i++)); do
-  if [[ "${C_NAME[i]}" == "$winner" ]]; then win_zip="${C_ZIP[i]}"; break; fi
-done
-
-win_size="$(stat -c %s "$win_zip" 2>/dev/null || echo 1)"
-[[ "${win_size:-0}" -le 0 ]] && win_size=1
-# Surface the winner in a visible (non-"done") state, briefly, so the frontend
-# (300ms poll, and it hides the source list on "done") can mark the winning
-# source as "Found" before the success modal. Held just over 1 poll interval.
-write_state "downloading" "$winner" "$win_size" "$win_size"
-sleep 0.5
-write_state "extracting" "$winner" "$win_size" "$win_size"
-cp -f "$win_zip" "$DEST_ZIP" 2>/dev/null
-rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
-if ! unzip -o -q "$DEST_ZIP" -d "$EXTRACT_DIR" 2>/dev/null; then
-  slog "extract of winner '$winner' failed -> failed"
-  write_state "failed" "$winner" 0 0 "Failed to extract the downloaded package"
-  exit 1
-fi
-
-write_state "extracted" "$winner" "$win_size" "$win_size"
-slog "winner '$winner' extracted -> handing off to finalize (extracted)"
-rm -rf "$WORK" 2>/dev/null
+[[ "$progress_bytes" -gt 0 ]] || progress_bytes=1
+write_state collected "Merged $completed sources" "$progress_bytes" "$progress_bytes"
+slog "collection complete contributors=$completed"
 exit 0

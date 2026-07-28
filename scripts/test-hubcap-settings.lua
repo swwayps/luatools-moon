@@ -8,6 +8,7 @@ local stored = {
             language = "en",
             useSteamLanguage = false,
             morrenusApiKey = "smm_" .. string.rep("a", 96),
+            ryuuAuthKey = "must-not-leak",
         },
     },
 }
@@ -86,11 +87,26 @@ if manager.get_hubcap_api_key then
     check(manager.get_hubcap_api_key() == expected_key,
         "legacy API key is available through the Hubcap setting")
 end
-check(stored.version == 2, "legacy settings are migrated to schema version 2")
+local payload = manager.get_settings_payload()
+local schema_has_ryuu = false
+for _, group in ipairs(payload.schema or {}) do
+    for _, option in ipairs(group.options or {}) do
+        if option.key == "ryuuAuthKey" then schema_has_ryuu = true end
+    end
+end
+check(manager.get_ryuu_auth_key == nil,
+    "settings manager does not expose the Ryuu bearer secret")
+check(schema_has_ryuu == false,
+    "generic settings schema does not return the Ryuu bearer secret")
+check(payload.values.general.ryuuAuthKey == nil,
+    "generic settings payload does not return the Ryuu bearer secret")
+check(stored.version == 3, "legacy settings are migrated to schema version 3")
 check(stored.values.general.hubcapApiKey == expected_key,
     "legacy API key is persisted under hubcapApiKey")
 check(stored.values.general.morrenusApiKey == nil,
     "obsolete setting key is removed after migration")
+check(stored.values.general.ryuuAuthKey == nil,
+    "obsolete Ryuu setting is removed after migration")
 check(atomic_write_count > 0, "settings migration uses an atomic JSON write")
 check(non_atomic_write_count == 0, "settings migration never uses the non-atomic writer")
 

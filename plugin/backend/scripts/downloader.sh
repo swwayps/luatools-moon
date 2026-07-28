@@ -19,7 +19,7 @@
 # of hanging the dialog) and emits bytesRead/totalBytes into the state file
 # so the frontend progress bar actually moves.
 #
-# Args: <URL> <DEST_PATH> <EXTRACT_DIR> <STATE_FILE> [<USER_AGENT>]
+# Args: <URL> <DEST_PATH> <EXTRACT_DIR> <STATE_FILE> [<USER_AGENT>] [<HEADER_FILE>]
 
 # Use system libraries, not the Steam Runtime's pinned ones.
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
@@ -29,6 +29,7 @@ DEST_PATH="$2"
 EXTRACT_DIR="$3"
 STATE_FILE="$4"
 USER_AGENT="${5:-discord(dot)gg/luatools}"
+HEADER_FILE="${6:-}"
 
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 MAX_TIME="${MAX_TIME:-25}"
@@ -59,48 +60,86 @@ write_state() {
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 
 write_failed() {
-  # write_failed <human-readable reason>. The reason is shown to the user
+  # write_failed <human-readable reason> [machine-readable code]. The reason is shown to the user
   # verbatim ("Failed: <reason>"), so keep it plain and non-technical.
-  slog "FAILED: $1"
+  local reason="$1" error_code="${2:-}"
+  slog "FAILED: $reason"
   [ -n "$STATE_FILE" ] || return 0
-  printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$1")" > "$STATE_FILE"
+  if [ -n "$error_code" ]; then
+    printf '{"status": "failed", "error": "%s", "errorCode": "%s"}\n' \
+      "$(json_escape "$reason")" "$(json_escape "$error_code")" > "$STATE_FILE"
+  else
+    printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$reason")" > "$STATE_FILE"
+  fi
 }
 
 slog "worker start: url=$URL dest=$DEST_PATH extract=$EXTRACT_DIR"
 write_state "downloading" 0 0
 
+# Authenticated sources pass a chmod-600 curl header file. Keep credentials out
+# of the process command line and never send them to a source that did not ask
+# for them (the backend only creates this file for generator.ryuu.lol URLs).
+CURL_HEADERS=()
+if [ -n "$HEADER_FILE" ] && [ -r "$HEADER_FILE" ]; then
+  CURL_HEADERS=(--header "@$HEADER_FILE")
+fi
+
 # Best-effort total size for a real progress bar.
 TOTAL="$(curl -sIL -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
-  --max-time 6 "$URL" 2>/dev/null | tr -d '\r' \
+  --max-time 6 "${CURL_HEADERS[@]}" "$URL" 2>/dev/null | tr -d '\r' \
   | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
 [ -z "$TOTAL" ] && TOTAL=0
 
 # Download in the background so we can poll progress from the partial file.
-curl -L -A "$USER_AGENT" \
+PART_PATH="${DEST_PATH}.part.$$"
+HTTP_CODE_PATH="${PART_PATH}.http"
+curl --fail -L -A "$USER_AGENT" \
   --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
   --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
-  -o "$DEST_PATH" "$URL" &
+  --write-out '%{http_code}' "${CURL_HEADERS[@]}" -o "$PART_PATH" "$URL" \
+  > "$HTTP_CODE_PATH" &
 CURL_PID=$!
 
 while kill -0 "$CURL_PID" 2>/dev/null; do
-  if [ -f "$DEST_PATH" ]; then
-    sz="$(stat -c %s "$DEST_PATH" 2>/dev/null || echo 0)"
+  if [ -f "$PART_PATH" ]; then
+    sz="$(stat -c %s "$PART_PATH" 2>/dev/null || echo 0)"
     write_state "downloading" "$sz" "$TOTAL"
   fi
   sleep 0.3
 done
 wait "$CURL_PID"
 rc=$?
+HTTP_CODE="$(cat "$HTTP_CODE_PATH" 2>/dev/null || true)"
+rm -f "$HTTP_CODE_PATH"
 
 if [ "$rc" -ne 0 ]; then
-  slog "download failed (curl rc=$rc)"
-  if [ "$rc" -eq 28 ]; then
-    write_failed "Download timed out — the source was too slow or stopped responding. Try another source."
+  rm -f "$PART_PATH"
+  slog "download failed (curl rc=$rc http=${HTTP_CODE:-none})"
+  if [ "$rc" -eq 3 ]; then
+    # rc=3 is "URL using bad/illegal format": curl rejected the address itself and
+    # never opened a connection, so the catalogue served a broken link (an
+    # unencoded filename does exactly this). Blaming the connection here sends the
+    # user chasing a problem that does not exist. Note rc=6 (DNS) is deliberately
+    # NOT included: that one really is a connectivity failure.
+    write_failed "The download link from this source is not valid. It may have been renamed or removed. Try another source." "badurl"
+  elif [ "$rc" -eq 28 ]; then
+    # rc=28 also covers the stall guard (--speed-limit/--speed-time), which trips
+    # on a slow LOCAL link just as much as on a slow source, so the message names
+    # both instead of sending the user to hunt for another mirror.
+    write_failed "Download stalled. The transfer stopped making progress, which can be the source or your own connection. Try again, or pick another source." "stalled"
+  elif [ "$rc" -eq 22 ] && { [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; }; then
+    write_failed "Ryuu authentication was rejected or expired — update your session cookie or auth key." "authentication"
+  elif [ "$rc" -eq 22 ]; then
+    write_failed "The source rejected the download request (HTTP ${HTTP_CODE:-error}). Try another source."
   else
     write_failed "Download failed — the source didn't respond or the connection was interrupted. Try another source."
   fi
   exit 1
 fi
+mv -f "$PART_PATH" "$DEST_PATH" || {
+  write_failed "The downloaded file could not be saved. Check the destination permissions and try again."
+  exit 1
+}
 slog "download ok ($(stat -c %s "$DEST_PATH" 2>/dev/null || echo '?') bytes)"
 
 if [ -n "$EXTRACT_DIR" ]; then

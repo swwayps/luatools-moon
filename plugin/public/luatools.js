@@ -91,6 +91,7 @@
   const OVERLAY_SELECTORS = [
     ".luatools-overlay",
     ".luatools-settings-overlay",
+    ".luatools-custom-api-overlay",
     ".luatools-fixes-results-overlay",
     ".luatools-loading-fixes-overlay",
     ".luatools-unfix-overlay",
@@ -145,6 +146,532 @@
     buttonStates: {},
     animationFrameId: null,
   };
+
+  // NATIVE STEAM FOCUS NAVIGATION START
+  let nativeHeaderNavigation = null;
+  let nativeStoreNavigation = null;
+  let nativeOverlayNavigation = null;
+  let nativeOverlaySequence = 0;
+
+  function getNativeFocusController() {
+    const controller = window.FocusNavController;
+    if (
+      !controller ||
+      !controller.m_ActiveContext ||
+      typeof controller.NewGamepadNavigationTree !== "function"
+    ) {
+      return null;
+    }
+    return controller;
+  }
+
+  function findDeepestContainingNavigationNode(node, element) {
+    if (!node) return null;
+
+    let match = null;
+    try {
+      if (node.m_element && node.m_element.contains(element)) match = node;
+    } catch (_) {}
+
+    const children = node.m_rgChildren || [];
+    for (let index = 0; index < children.length; index++) {
+      const childMatch = findDeepestContainingNavigationNode(
+        children[index],
+        element,
+      );
+      if (childMatch) match = childMatch;
+    }
+    return match;
+  }
+
+  function bindNativeConfirm(element) {
+    function onButtonDown(event) {
+      const detail = event.detail || {};
+      if (Number(detail.button) !== 1 || detail.is_repeat) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+      element.click();
+    }
+
+    function onButtonUp(event) {
+      const detail = event.detail || {};
+      if (Number(detail.button) !== 1) return;
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    element.addEventListener("vgp_onbuttondown", onButtonDown);
+    element.addEventListener("vgp_onbuttonup", onButtonUp);
+    return function () {
+      element.removeEventListener("vgp_onbuttondown", onButtonDown);
+      element.removeEventListener("vgp_onbuttonup", onButtonUp);
+    };
+  }
+
+  function findDirectionalElementIndex(elements, currentIndex, button) {
+    const currentRect = elements[currentIndex].getBoundingClientRect();
+    const currentX = (currentRect.left + currentRect.right) / 2;
+    const currentY = (currentRect.top + currentRect.bottom) / 2;
+    let bestIndex = -1;
+    let bestScore = Infinity;
+
+    elements.forEach(function (candidate, candidateIndex) {
+      if (candidateIndex === currentIndex) return;
+      const rect = candidate.getBoundingClientRect();
+      const x = (rect.left + rect.right) / 2;
+      const y = (rect.top + rect.bottom) / 2;
+      let primaryDistance;
+      let perpendicularDistance;
+      let overlaps;
+
+      if (button === 9 && y < currentY) {
+        primaryDistance = currentY - y;
+        perpendicularDistance = Math.abs(currentX - x);
+        overlaps = rect.left < currentRect.right && rect.right > currentRect.left;
+      } else if (button === 10 && y > currentY) {
+        primaryDistance = y - currentY;
+        perpendicularDistance = Math.abs(currentX - x);
+        overlaps = rect.left < currentRect.right && rect.right > currentRect.left;
+      } else if (button === 11 && x < currentX) {
+        primaryDistance = currentX - x;
+        perpendicularDistance = Math.abs(currentY - y);
+        overlaps = rect.top < currentRect.bottom && rect.bottom > currentRect.top;
+      } else if (button === 12 && x > currentX) {
+        primaryDistance = x - currentX;
+        perpendicularDistance = Math.abs(currentY - y);
+        overlaps = rect.top < currentRect.bottom && rect.bottom > currentRect.top;
+      } else {
+        return;
+      }
+
+      const score =
+        primaryDistance + perpendicularDistance * (overlaps ? 0.25 : 3);
+      if (score < bestScore) {
+        bestScore = score;
+        bestIndex = candidateIndex;
+      }
+    });
+
+    return bestIndex;
+  }
+
+  function consumeNativeInput(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    }
+  }
+
+  function bindNativeOverlayInput(element, index, elements, nodes) {
+    function onFocus() {
+      elements.forEach(function (candidate) {
+        candidate.classList.remove("active-focus");
+      });
+      element.classList.add("active-focus");
+    }
+
+    function onBlur() {
+      element.classList.remove("active-focus");
+    }
+
+    function onButtonDown(event) {
+      const detail = event.detail || {};
+      const button = Number(detail.button);
+
+      if (button === 1) {
+        if (detail.is_repeat) return;
+        consumeNativeInput(event);
+        element.click();
+        return;
+      }
+
+      if (button < 9 || button > 12) return;
+      consumeNativeInput(event);
+      const nextIndex = findDirectionalElementIndex(elements, index, button);
+      if (nextIndex >= 0 && nodes[nextIndex]) {
+        nodes[nextIndex].BTakeFocus(detail.source || 1);
+      }
+    }
+
+    function onButtonUp(event) {
+      const button = Number((event.detail || {}).button);
+      if (button === 1 || (button >= 9 && button <= 12)) {
+        consumeNativeInput(event);
+      }
+    }
+
+    element.addEventListener("vgp_onbuttondown", onButtonDown);
+    element.addEventListener("vgp_onbuttonup", onButtonUp);
+    element.addEventListener("focus", onFocus);
+    element.addEventListener("blur", onBlur);
+    return function () {
+      element.removeEventListener("vgp_onbuttondown", onButtonDown);
+      element.removeEventListener("vgp_onbuttonup", onButtonUp);
+      element.removeEventListener("focus", onFocus);
+      element.removeEventListener("blur", onBlur);
+      element.classList.remove("active-focus");
+    };
+  }
+
+  function cleanupNativeHeaderNavigation() {
+    if (!nativeHeaderNavigation) return;
+    const cleanup = nativeHeaderNavigation.cleanup;
+    nativeHeaderNavigation = null;
+    try {
+      cleanup();
+    } catch (_) {}
+  }
+
+  function registerNativeHeaderNavigation(element) {
+    if (
+      nativeHeaderNavigation &&
+      nativeHeaderNavigation.element === element &&
+      element.isConnected
+    ) {
+      return true;
+    }
+
+    cleanupNativeHeaderNavigation();
+    const controller = getNativeFocusController();
+    if (!controller || !element) return false;
+
+    try {
+      const context = controller.m_ActiveContext;
+      const trees = Array.from(context.m_rgGamepadNavigationTrees || []);
+      trees.sort(function (left, right) {
+        return Number(right.m_ID === "StoreMenu") - Number(left.m_ID === "StoreMenu");
+      });
+
+      let tree = null;
+      let parentNode = null;
+      for (let index = 0; index < trees.length; index++) {
+        const candidate = findDeepestContainingNavigationNode(
+          trees[index].Root || trees[index].m_Root,
+          element,
+        );
+        if (candidate) {
+          tree = trees[index];
+          parentNode = candidate;
+          break;
+        }
+      }
+      if (!tree || !parentNode) return false;
+
+      const node = tree.CreateNode(parentNode);
+      node.SetProperties({
+        layout: 0,
+        focusable: true,
+        actionDescriptionMap: {},
+      });
+      const unregisterItem = tree.RegisterNavigationItem(node, element);
+      const unbindConfirm = bindNativeConfirm(element);
+
+      nativeHeaderNavigation = {
+        element: element,
+        cleanup: function () {
+          unbindConfirm();
+          unregisterItem();
+        },
+      };
+      return true;
+    } catch (error) {
+      console.warn("[Gamepad] Could not register LuaTools header focus:", error);
+      cleanupNativeHeaderNavigation();
+      return false;
+    }
+  }
+
+  function cleanupNativeStoreNavigation() {
+    if (!nativeStoreNavigation) return;
+    const cleanup = nativeStoreNavigation.cleanup;
+    nativeStoreNavigation = null;
+    try {
+      cleanup();
+    } catch (_) {}
+  }
+
+  function findNativeStoreFocusRing(node) {
+    if (!node) return null;
+    const element = node.m_element;
+    const isLuaToolsAction = !!(
+      element &&
+      typeof element.closest === "function" &&
+      element.closest(
+        "#luatools-gamepad-actions, #luatools-gamepad-protondb",
+      )
+    );
+    if (node.m_FocusRing && !isLuaToolsAction) return node.m_FocusRing;
+
+    const children = node.m_rgChildren || [];
+    for (let index = 0; index < children.length; index++) {
+      const focusRing = findNativeStoreFocusRing(children[index]);
+      if (focusRing) return focusRing;
+    }
+    return null;
+  }
+
+  function registerNativeStoreNavigation(rows) {
+    rows = Array.from(rows || []).filter(function (row) {
+      return !!(row && row.isConnected);
+    });
+    const elements = rows.reduce(function (actions, row) {
+      return actions.concat(
+        Array.from(
+          row.querySelectorAll(
+            "button:not([disabled]), a[href]:not([disabled])",
+          ),
+        ),
+      );
+    }, []);
+    if (rows.length === 0 || elements.length === 0) {
+      cleanupNativeStoreNavigation();
+      return false;
+    }
+    if (
+      nativeStoreNavigation &&
+      nativeStoreNavigation.rows.length === rows.length &&
+      nativeStoreNavigation.elements.length === elements.length &&
+      nativeStoreNavigation.rows.every(function (row, index) {
+        return row === rows[index];
+      }) &&
+      nativeStoreNavigation.elements.every(function (element, index) {
+        return element === elements[index] && element.isConnected;
+      })
+    ) {
+      return true;
+    }
+
+    cleanupNativeStoreNavigation();
+    const controller = getNativeFocusController();
+    if (!controller) return false;
+
+    const disposers = [];
+    let removalObserver = null;
+    let disposed = false;
+
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (removalObserver) removalObserver.disconnect();
+      for (let index = disposers.length - 1; index >= 0; index--) {
+        try {
+          disposers[index]();
+        } catch (_) {}
+      }
+    }
+
+    try {
+      const context = controller.m_ActiveContext;
+      const trees = Array.from(context.m_rgGamepadNavigationTrees || []);
+      trees.sort(function (left, right) {
+        return (
+          Number(right.m_ID === "FeatureTarget_interest-buttons") -
+          Number(left.m_ID === "FeatureTarget_interest-buttons")
+        );
+      });
+
+      let tree = null;
+      let parentNode = null;
+      for (let index = 0; index < trees.length; index++) {
+        const candidate = findDeepestContainingNavigationNode(
+          trees[index].Root || trees[index].m_Root,
+          rows[0],
+        );
+        if (
+          candidate &&
+          candidate.m_element &&
+          rows.every(function (row) {
+            return candidate.m_element.contains(row);
+          })
+        ) {
+          tree = trees[index];
+          parentNode = candidate;
+          break;
+        }
+      }
+      if (!tree || !parentNode) {
+        dispose();
+        return false;
+      }
+      const nativeFocusRing = findNativeStoreFocusRing(parentNode);
+
+      rows.forEach(function (row) {
+        const rowNode = tree.CreateNode(parentNode);
+        rowNode.SetProperties({
+          focusable: false,
+          layout: 2,
+          actionDescriptionMap: {},
+        });
+        disposers.push(tree.RegisterNavigationItem(rowNode, row));
+
+        Array.from(
+          row.querySelectorAll(
+            "button:not([disabled]), a[href]:not([disabled])",
+          ),
+        ).forEach(function (element) {
+          const node = tree.CreateNode(rowNode);
+          node.SetProperties({
+            layout: 0,
+            focusable: true,
+            actionDescriptionMap: {},
+          });
+          disposers.push(tree.RegisterNavigationItem(node, element));
+          // These controls are cloned outside React, so Steam registers their
+          // navigation nodes but does not attach the visual FocusRing. Sharing
+          // the neighboring native ring gives them the exact Follow/Ignore
+          // indicator instead of LuaTools' overlay-specific blue highlight.
+          if (nativeFocusRing) node.m_FocusRing = nativeFocusRing;
+          disposers.push(bindNativeConfirm(element));
+        });
+      });
+
+      removalObserver = new MutationObserver(function () {
+        if (
+          rows.some(function (row) {
+            return !row.isConnected;
+          })
+        ) {
+          cleanupNativeStoreNavigation();
+        }
+      });
+      removalObserver.observe(
+        parentNode.m_element || document.documentElement,
+        { childList: true, subtree: true },
+      );
+
+      nativeStoreNavigation = {
+        rows: rows,
+        elements: elements,
+        cleanup: dispose,
+      };
+      return true;
+    } catch (error) {
+      console.warn("[Gamepad] Could not register LuaTools store focus:", error);
+      dispose();
+      return false;
+    }
+  }
+
+  function cleanupNativeOverlayNavigation() {
+    if (!nativeOverlayNavigation) return;
+    const cleanup = nativeOverlayNavigation.cleanup;
+    nativeOverlayNavigation = null;
+    try {
+      cleanup();
+    } catch (_) {}
+  }
+
+  function hasNativeOverlayNavigation(overlay) {
+    return !!(
+      nativeOverlayNavigation &&
+      nativeOverlayNavigation.element === overlay &&
+      overlay &&
+      overlay.isConnected
+    );
+  }
+
+  function registerNativeOverlayNavigation(overlay, elements) {
+    cleanupNativeOverlayNavigation();
+    const controller = getNativeFocusController();
+    if (!controller || !overlay || !elements || elements.length === 0) {
+      return false;
+    }
+
+    const disposers = [];
+    let unregisterTree = null;
+    let removalObserver = null;
+    let disposed = false;
+
+    function dispose() {
+      if (disposed) return;
+      disposed = true;
+      if (removalObserver) removalObserver.disconnect();
+      for (let index = disposers.length - 1; index >= 0; index--) {
+        try {
+          disposers[index]();
+        } catch (_) {}
+      }
+      if (unregisterTree) {
+        try {
+          unregisterTree();
+        } catch (_) {}
+      }
+    }
+
+    try {
+      const context = controller.m_ActiveContext;
+      const contextTrees = Array.from(
+        context.m_rgGamepadNavigationTrees || [],
+      );
+      const activeTree =
+        (typeof controller.GetActiveNavTree === "function" &&
+          controller.GetActiveNavTree()) ||
+        context.m_LastActiveFocusNavTree ||
+        contextTrees.find(function (tree) {
+          return tree.m_ID === "StoreMenu";
+        }) ||
+        contextTrees[0] ||
+        null;
+
+      const tree = controller.NewGamepadNavigationTree(
+        context,
+        "LuaToolsOverlay-" + ++nativeOverlaySequence,
+        activeTree,
+        {
+          virtualFocus: false,
+          modal: true,
+          historyMode: "none",
+        },
+      );
+
+      // Direction events are handled at each focused action below. Keeping the
+      // root non-directional avoids a second Steam handler moving focus twice.
+      tree.Root.SetProperties({ layout: 0, actionDescriptionMap: {} });
+      disposers.push(tree.RegisterNavigationItem(tree.Root, overlay));
+
+      const nodes = elements.map(function (element) {
+        const node = tree.CreateNode(tree.Root);
+        node.SetProperties({
+          layout: 0,
+          focusable: true,
+          actionDescriptionMap: {},
+        });
+        disposers.push(tree.RegisterNavigationItem(node, element));
+        return node;
+      });
+      elements.forEach(function (element, index) {
+        disposers.push(bindNativeOverlayInput(element, index, elements, nodes));
+      });
+
+      unregisterTree = controller.RegisterGamepadNavigationTree(tree, window);
+      tree.SetIsEnabled(true);
+      tree.Activate(true);
+      tree.TakeFocus(1);
+
+      removalObserver = new MutationObserver(function () {
+        if (!overlay.isConnected) cleanupNativeOverlayNavigation();
+      });
+      removalObserver.observe(overlay.parentElement || document.documentElement, {
+        childList: true,
+      });
+
+      nativeOverlayNavigation = {
+        element: overlay,
+        cleanup: dispose,
+      };
+      return true;
+    } catch (error) {
+      console.warn("[Gamepad] Could not register LuaTools overlay focus:", error);
+      dispose();
+      return false;
+    }
+  }
+  // NATIVE STEAM FOCUS NAVIGATION END
 
   // duplicated from main code thing for reliability
   function isBigPictureMode() {
@@ -202,6 +729,7 @@
 
     if (!activeOverlay) {
       console.log("[Gamepad] No LuaTools overlay active, skipping scan");
+      cleanupNativeOverlayNavigation();
       state.focusableElements = [];
       state.currentFocusIndex = 0;
       return;
@@ -238,6 +766,14 @@
         state.focusableElements.length +
         " focusable elements inside overlay",
     );
+
+    if (
+      state.focusableElements.length > 0 &&
+      registerNativeOverlayNavigation(activeOverlay, state.focusableElements)
+    ) {
+      state.currentFocusIndex = 0;
+      return;
+    }
 
     if (state.focusableElements.length > 0) {
       focusElement(0);
@@ -383,6 +919,13 @@
 
     // If no overlay is active, skip input processing but keep polling
     if (!hasActiveOverlay) {
+      state.animationFrameId = requestAnimationFrame(pollGamepad);
+      return;
+    }
+
+    // Steam's native tree receives controller and keyboard input itself. Do
+    // not also process the raw Gamepad API or one press would move twice.
+    if (hasNativeOverlayNavigation(hasActiveOverlay)) {
       state.animationFrameId = requestAnimationFrame(pollGamepad);
       return;
     }
@@ -563,6 +1106,10 @@
 
   window.GamepadNav = {
     scanElements: scanFocusableElements,
+    registerHeaderElement: registerNativeHeaderNavigation,
+    cleanupHeaderElement: cleanupNativeHeaderNavigation,
+    registerStoreRows: registerNativeStoreNavigation,
+    cleanupStoreRows: cleanupNativeStoreNavigation,
     setBackHandler: function (fn) {
       if (typeof fn === "function") {
         onBackHandler = fn;
@@ -1248,6 +1795,12 @@
       const link = document.createElement("link");
       link.id = "luatools-fontawesome";
       link.rel = "stylesheet";
+      // Loaded out of the render path: the CDN was measured at ~9.5s on a Game
+      // Mode box, and as a normal stylesheet it delayed every popup's first
+      // paint by that long. Switched to "all" on load (icons appear a beat late
+      // instead of freezing the dialog).
+      link.media = "print";
+      link.addEventListener("load", function () { link.media = "all"; });
       link.href =
         "https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css";
       link.integrity =
@@ -1451,6 +2004,10 @@
     modal.appendChild(btnRow);
     overlay.appendChild(modal);
     document.body.appendChild(overlay);
+
+    setTimeout(function () {
+      if (window.GamepadNav) window.GamepadNav.scanElements();
+    }, 150);
   }
 
   function showSettingsPopup() {
@@ -1547,20 +2104,6 @@
         const body = document.createElement("div");
         body.style.cssText =
           "font-size:14px;line-height:1.6;margin-bottom:12px;";
-
-        // Add mouse mode tip for Big Picture
-        if (window.__LUATOOLS_IS_BIG_PICTURE__) {
-          const tip = document.createElement("div");
-          tip.style.cssText =
-            "background:rgba(102,192,244,0.15);border-left:3px solid #66c0f4;padding:12px 16px;border-radius:6px;font-size:13px;color:#c7d5e0;margin-bottom:16px;line-height:1.5;";
-          tip.innerHTML =
-            '<i class="fa-solid fa-info-circle" style="margin-right:8px;color:#66c0f4;"></i>' +
-            t(
-              "bigpicture.mouseTip",
-              "To use mouse mode in Steam: Guide Button + Right Joystick, click with RB",
-            );
-          body.appendChild(tip);
-        }
 
         const container = document.createElement("div");
         container.style.cssText =
@@ -2321,9 +2864,394 @@
     }
   }
 
+  function openRyuuAuthPage(url) {
+    try {
+      Millennium.callServerMethod("luatools", "OpenExternalUrl", {
+        url: url,
+        contentScriptQuery: "",
+      });
+    } catch (_) {
+      try { window.open(url, "_blank", "noopener,noreferrer"); } catch (_) {}
+    }
+  }
+
+  function showRyuuAuthHelpPopup() {
+    if (document.querySelector(".luatools-ryuu-help-overlay")) return;
+    ensureLuaToolsStyles();
+    const colors = getThemeColors();
+    const overlay = document.createElement("div");
+    overlay.className = "luatools-ryuu-help-overlay";
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:100002;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.72);padding:20px;box-sizing:border-box;";
+    const modal = document.createElement("div");
+    modal.style.cssText = `width:500px;max-width:100%;box-sizing:border-box;background:${colors.modalBg};color:${colors.text};border:1px solid ${colors.border};border-radius:12px;padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.65);`;
+    const title = document.createElement("div");
+    title.style.cssText = "font-size:19px;font-weight:700;margin-bottom:8px;";
+    title.textContent = lt("How to get your Ryuu session cookie");
+    const intro = document.createElement("div");
+    intro.style.cssText = `font-size:13px;line-height:1.5;color:${colors.textSecondary};margin-bottom:14px;`;
+    intro.textContent = lt("Ryuu sessions currently last about seven days. Repeat these steps when the session expires.");
+    const steps = document.createElement("ol");
+    steps.style.cssText = `margin:0 0 16px;padding-left:21px;font-size:13px;line-height:1.55;color:${colors.textSecondary};`;
+    const stepCopies = [
+      lt("Open the Ryuu Fixes page and sign in with Discord."),
+      lt("Right-click the page, choose Inspect, then open Network."),
+      lt("Select Fetch/XHR. If the list is empty, reload the page."),
+      lt("Open a generator.ryuu.lol request, such as api/votes/bulk?type=fix, and select Headers."),
+      lt("Under Request Headers, copy the complete Cookie value or line. LuaTools extracts only session= automatically."),
+    ];
+    stepCopies.forEach(function (copy, index) {
+      const li = document.createElement("li");
+      li.style.marginBottom = "7px";
+      if (index === 0) {
+        const link = document.createElement("button");
+        link.type = "button";
+        link.textContent = copy;
+        link.style.cssText = `background:none;border:0;padding:0;color:${colors.accent};font:inherit;text-align:left;text-decoration:underline;cursor:pointer;`;
+        link.addEventListener("click", function () {
+          openRyuuAuthPage("https://generator.ryuu.lol/fixes");
+        });
+        li.appendChild(link);
+      } else {
+        li.textContent = copy;
+      }
+      steps.appendChild(li);
+    });
+    const warning = document.createElement("div");
+    warning.style.cssText =
+      "font-size:12px;line-height:1.45;color:#e0b341;background:rgba(224,179,65,.08);border:1px solid rgba(224,179,65,.3);border-radius:7px;padding:10px 12px;margin-bottom:18px;";
+    warning.textContent = lt("The session cookie works like a password. Do not share it. Logging out of Ryuu invalidates it.");
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:flex-end;";
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = lt("Close");
+    close.style.cssText = `border:1px solid ${colors.accent};border-radius:6px;padding:8px 18px;background:${colors.accent};color:#fff;font-weight:600;cursor:pointer;`;
+    const dismiss = function () { if (overlay.parentNode) overlay.remove(); };
+    close.addEventListener("click", dismiss);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) dismiss(); });
+    row.appendChild(close);
+    modal.appendChild(title); modal.appendChild(intro); modal.appendChild(steps);
+    modal.appendChild(warning); modal.appendChild(row); overlay.appendChild(modal);
+    document.body.appendChild(overlay);
+  }
+
+  function showRyuuAuthPopup(onSaved) {
+    const old = document.querySelector(".luatools-ryuu-auth-overlay");
+    if (old) old.remove();
+    ensureLuaToolsStyles();
+    const colors = getThemeColors();
+    const overlay = document.createElement("div");
+    overlay.className = "luatools-ryuu-auth-overlay";
+    overlay.style.cssText =
+      "position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.76);padding:20px;box-sizing:border-box;";
+    const modal = document.createElement("div");
+    modal.style.cssText = `width:500px;max-width:100%;box-sizing:border-box;background:${colors.modalBg};color:${colors.text};border:1px solid ${colors.border};border-radius:12px;padding:24px;box-shadow:0 24px 70px rgba(0,0,0,.65);`;
+    const title = document.createElement("div");
+    title.style.cssText = "display:flex;align-items:center;gap:10px;font-size:19px;font-weight:700;margin-bottom:9px;";
+    title.innerHTML = '<svg viewBox="0 0 512 512" width="19" height="19" fill="#e0b341" aria-hidden="true"><path d="M336 0a176 176 0 00-168 228L7 389a24 24 0 00-7 17v82a24 24 0 0024 24h82a24 24 0 0017-7l23-23a24 24 0 007-17v-29h29a24 24 0 0024-24v-29h29a24 24 0 0017-7l32-32A176 176 0 10336 0zm48 176a48 48 0 110-96 48 48 0 010 96z"/></svg><span></span>';
+    title.querySelector("span").textContent = lt("Ryuu authentication required");
+    const intro = document.createElement("div");
+    intro.style.cssText = `font-size:13px;line-height:1.5;color:${colors.textSecondary};margin-bottom:15px;`;
+    intro.textContent = lt("Paste your Ryuu session cookie or official auth key. LuaTools will save it privately and continue this download.");
+    const label = document.createElement("label");
+    label.style.cssText = "display:block;font-size:12px;font-weight:700;margin-bottom:6px;";
+    label.textContent = lt("Session cookie or auth key");
+    const input = document.createElement("input");
+    input.type = "password";
+    input.autocomplete = "off";
+    input.placeholder = lt("Paste the complete Cookie line, session=… or auth key");
+    input.style.cssText = `display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:10px 11px;background:${colors.bgTertiary};color:${colors.text};border:1px solid ${colors.border};border-radius:7px;font:13px monospace;`;
+    label.appendChild(input);
+    const help = document.createElement("button");
+    help.type = "button";
+    help.textContent = lt("How do I get it?");
+    help.style.cssText = `margin-top:9px;padding:0;background:none;border:0;color:${colors.accent};font:12px inherit;text-decoration:underline;cursor:pointer;`;
+    help.addEventListener("click", showRyuuAuthHelpPopup);
+    const safety = document.createElement("div");
+    safety.style.cssText = `font-size:11.5px;line-height:1.45;color:${colors.textSecondary};margin:12px 0;`;
+    safety.textContent = lt("You can paste the entire Cookie line. LuaTools keeps only session= and discards every other cookie.");
+    const error = document.createElement("div");
+    error.setAttribute("aria-live", "polite");
+    error.style.cssText = "display:none;color:#ec8b8b;font-size:12px;line-height:1.4;margin:10px 0;";
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:16px;";
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = lt("Cancel");
+    cancel.style.cssText = `border:1px solid ${colors.border};border-radius:6px;padding:8px 16px;background:transparent;color:${colors.textSecondary};font-weight:600;cursor:pointer;`;
+    const save = document.createElement("button");
+    save.type = "button";
+    save.textContent = lt("Save and continue");
+    save.style.cssText = `border:1px solid ${colors.accent};border-radius:6px;padding:8px 16px;background:${colors.accent};color:#fff;font-weight:600;cursor:pointer;`;
+    const onEsc = function (e) {
+      if (e.key === "Escape") { e.stopPropagation(); dismiss(); }
+    };
+    const dismiss = function () {
+      signInPolling = false;
+      try { document.removeEventListener("keydown", onEsc, true); } catch (_) {}
+      if (overlay.parentNode) overlay.remove();
+    };
+    document.addEventListener("keydown", onEsc, true);
+    cancel.addEventListener("click", dismiss);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) dismiss(); });
+    const submit = function () {
+      if (save.disabled) return;
+      if (!input.value.trim()) {
+        error.textContent = lt("Paste a Cookie line, session cookie or auth key.");
+        error.style.display = "block";
+        input.focus();
+        return;
+      }
+      save.disabled = true;
+      save.textContent = lt("Saving…");
+      error.style.display = "none";
+      Millennium.callServerMethod("luatools", "SaveRyuuAuthCredential", {
+        contentScriptQuery: "",
+        credential: input.value,
+      }).then(function (res) {
+        const payload = typeof res === "string" ? JSON.parse(res) : res;
+        if (payload && payload.success && payload.configured) {
+          input.value = "";
+          dismiss();
+          if (typeof onSaved === "function") onSaved(payload);
+          return;
+        }
+        error.textContent = payload && payload.error
+          ? String(payload.error)
+          : lt("Could not save Ryuu authentication.");
+        error.style.display = "block";
+        save.disabled = false;
+        save.textContent = lt("Save and continue");
+      }).catch(function () {
+        error.textContent = lt("Could not save Ryuu authentication.");
+        error.style.display = "block";
+        save.disabled = false;
+        save.textContent = lt("Save and continue");
+      });
+    };
+    save.addEventListener("click", submit);
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") { e.preventDefault(); submit(); }
+    });
+    row.appendChild(cancel); row.appendChild(save);
+
+    // The manual paste is the advanced path: it stays behind a link so the
+    // default is the guided Discord sign-in below.
+    const manualBox = document.createElement("div");
+    manualBox.style.display = "none";
+    manualBox.appendChild(label); manualBox.appendChild(help);
+    manualBox.appendChild(safety); manualBox.appendChild(error);
+    manualBox.appendChild(row);
+
+    // ── Discord-first section ────────────────────────────────────────────────
+    // Steam opens its own window on the Ryuu page; Lumen reads the resulting
+    // session out of the (global) CEF cookie jar and verifies it. The same three
+    // RPCs back the Lumen Fixes Menu, so there is one implementation.
+    const signInBox = document.createElement("div");
+    const signInCopy = document.createElement("div");
+    signInCopy.style.cssText = `font-size:13px;line-height:1.55;color:${colors.textSecondary};`;
+    const signInNote = document.createElement("div");
+    signInNote.style.cssText = `font-size:11.5px;line-height:1.5;color:${colors.textSecondary};margin-top:16px;`;
+    signInNote.textContent = lt("Your Discord password never passes through LuaTools. Only the site session is stored, and it lasts about 7 days.");
+    const signInRow = document.createElement("div");
+    signInRow.style.cssText = "display:flex;justify-content:flex-end;gap:10px;margin-top:18px;";
+    const altRow = document.createElement("div");
+    altRow.style.cssText = `margin-top:16px;padding-top:13px;border-top:1px solid ${colors.border};`;
+    const altLink = document.createElement("button");
+    altLink.type = "button";
+    altLink.textContent = lt("Paste a session cookie instead");
+    altLink.style.cssText = `background:none;border:0;padding:0;color:${colors.textSecondary};font:12px inherit;text-decoration:underline;cursor:pointer;`;
+    altLink.addEventListener("click", function () {
+      signInPolling = false;
+      signInBox.style.display = "none";
+      altRow.style.display = "none";
+      manualBox.style.display = "";
+      title.querySelector("span").textContent = lt("Ryuu authentication required");
+      intro.textContent = lt("Paste your Ryuu session cookie or official auth key. LuaTools will save it privately and continue this download.");
+      setTimeout(function () { try { input.focus(); } catch (_) {} }, 0);
+    });
+    altRow.appendChild(altLink);
+    signInBox.appendChild(signInCopy); signInBox.appendChild(signInNote);
+    signInBox.appendChild(signInRow);
+
+    let signInPolling = false;
+    const RYUU_SIGNIN_LIMIT = 180000;
+    const RYUU_SIGNIN_TICK = 2500;
+    const lumenCall = function (fn) {
+      return Millennium.callServerMethod("lumen", fn, {}).then(function (res) {
+        return typeof res === "string" ? JSON.parse(res) : res;
+      });
+    };
+    const signInButton = function (text, primary, onClick) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = text;
+      b.style.cssText = primary
+        ? "border:1px solid #5865f2;border-radius:6px;padding:9px 18px;background:#5865f2;color:#fff;font-weight:600;cursor:pointer;"
+        : `border:1px solid ${colors.border};border-radius:6px;padding:9px 16px;background:transparent;color:${colors.textSecondary};font-weight:600;cursor:pointer;`;
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    const renderSignIn = function (state, message) {
+      signInRow.innerHTML = "";
+      signInNote.style.display = state === "intro" ? "" : "none";
+      if (state === "intro") {
+        title.querySelector("span").textContent = lt("This source requires a Discord login");
+        intro.textContent = "";
+        signInCopy.textContent = lt("Ryuu Fixes only serves downloads to signed-in accounts, and it signs in through Discord. Steam will open a window on the Ryuu page — authorize with Discord there and this panel continues on its own.");
+        signInRow.appendChild(signInButton(lt("Sign in with Discord"), true, startSignIn));
+        signInRow.appendChild(signInButton(lt("Cancel"), false, dismiss));
+        return;
+      }
+      if (state === "opening" || state === "waiting") {
+        title.querySelector("span").textContent = state === "opening"
+          ? lt("Opening the sign-in window…") : lt("Waiting for the Discord login…");
+        signInCopy.textContent = state === "opening"
+          ? lt("Steam is bringing up the Ryuu page.")
+          : lt("Finish it in the window Steam opened. You can cancel here.");
+        if (state === "waiting") {
+          signInRow.appendChild(signInButton(lt("Cancel"), false, function () {
+            signInPolling = false;
+            lumenCall("__lumenRyuuLoginClose").catch(function () {});
+            dismiss();
+          }));
+        }
+        return;
+      }
+      if (state === "done") {
+        title.querySelector("span").textContent = lt("Signed in");
+        signInCopy.textContent = lt("Resuming the download…");
+        return;
+      }
+      title.querySelector("span").textContent = lt("The sign-in was not completed");
+      signInCopy.textContent = message
+        || lt("Nothing was saved. You can try again or paste a session cookie.");
+      signInRow.appendChild(signInButton(lt("Try again"), true, startSignIn));
+      signInRow.appendChild(signInButton(lt("Cancel"), false, dismiss));
+    };
+    const pollSignIn = function (startedAt) {
+      if (!signInPolling) return;
+      lumenCall("__lumenRyuuLoginPoll").catch(function () { return null; })
+        .then(function (p) {
+          if (!signInPolling) return;
+          const state = (p && p.ok) ? p.state : null;
+          if (state === "configured") {
+            signInPolling = false;
+            lumenCall("__lumenRyuuLoginClose").catch(function () {});
+            renderSignIn("done");
+            setTimeout(function () {
+              dismiss();
+              if (typeof onSaved === "function") onSaved({ configured: true });
+            }, 900);
+            return;
+          }
+          if (state === "error") {
+            signInPolling = false;
+            renderSignIn("failed", p && p.error);
+            return;
+          }
+          if (Date.now() - startedAt >= RYUU_SIGNIN_LIMIT) {
+            signInPolling = false;
+            renderSignIn("failed",
+              lt("The sign-in took too long, so it was stopped. Try again when you are ready."));
+            return;
+          }
+          setTimeout(function () { pollSignIn(startedAt); }, RYUU_SIGNIN_TICK);
+        });
+    };
+    function startSignIn() {
+      signInPolling = true;
+      renderSignIn("opening");
+      lumenCall("__lumenRyuuLoginOpen").catch(function () { return null; })
+        .then(function (p) {
+          if (!signInPolling) return;
+          if (!(p && p.ok)) {
+            signInPolling = false;
+            renderSignIn("failed", (p && p.reason) === "unsupported"
+              ? lt("This Steam mode cannot open the sign-in window. Paste a session cookie instead.")
+              : lt("Steam could not open the sign-in window. Paste a session cookie instead."));
+            return;
+          }
+          renderSignIn("waiting");
+          setTimeout(function () { pollSignIn(Date.now()); }, RYUU_SIGNIN_TICK);
+        });
+    }
+
+    modal.appendChild(title); modal.appendChild(intro);
+    modal.appendChild(signInBox); modal.appendChild(manualBox); modal.appendChild(altRow);
+    overlay.appendChild(modal); document.body.appendChild(overlay);
+    renderSignIn("intro");
+    // Game Mode / Big Picture cannot open the sign-in window at all (verified on
+    // a live gamescope session), and typing a 300-character cookie with a gamepad
+    // is not a real option. The credential is shared between modes, so there the
+    // modal becomes a short notice pointing at Desktop Mode: no form, no polling.
+    lumenCall("__lumenRyuuLoginAvailable").then(function (p) {
+      if (!(p && p.ok && p.available === false)) return;
+      signInPolling = false;
+      signInBox.style.display = "none";
+      manualBox.style.display = "none";
+      altRow.style.display = "none";
+      title.querySelector("span").textContent = lt("Sign-in is only available in Desktop Mode");
+      intro.textContent = lt("Steam cannot open the sign-in window in Game Mode. Switch to Desktop Mode and sign in once from the Fixes Menu: the session is saved and applies here too.");
+      const noticeRow = document.createElement("div");
+      noticeRow.style.cssText = "display:flex;justify-content:flex-end;margin-top:18px;";
+      noticeRow.appendChild(signInButton(lt("Got it"), true, dismiss));
+      modal.appendChild(noticeRow);
+    }).catch(function () {});
+  }
+
+  // A Ryuu session lasts about a week and is also invalidated by logging out
+  // of the site. downloader.sh tags HTTP 401/403 with errorCode
+  // "authentication" (and fixes.lua clears the stored credential), so the UI
+  // can offer a fresh sign-in instead of the misleading "corrupt archive" text.
+  function ryuuAuthFailure(state) {
+    return !!(state && state.errorCode === "authentication");
+  }
+
+  function ryuuCrackUiState(crackFix, strings) {
+    crackFix = crackFix || {};
+    strings = strings || {};
+    const available = crackFix.status === 200;
+    const needsAuth = available && crackFix.requiresAuth && !crackFix.authConfigured;
+    return {
+      available,
+      needsAuth,
+      // The button keeps its own icon; the key goes on the badge, which is what
+      // conveys the missing authentication.
+      icon: "fa-wrench",
+      badge: needsAuth ? strings.badge : null,
+      badgeIcon: needsAuth,
+      description: needsAuth ? strings.auth : strings.normal,
+    };
+  }
+
   // Fixes Results popup
+  // Overlays can be orphaned in the DOM when the view is dismissed without our
+  // own close handlers running — Game Mode's gamepad Back does exactly that.
+  // The old "already open? bail out" guard then made the Fixes Menu unopenable
+  // for the rest of the session, so any stale overlay is cleared first.
+  // Returns how many were removed (exported for tests).
+  const LT_STALE_FIX_OVERLAYS = [
+    ".luatools-fixes-results-overlay",
+    ".luatools-ryuu-auth-overlay",
+    ".luatools-ryuu-help-overlay",
+  ];
+  function clearStaleFixOverlays(doc) {
+    let removed = 0;
+    try {
+      const nodes = doc.querySelectorAll(LT_STALE_FIX_OVERLAYS.join(","));
+      Array.prototype.forEach.call(nodes, function (node) {
+        node.remove();
+        removed++;
+      });
+    } catch (_) {}
+    return removed;
+  }
+  try { window.__LuaToolsClearStaleFixOverlays = clearStaleFixOverlays; } catch (_) {}
+
   function showFixesResultsPopup(data, isGameInstalled) {
-    if (document.querySelector(".luatools-fixes-results-overlay")) return;
+    clearStaleFixOverlays(document);
     // Close other popups
     try {
       const d = document.querySelector(".luatools-overlay");
@@ -2423,20 +3351,6 @@
         body.style.backgroundSize = "cover";
       }
     } catch (_) {}
-
-    // Add mouse mode tip for Big Picture
-    if (window.__LUATOOLS_IS_BIG_PICTURE__) {
-      const tip = document.createElement("div");
-      tip.style.cssText =
-        "background:rgba(102,192,244,0.15);border-left:3px solid #66c0f4;padding:12px 16px;border-radius:6px;font-size:13px;color:#c7d5e0;margin-bottom:16px;line-height:1.5;";
-      tip.innerHTML =
-        '<i class="fa-solid fa-info-circle" style="margin-right:8px;color:#66c0f4;"></i>' +
-        t(
-          "bigpicture.mouseTip",
-          "To use mouse mode in Steam: Guide Button + Right Joystick, click with RB",
-        );
-      body.appendChild(tip);
-    }
 
     const gameHeader = document.createElement("div");
     gameHeader.style.cssText =
@@ -2570,18 +3484,23 @@
     // button sourced from the ryuu catalogue. Availability + URL come from
     // data.crackFix (CheckForFixes resolves it against the bundled index).
     const crackStatus = (data.crackFix && data.crackFix.status) || 0;
+    const crackUi = ryuuCrackUiState(data.crackFix, {
+      normal: lt("Fetches and applies fixes from Ryuu Fixes"),
+      auth: lt("Ryuu authentication is required. Click to add it."),
+      badge: lt("Needs auth"),
+    });
     const crackSection = createFixButton(
       lt("Crack/Bypass"),
       // slsteammoon: static descriptive subtitle (like the sibling buttons),
       // not the Apply/No-crack status -- availability is conveyed by the
       // dimmed style below, not the text.
-      lt("Fetches and applies fixes from Ryuu Fixes"),
-      "fa-wrench",
+      crackUi.description,
+      crackUi.icon,
       // slsteammoon: a normal (theme-colored) button when available, NOT the
       // green "success" highlight -- it's an action, not an applied state.
       // Match the sibling buttons (Online Fix passes null). Stay dimmed/
       // disabled when no crack/bypass exists (isSuccess === false).
-      crackStatus === 200 ? null : false,
+      crackUi.available ? null : false,
       function (e) {
         e.preventDefault();
         if (crackStatus !== 200 || !isGameInstalled) return;
@@ -2620,6 +3539,13 @@
           );
         }
         function __cfProceed() {
+          if (crackUi.needsAuth) {
+            showRyuuAuthPopup(function () {
+              data.crackFix.authConfigured = true;
+              applyFix(data.appid, crackUrl, lt("Crack/Bypass"), data.gameName, overlay);
+            });
+            return;
+          }
           applyFix(data.appid, crackUrl, lt("Crack/Bypass"), data.gameName, overlay);
         }
         if (__cfLooksNativeLinux()) {
@@ -2645,6 +3571,29 @@
       },
     );
     columnsContainer.appendChild(crackSection);
+
+    if (crackUi.needsAuth) {
+      // Badge only: no border tint, so the button keeps its normal resting and
+      // hover styling instead of looking like a warning state.
+      crackSection.style.position = "relative";
+      const badge = document.createElement("span");
+      badge.style.cssText =
+        "position:absolute;top:9px;right:9px;display:inline-flex;align-items:center;gap:4px;padding:3px 7px;border-radius:999px;background:rgba(224,179,65,.14);color:#f3ca62;font-size:9px;font-weight:700;line-height:1;text-transform:uppercase;letter-spacing:.35px;";
+      if (crackUi.badgeIcon) {
+        const badgeKey = document.createElement("span");
+        badgeKey.style.cssText = "display:inline-flex;align-items:center;";
+        badgeKey.innerHTML =
+          '<svg viewBox="0 0 512 512" width="9" height="9" fill="currentColor" aria-hidden="true">'
+          + '<path d="M336 0a176 176 0 00-168 228L7 389a24 24 0 00-7 17v82a24 24 0 0024 24h82a24 24 0 0017-7'
+          + 'l23-23a24 24 0 007-17v-29h29a24 24 0 0024-24v-29h29a24 24 0 0017-7l32-32A176 176 0 10336 0zm48 176'
+          + 'a48 48 0 110-96 48 48 0 010 96z"/></svg>';
+        badge.appendChild(badgeKey);
+      }
+      const badgeText = document.createElement("span");
+      badgeText.textContent = crackUi.badge;
+      badge.appendChild(badgeText);
+      crackSection.appendChild(badge);
+    }
 
     if (!isGameInstalled) {
       crackSection.style.opacity = "0.5";
@@ -3128,9 +4077,19 @@
       });
   }
 
+  // Last fix request, so an expired Ryuu session can be retried straight from
+  // the progress modal (which only knows the appid and the fix label).
+  let lastFixRequest = null;
+
   // Apply Fix function
   function applyFix(appid, downloadUrl, fixType, gameName, resultsOverlay) {
     try {
+      lastFixRequest = {
+        appid: appid,
+        downloadUrl: downloadUrl,
+        fixType: fixType,
+        gameName: gameName,
+      };
       // Close results overlay
       if (resultsOverlay) {
         resultsOverlay.remove();
@@ -3160,6 +4119,12 @@
             if (payload && payload.success) {
               // Show download progress popup similar to Add via LuaTools
               showFixDownloadProgress(appid, fixType);
+            } else if (ryuuAuthFailure(payload)) {
+              // The card thought a credential was present but the backend
+              // found none (removed elsewhere, or cleared after a 401).
+              showRyuuAuthPopup(function () {
+                applyFix(appid, downloadUrl, fixType, gameName, null);
+              });
             } else {
               const errorKey =
                 payload && payload.error ? String(payload.error) : "";
@@ -3314,6 +4279,32 @@
       overlayEl.remove();
     };
     btnRow.appendChild(closeBtn);
+  }
+
+  // Dead-end recovery for an expired Ryuu session: Close plus a primary action
+  // that collects a fresh credential and restarts the same download.
+  function replaceFixButtonsWithReauth(overlayEl, onRetry) {
+    replaceFixButtonsWithClose(overlayEl);
+    if (!overlayEl) return;
+    const btnRow = overlayEl.querySelector(".lt-fix-btn-row");
+    if (!btnRow) return;
+    btnRow.style.cssText =
+      "margin-top:16px;display:flex;justify-content:flex-end;gap:10px;";
+    const closeBtn = btnRow.querySelector(".luatools-btn");
+    if (closeBtn) closeBtn.classList.remove("primary");
+    const authBtn = document.createElement("a");
+    authBtn.href = "#";
+    authBtn.className = "luatools-btn primary";
+    authBtn.style.minWidth = "170px";
+    authBtn.innerHTML = `<span>${lt("Update authentication")}</span>`;
+    authBtn.onclick = function (e) {
+      e.preventDefault();
+      showRyuuAuthPopup(function () {
+        overlayEl.remove();
+        if (typeof onRetry === "function") onRetry();
+      });
+    };
+    btnRow.appendChild(authBtn);
   }
 
   // Poll fix download and extraction progress
@@ -3515,6 +4506,24 @@
                 replaceFixButtonsWithClose(overlayEl);
                 return; // Stop polling
               } else if (state.status === "failed") {
+                if (ryuuAuthFailure(state)) {
+                  if (msgEl)
+                    msgEl.textContent = lt(
+                      "Your Ryuu session was rejected or expired. Add a current session cookie or auth key to continue.",
+                    );
+                  const retry = lastFixRequest;
+                  replaceFixButtonsWithReauth(overlayEl, function () {
+                    if (!retry) return;
+                    applyFix(
+                      retry.appid,
+                      retry.downloadUrl,
+                      retry.fixType,
+                      retry.gameName,
+                      null,
+                    );
+                  });
+                  return; // Stop polling
+                }
                 if (msgEl)
                   msgEl.textContent = lt("Failed: {error}").replace(
                     "{error}",
@@ -3914,20 +4923,6 @@
     contentWrap.id = "luatools-content-wrap";
     const contentColors = getThemeColors();
     contentWrap.style.cssText = `flex:1 1 auto;overflow-y:auto;overflow-x:hidden;padding:24px;margin:0;background:transparent;`;
-
-    // Add mouse mode tip for Big Picture
-    if (window.__LUATOOLS_IS_BIG_PICTURE__) {
-      const tip = document.createElement("div");
-      const tipColors = getThemeColors();
-      tip.style.cssText = `background:rgba(${tipColors.rgbString},0.08);border:1px solid ${tipColors.border};padding:12px 16px;border-radius:8px;font-size:13px;color:${tipColors.textSecondary};margin-bottom:20px;line-height:1.5;display:flex;align-items:center;gap:10px;`;
-      tip.innerHTML =
-        '<i class="fa-solid fa-info-circle" style="color:#66c0f4;font-size:14px;flex-shrink:0;"></i>' +
-        t(
-          "bigpicture.mouseTip",
-          "To use mouse mode in Steam: Guide Button + Right Joystick, click with RB",
-        );
-      contentWrap.appendChild(tip);
-    }
 
     const btnRow = document.createElement("div");
     btnRow.style.cssText =
@@ -4384,18 +5379,20 @@
               option.description,
             );
 
-            // Special handling for hubcap link
+            // Special handling for API-provider links.
             if (
               descTextVal.includes("hubcapmanifest.com") ||
               descTextVal.includes("{link}")
             ) {
               const url = "https://hubcapmanifest.com";
-              const linkHtml = `<a href="${url}" id="lt-hubcap-link" style="color:${optDescColors.accent};text-decoration:underline;">hubcapmanifest.com</a>`;
+              const host = "hubcapmanifest.com";
+              const linkId = "lt-hubcap-link";
+              const linkHtml = `<a href="${url}" id="${linkId}" style="color:${optDescColors.accent};text-decoration:underline;">${host}</a>`;
               if (descTextVal.includes("{link}")) {
                 descTextVal = descTextVal.replace("{link}", linkHtml);
               } else {
                 descTextVal = descTextVal.replace(
-                  "hubcapmanifest.com",
+                  host,
                   linkHtml,
                 );
               }
@@ -4404,7 +5401,7 @@
               // Add event listener after appending to document or wait?
               // Better: use a selector later or add it now if possible.
               setTimeout(() => {
-                const link = document.getElementById("lt-hubcap-link");
+                const link = document.getElementById(linkId);
                 if (link) {
                   link.onclick = (e) => {
                     e.preventDefault();
@@ -6600,6 +7597,56 @@
                 .luatools-pill.yellow { background: rgba(255, 193, 7, 0.15); color: #ffc107; border: 1px solid rgba(255, 193, 7, 0.3); }
                 .luatools-pill.orange { background: rgba(255, 136, 0, 0.15); color: #ff8800; border: 1px solid rgba(255, 136, 0, 0.3); }
                 .luatools-pill.gray { background: rgba(150, 150, 150, 0.15); color: #a0a0a0; border: 1px solid rgba(150, 150, 150, 0.3); }
+                .BasicUI .luatools-gamepad-row {
+                    display: flex !important;
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    gap: var(--spacing-1, 4px) !important;
+                }
+                .BasicUI .luatools-gamepad-cell {
+                    flex: var(--luatools-flex-grow, 1) 1 0 !important;
+                    min-width: 0 !important;
+                }
+                .BasicUI .luatools-gamepad-button {
+                    width: 100% !important;
+                    min-width: 0 !important;
+                    margin: 0 !important;
+                    overflow: hidden !important;
+                    white-space: nowrap !important;
+                }
+                .BasicUI .luatools-gamepad-button > span,
+                .BasicUI .luatools-gamepad-button > span > span {
+                    min-width: 0 !important;
+                    overflow: hidden !important;
+                    text-overflow: ellipsis !important;
+                    white-space: nowrap !important;
+                }
+                .BasicUI #luatools-gamepad-actions[data-action-count="3"] .luatools-gamepad-button {
+                    padding-inline: 4px !important;
+                    font-size: 11px !important;
+                }
+                .BasicUI .luatools-gamepad-proton-button > span > span {
+                    display: flex !important;
+                    align-items: center;
+                    justify-content: center;
+                }
+                .BasicUI .luatools-gamepad-proton-button .ltp-medal {
+                    width: 13px;
+                    height: 13px;
+                    margin-right: 7px;
+                    border-radius: 50%;
+                    flex: 0 0 auto;
+                    background: radial-gradient(circle at 34% 30%, rgba(255,255,255,.75), transparent 58%), var(--ltp-color, #66c0f4);
+                    box-shadow: 0 0 0 1px rgba(0,0,0,.45), 0 0 7px var(--ltp-glow, transparent);
+                }
+                .BasicUI .luatools-gamepad-proton-button .ltp-mark { color: #d6d7d8; }
+                .BasicUI .luatools-gamepad-proton-button .ltp-sep { margin: 0 5px; color: #8b929a; }
+                .BasicUI .luatools-gamepad-proton-button .ltp-tier {
+                    color: var(--ltp-text, #fff);
+                    font-weight: 700;
+                    text-transform: uppercase;
+                    text-shadow: 0 0 10px var(--ltp-glow, transparent);
+                }
             `;
       document.head.appendChild(style); // This is now separate from the main style block
     }
@@ -6817,6 +7864,467 @@
     }
   }
 
+  // slsteammoon: Gamescope's 2026 store redesign replaced #queueBtnFollow
+  // with a React feature target. Resolve the new layout structurally so hashed
+  // CSS-module class names can change without hiding the controls again.
+  function findBigPictureInterestLayout(root) {
+    root = root || document.getElementById("FeatureTarget_interest-buttons");
+    if (!root) return null;
+
+    const nativeButtons = Array.from(root.querySelectorAll("button")).filter(
+      function (button) {
+        return !(
+          button.classList.contains("luatools-gamepad-button") ||
+          button.classList.contains("luatools-gamepad-proton-button")
+        );
+      },
+    );
+    if (nativeButtons.length < 3) return null;
+
+    let column = nativeButtons[0].parentElement;
+    while (
+      column &&
+      !nativeButtons.slice(0, 3).every(function (button) {
+        return column.contains(button);
+      })
+    ) {
+      column = column.parentElement;
+    }
+    if (!column) return null;
+
+    const directChildWithin = function (node) {
+      while (node && node.parentElement !== column) node = node.parentElement;
+      return node && node.parentElement === column ? node : null;
+    };
+    const wishlistRow = directChildWithin(nativeButtons[0]);
+    const followRow = directChildWithin(nativeButtons[1]);
+    if (!wishlistRow || !followRow || wishlistRow === followRow) return null;
+
+    let referenceCell = nativeButtons[1];
+    while (referenceCell && referenceCell.parentElement !== followRow) {
+      referenceCell = referenceCell.parentElement;
+    }
+    if (!referenceCell) return null;
+
+    return {
+      root: root,
+      column: column,
+      wishlistRow: wishlistRow,
+      followRow: followRow,
+      referenceCells: Array.from(followRow.children).filter(function (cell) {
+        return !!cell.querySelector("button");
+      }),
+      referenceCell: referenceCell,
+      referenceButton: nativeButtons[1],
+    };
+  }
+
+  function createBigPictureStoreButton(layout, markerClass, label) {
+    const button = layout.referenceButton.cloneNode(false);
+    button.className = button.className
+      .replace(/luatools-[\w-]+/g, "")
+      .trim();
+    button.classList.add("luatools-gamepad-button", markerClass);
+    button.type = "button";
+    button.setAttribute("role", "button");
+    button.setAttribute("tabindex", "0");
+    button.setAttribute("aria-label", label);
+    button.title = label;
+    button.setAttribute("data-tooltip-text", label);
+
+    const nativeLabel = layout.referenceButton.querySelector("span");
+    const labelWrap = nativeLabel
+      ? nativeLabel.cloneNode(false)
+      : document.createElement("span");
+    const nativeState = nativeLabel && nativeLabel.firstElementChild;
+    const labelState = nativeState
+      ? nativeState.cloneNode(false)
+      : document.createElement("span");
+    labelState.textContent = label;
+    // Steam keeps inactive native button labels in the DOM with visibility
+    // hidden. A shallow clone inherits that state class, so explicitly expose
+    // the single state used by LuaTools.
+    labelState.style.setProperty("visibility", "visible", "important");
+    labelWrap.appendChild(labelState);
+    button.appendChild(labelWrap);
+    return button;
+  }
+
+  function createBigPictureStoreRow(layout, id) {
+    const row = layout.followRow.cloneNode(false);
+    row.id = id;
+    row.classList.add("luatools-gamepad-row");
+    row.style.setProperty("--width", "100%");
+    row.style.setProperty("--direction", "row");
+    row.style.setProperty("--gap", "var(--spacing-1)");
+    return row;
+  }
+
+  function appendBigPictureStoreButton(layout, row, button) {
+    const sourceCell =
+      layout.referenceCells[row.children.length] || layout.referenceCell;
+    const cell = sourceCell.cloneNode(false);
+    cell.classList.add("luatools-gamepad-cell");
+    cell.style.setProperty("--flex-grow", "1");
+    cell.appendChild(button);
+    row.appendChild(cell);
+  }
+
+  function alignBigPictureStoreRow(layout, row) {
+    const cells = Array.from(row.children);
+    const mirrorNativeSplit = cells.length === layout.referenceCells.length;
+    cells.forEach(function (cell, index) {
+      let grow = 1;
+      if (mirrorNativeSplit) {
+        const rect = layout.referenceCells[index].getBoundingClientRect();
+        if (rect && rect.width > 0) grow = rect.width;
+      }
+      cell.style.setProperty("--luatools-flex-grow", String(grow));
+    });
+  }
+
+  function addBigPictureProtonDBButton(appid, layout, protonRow) {
+    if (protonRow.querySelector(".luatools-gamepad-proton-button")) return;
+
+    const button = createBigPictureStoreButton(
+      layout,
+      "luatools-gamepad-proton-button",
+      "ProtonDB",
+    );
+    const labelWrap = button.querySelector("span");
+    const labelState = labelWrap && labelWrap.firstElementChild;
+    if (labelState) {
+      labelState.textContent = "";
+      const medal = document.createElement("span");
+      medal.className = "ltp-medal";
+      const mark = document.createElement("span");
+      mark.className = "ltp-mark";
+      mark.textContent = "ProtonDB";
+      labelState.appendChild(medal);
+      labelState.appendChild(mark);
+    }
+    button.title = "ProtonDB — Linux/Proton compatibility";
+    button.addEventListener("click", function (event) {
+      event.preventDefault();
+      const url = "https://www.protondb.com/app/" + appid;
+      try {
+        Millennium.callServerMethod("luatools", "OpenExternalUrl", {
+          url: url,
+          contentScriptQuery: "",
+        });
+      } catch (_) {
+        try {
+          window.open(url, "_blank", "noopener,noreferrer");
+        } catch (_) {}
+      }
+    });
+    appendBigPictureStoreButton(layout, protonRow, button);
+
+    let locked = false;
+    const apply = function (tierKey, meta) {
+      const tierData = LTP_TIERS[tierKey] || LTP_TIERS.pending;
+      button.style.setProperty("--ltp-color", tierData.color);
+      button.style.setProperty("--ltp-glow", tierData.glow);
+      button.style.setProperty("--ltp-text", tierData.text);
+      if (labelState) {
+        const oldSep = labelState.querySelector(".ltp-sep");
+        const oldTier = labelState.querySelector(".ltp-tier");
+        if (oldSep) oldSep.remove();
+        if (oldTier) oldTier.remove();
+        const sep = document.createElement("span");
+        sep.className = "ltp-sep";
+        sep.textContent = "·";
+        const tier = document.createElement("span");
+        tier.className = "ltp-tier";
+        tier.textContent = tierData.label;
+        labelState.appendChild(sep);
+        labelState.appendChild(tier);
+      }
+
+      let tip = "ProtonDB: " + tierData.label;
+      if (meta && typeof meta.score === "number") {
+        tip += "  ·  " + Math.round(meta.score * 100) + "%";
+      }
+      if (meta && typeof meta.total === "number" && meta.total > 0) {
+        tip += "  ·  " + meta.total + " report" + (meta.total === 1 ? "" : "s");
+      }
+      if (tierKey === "native") tip = "Native Linux build  ·  ProtonDB";
+      button.title = tip;
+      button.setAttribute("aria-label", tip);
+    };
+
+    const lockNative = function () {
+      if (locked) return;
+      locked = true;
+      apply("native", null);
+    };
+    if (ltpLooksNative()) {
+      lockNative();
+    } else {
+      let tries = 0;
+      const probe = setInterval(function () {
+        if (locked) {
+          clearInterval(probe);
+          return;
+        }
+        if (ltpLooksNative()) {
+          clearInterval(probe);
+          lockNative();
+          return;
+        }
+        if (++tries > 24) clearInterval(probe);
+      }, 50);
+    }
+
+    try {
+      Millennium.callServerMethod("luatools", "GetProtonDBStatus", {
+        appid: appid,
+        contentScriptQuery: "",
+      })
+        .then(function (res) {
+          if (locked) return;
+          const payload = typeof res === "string" ? JSON.parse(res) : res;
+          if (payload && payload.success && payload.data && payload.data.tier) {
+            apply(String(payload.data.tier).toLowerCase(), payload.data);
+          } else {
+            apply("pending", null);
+          }
+        })
+        .catch(function () {
+          if (!locked) apply("pending", null);
+        });
+    } catch (_) {
+      if (!locked) apply("pending", null);
+    }
+  }
+
+  function renderBigPictureStoreButtons(appid, isAdded, layout) {
+    layout = layout || findBigPictureInterestLayout();
+    if (!layout) return false;
+    try {
+      ensureStyles();
+    } catch (_) {}
+
+    let actionRow = document.getElementById("luatools-gamepad-actions");
+    if (!actionRow || actionRow.parentElement !== layout.column) {
+      if (actionRow) actionRow.remove();
+      actionRow = createBigPictureStoreRow(
+        layout,
+        "luatools-gamepad-actions",
+      );
+      layout.wishlistRow.after(actionRow);
+    }
+    actionRow.innerHTML = "";
+
+    const restartText = lt("Restart Steam");
+    const restartButton = createBigPictureStoreButton(
+      layout,
+      "luatools-restart-button",
+      restartText,
+    );
+    restartButton.addEventListener("click", function (event) {
+      event.preventDefault();
+      askRestartConfirmation();
+    });
+    appendBigPictureStoreButton(layout, actionRow, restartButton);
+
+    if (isAdded) {
+      const removeText = t("menu.removeLuaTools", "Remove via LuaTools");
+      const fixesText = t("menu.fixesMenu", "Fixes Menu");
+      const removeButton = createBigPictureStoreButton(
+        layout,
+        "luatools-remove-button",
+        removeText,
+      );
+      const fixesButton = createBigPictureStoreButton(
+        layout,
+        "luatools-fixes-button",
+        fixesText,
+      );
+
+      removeButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        showLuaToolsConfirm(
+          "LuaTools",
+          t("menu.remove.confirm", "Remove via LuaTools for this game?"),
+          function () {
+            Millennium.callServerMethod("luatools", "DeleteLuaToolsForApp", {
+              appid: appid,
+              contentScriptQuery: "",
+            })
+              .then(function () {
+                const currentLayout = findBigPictureInterestLayout();
+                if (currentLayout) {
+                  renderBigPictureStoreButtons(appid, false, currentLayout);
+                }
+                window.__LuaToolsManageInserted = false;
+                window.__LuaToolsButtonInserted = true;
+                ShowLuaToolsAlert(
+                  "LuaTools",
+                  t("menu.remove.success", "LuaTools removed for this app."),
+                );
+              })
+              .catch(function (err) {
+                ShowLuaToolsAlert(
+                  "LuaTools",
+                  (err && err.message) ||
+                    t("menu.remove.failure", "Failed to remove LuaTools."),
+                );
+              });
+          },
+          function () {},
+        );
+      });
+
+      fixesButton.addEventListener("click", function (event) {
+        event.preventDefault();
+        Millennium.callServerMethod("luatools", "GetGameInstallPath", {
+          appid: appid,
+          contentScriptQuery: "",
+        })
+          .then(function (pathRes) {
+            const pathPayload =
+              typeof pathRes === "string" ? JSON.parse(pathRes) : pathRes;
+            const installed = !!(
+              pathPayload &&
+              pathPayload.success &&
+              pathPayload.installPath
+            );
+            window.__LuaToolsGameIsInstalled = installed;
+            if (installed) {
+              window.__LuaToolsGameInstallPath = pathPayload.installPath;
+            }
+            showFixesLoadingPopupAndCheck(appid);
+          })
+          .catch(function () {
+            ShowLuaToolsAlert(
+              "LuaTools",
+              t("menu.error.getPath", "Error getting game path"),
+            );
+          });
+      });
+
+      appendBigPictureStoreButton(layout, actionRow, removeButton);
+      appendBigPictureStoreButton(layout, actionRow, fixesButton);
+      window.__LuaToolsManageInserted = true;
+      window.__LuaToolsButtonInserted = false;
+    } else {
+      const addText = lt("Add via LuaTools");
+      const addButton = createBigPictureStoreButton(
+        layout,
+        "luatools-button",
+        addText,
+      );
+      appendBigPictureStoreButton(layout, actionRow, addButton);
+      window.__LuaToolsManageInserted = false;
+      window.__LuaToolsButtonInserted = true;
+    }
+
+    actionRow.setAttribute(
+      "data-action-count",
+      String(actionRow.querySelectorAll("button").length),
+    );
+    alignBigPictureStoreRow(layout, actionRow);
+    actionRow.setAttribute("data-appid", String(appid));
+    actionRow.setAttribute("data-added", isAdded ? "1" : "0");
+
+    let protonRow = document.getElementById("luatools-gamepad-protondb");
+    if (!protonRow || protonRow.parentElement !== layout.column) {
+      if (protonRow) protonRow.remove();
+      protonRow = createBigPictureStoreRow(
+        layout,
+        "luatools-gamepad-protondb",
+      );
+      layout.followRow.after(protonRow);
+    }
+    addBigPictureProtonDBButton(appid, layout, protonRow);
+    alignBigPictureStoreRow(layout, protonRow);
+    if (
+      window.GamepadNav &&
+      typeof window.GamepadNav.registerStoreRows === "function"
+    ) {
+      window.GamepadNav.registerStoreRows([actionRow, protonRow]);
+    }
+    window.__LuaToolsRestartInserted = true;
+    return true;
+  }
+
+  function mountBigPictureStoreButtons() {
+    const layout = findBigPictureInterestLayout();
+    if (!layout) return false;
+    const match =
+      window.location.href.match(/https:\/\/store\.steampowered\.com\/app\/(\d+)/) ||
+      window.location.href.match(/https:\/\/steamcommunity\.com\/app\/(\d+)/);
+    const appid = match ? parseInt(match[1], 10) : NaN;
+    if (isNaN(appid)) return false;
+
+    document
+      .querySelectorAll(
+        ".luatools-restart-button, .luatools-button, .luatools-remove-button, .luatools-fixes-button, .luatools-proton-btn",
+      )
+      .forEach(function (button) {
+        if (
+          !button.closest("#luatools-gamepad-actions") &&
+          !button.closest("#luatools-gamepad-protondb")
+        ) {
+          button.remove();
+        }
+      });
+
+    const existingActions = document.getElementById(
+      "luatools-gamepad-actions",
+    );
+    const existingProton = document.getElementById(
+      "luatools-gamepad-protondb",
+    );
+    if (
+      existingActions &&
+      existingProton &&
+      existingActions.getAttribute("data-appid") === String(appid)
+    ) {
+      return true;
+    }
+    if (
+      window.__LuaToolsPresenceCheckInFlight &&
+      window.__LuaToolsPresenceCheckAppId === appid
+    ) {
+      return true;
+    }
+
+    window.__LuaToolsPresenceCheckInFlight = true;
+    window.__LuaToolsPresenceCheckAppId = appid;
+    window.__LuaToolsCurrentAppId = appid;
+    try {
+      Millennium.callServerMethod("luatools", "HasLuaToolsForApp", {
+        appid: appid,
+        contentScriptQuery: "",
+      })
+        .then(function (res) {
+          const payload = typeof res === "string" ? JSON.parse(res) : res;
+          const currentLayout = findBigPictureInterestLayout();
+          if (currentLayout) {
+            renderBigPictureStoreButtons(
+              appid,
+              !!(payload && payload.success && payload.exists === true),
+              currentLayout,
+            );
+          }
+          window.__LuaToolsPresenceCheckInFlight = false;
+        })
+        .catch(function () {
+          const currentLayout = findBigPictureInterestLayout();
+          if (currentLayout) {
+            renderBigPictureStoreButtons(appid, false, currentLayout);
+          }
+          window.__LuaToolsPresenceCheckInFlight = false;
+        });
+    } catch (_) {
+      renderBigPictureStoreButtons(appid, false, layout);
+      window.__LuaToolsPresenceCheckInFlight = false;
+    }
+    return true;
+  }
+
   // ===========================================================================
   // slsteammoon: "manage" header buttons for an already-added game
   // ---------------------------------------------------------------------------
@@ -6846,14 +8354,11 @@
     } catch (_) {}
 
     // Reference an existing button so the new ones inherit the native store
-    // look-and-feel. Prefer the Restart Steam button (same row, same styling);
-    // fall back to the first link in the container / the BP queue button.
-    const isBigPicture = window.__LUATOOLS_IS_BIG_PICTURE__;
+    // look-and-feel. Prefer the Restart Steam button (same row, same styling),
+    // then fall back to the first link in the desktop container.
     const referenceBtn =
       container.querySelector(".luatools-restart-button") ||
-      (isBigPicture
-        ? document.querySelector("#queueBtnFollow")
-        : container.querySelector("a"));
+      container.querySelector("a");
 
     const makeBtn = function (cls, label) {
       const a = document.createElement("a");
@@ -7032,8 +8537,7 @@
     const headerContainer = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
     if (
       headerContainer &&
-      !document.querySelector(".luatools-header-button") &&
-      !window.__LuaToolsHeaderInserted
+      !document.querySelector(".luatools-header-button")
     ) {
       ensureLuaToolsStyles();
       const headerBtn = document.createElement("button");
@@ -7077,22 +8581,36 @@
       backendLog("Inserted store header button");
     }
 
+    const currentHeaderButton = document.querySelector(
+      ".luatools-header-button",
+    );
+    if (
+      currentHeaderButton &&
+      window.GamepadNav &&
+      typeof window.GamepadNav.registerHeaderElement === "function"
+    ) {
+      window.GamepadNav.registerHeaderElement(currentHeaderButton);
+    }
+
     // Check if we're in Big Picture mode
     const isBigPicture = window.__LUATOOLS_IS_BIG_PICTURE__;
 
-    // Look for the appropriate container based on mode
-    let targetContainer;
+    // The redesigned Gamescope/Big Picture store owns a dedicated React
+    // interest block. Keep this path isolated so none of the retired legacy
+    // queue-row controls are created alongside the new native rows.
     if (isBigPicture) {
-      // In Big Picture mode, use the queue button's parent as reference
-      const queueBtn = document.querySelector("#queueBtnFollow");
-      targetContainer = queueBtn ? queueBtn.parentElement : null;
-    } else {
-      // In normal mode, use the SteamDB buttons container
-      targetContainer =
-        document.querySelector(".steamdb-buttons") ||
-        document.querySelector("[data-steamdb-buttons]") ||
-        document.querySelector(".apphub_OtherSiteInfo");
+      if (!mountBigPictureStoreButtons() && !logState.missingOnce) {
+        backendLog("LuaTools: gamepad interest controls not ready");
+        logState.missingOnce = true;
+      }
+      return;
     }
+
+    // Desktop store controls retain their existing SteamDB row placement.
+    const targetContainer =
+      document.querySelector(".steamdb-buttons") ||
+      document.querySelector("[data-steamdb-buttons]") ||
+      document.querySelector(".apphub_OtherSiteInfo");
 
     if (targetContainer) {
       const steamdbContainer = targetContainer;
@@ -7104,10 +8622,7 @@
           !window.__LuaToolsRestartInserted
         ) {
           ensureStyles();
-          // In Big Picture mode, use queue button as reference; otherwise use first link in container
-          const referenceBtn = isBigPicture
-            ? document.querySelector("#queueBtnFollow")
-            : steamdbContainer.querySelector("a");
+          const referenceBtn = steamdbContainer.querySelector("a");
 
           // Use same custom button for both modes
           const restartBtn = document.createElement("a");
@@ -7168,10 +8683,7 @@
       // Check if button already exists to avoid duplicates
       if (!existingBtn && !window.__LuaToolsButtonInserted) {
         // Create the LuaTools button modeled after existing SteamDB/PCGW buttons
-        // In Big Picture mode, use queue button as reference; otherwise use first link in container
-        let referenceBtn = isBigPicture
-          ? document.querySelector("#queueBtnFollow")
-          : steamdbContainer.querySelector("a");
+        let referenceBtn = steamdbContainer.querySelector("a");
 
         // Use same custom button for both modes
         const luatoolsButton = document.createElement("a");
@@ -7492,64 +9004,6 @@
       addLuaToolsButton();
     }
 
-    // Show gamepad hint if connected (only in Big Picture mode)
-    setTimeout(function () {
-      if (
-        window.GamepadNav &&
-        window.GamepadNav.isConnected &&
-        window.GamepadNav.isConnected()
-      ) {
-        backendLog("[LuaTools] Gamepad detected - Navigation enabled");
-
-        // Only show visual hint in Big Picture mode
-        if (window.__LUATOOLS_IS_BIG_PICTURE__) {
-          const hint = document.createElement("div");
-          hint.id = "luatools-gamepad-hint";
-          hint.innerHTML = "🎮 " + lt("bigpicture.mouseTip");
-          hint.style.cssText =
-            "\
-                        position: fixed;\
-                        bottom: 20px;\
-                        right: 20px;\
-                        background: rgba(11, 20, 30, 0.9);\
-                        color: #66c0f4;\
-                        padding: 12px 16px;\
-                        border-radius: 8px;\
-                        font-size: 14px;\
-                        z-index: 99998;\
-                        border: 1px solid rgba(102, 192, 244, 0.3);\
-                        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);\
-                        animation: fadeInOut 3s ease-in-out;\
-                    ";
-
-          // Add CSS animation if not already present
-          if (!document.querySelector("#luatools-gamepad-hint-styles")) {
-            const style = document.createElement("style");
-            style.id = "luatools-gamepad-hint-styles";
-            style.textContent =
-              "\
-                            @keyframes fadeInOut {\
-                                0% { opacity: 0; transform: translateY(10px); }\
-                                10% { opacity: 1; transform: translateY(0); }\
-                                90% { opacity: 1; transform: translateY(0); }\
-                                100% { opacity: 0; transform: translateY(10px); }\
-                            }\
-                        ";
-            document.head.appendChild(style);
-          }
-
-          document.body.appendChild(hint);
-
-          // Auto-remove after animation
-          setTimeout(function () {
-            if (hint && hint.parentElement) {
-              hint.remove();
-            }
-          }, 3000);
-        }
-      }
-    }, 500);
-
     // Ask backend if there is a queued startup message from InitApis
     try {
       if (
@@ -7644,18 +9098,88 @@
               return;
             }
 
-            // Helper that continues with the multi-API check flow
+            let isFastDownload = true;
+            try {
+              if (
+                window.__LuaToolsSettings &&
+                window.__LuaToolsSettings.values &&
+                window.__LuaToolsSettings.values.general &&
+                typeof window.__LuaToolsSettings.values.general.fastDownload !==
+                  "undefined"
+              ) {
+                isFastDownload =
+                  window.__LuaToolsSettings.values.general.fastDownload;
+              }
+            } catch (e) {}
+
+            const startSmartDownload = function (appid) {
+              showTestPopup();
+              runState.inProgress = true;
+              runState.appid = appid;
+              const overlay = document.querySelector(".luatools-overlay");
+              if (overlay) {
+                const status = overlay.querySelector(".luatools-status");
+                if (status) status.textContent = lt("Initializing download...");
+                const progressWrap = overlay.querySelector(
+                  ".luatools-progress-wrap",
+                );
+                if (progressWrap) progressWrap.style.display = "block";
+                const progressInfo = overlay.querySelector(
+                  ".luatools-progress-info",
+                );
+                if (progressInfo) progressInfo.style.display = "block";
+                const cancelBtn = overlay.querySelector(
+                  ".luatools-cancel-btn",
+                );
+                if (cancelBtn) cancelBtn.style.display = "flex";
+              }
+              backendLog("LuaTools: fast download -> parallel aggregation");
+              Millennium.callServerMethod(
+                "luatools",
+                "StartAddViaLuaToolsSmart",
+                { appid, contentScriptQuery: "" },
+              )
+                .then(function (res) {
+                  const payload = typeof res === "string" ? JSON.parse(res) : res;
+                  if (payload && payload.success === false) {
+                    throw new Error(payload.error || "Failed to start download");
+                  }
+                  startPolling(appid, function () {});
+                })
+                .catch(function (err) {
+                  backendLog("LuaTools: smart download start failed: " + err);
+                  runState.inProgress = false;
+                  runState.appid = null;
+                  const failedOverlay = document.querySelector(".luatools-overlay");
+                  const failedStatus = failedOverlay
+                    ? failedOverlay.querySelector(".luatools-status")
+                    : null;
+                  if (failedStatus) {
+                    failedStatus.textContent = lt("Failed: {error}").replace(
+                      "{error}",
+                      (err && err.message) || String(err),
+                    );
+                  }
+                  const cancelBtn = failedOverlay
+                    ? failedOverlay.querySelector(".luatools-cancel-btn")
+                    : null;
+                  if (cancelBtn) cancelBtn.style.display = "none";
+                });
+            };
+
+            // Fast Download starts immediately. Manual mode still checks APIs
+            // first because it needs concrete available URLs for its picker.
             const continueWithAdd = function () {
-              // Open the loading popup first to show "Searching..."
+              if (isFastDownload) {
+                startSmartDownload(appid);
+                return;
+              }
+
               showTestPopup();
               const overlay = document.querySelector(".luatools-overlay");
               const status = overlay
                 ? overlay.querySelector(".luatools-status")
                 : null;
-              const apiList = overlay
-                ? overlay.querySelector(".luatools-api-list")
-                : null;
-
               if (status)
                 status.textContent = lt("Searching across sources...");
 
@@ -7670,13 +9194,14 @@
                     if (!payload || !payload.success) {
                       throw new Error(payload.error || "Check failed");
                     }
-
-                    const results = payload.results || [];
-                    const available = results.filter((r) => r.available);
-
+                    const available = (payload.results || []).filter(
+                      (source) => source.available,
+                    );
                     if (available.length === 0) {
-                      const msg = lt("Game not found on any available API.");
-                      if (status) status.textContent = msg;
+                      if (status)
+                        status.textContent = lt(
+                          "Game not found on any available API.",
+                        );
                       const hideBtn = overlay
                         ? overlay.querySelector(".luatools-hide-btn")
                         : null;
@@ -7684,57 +9209,7 @@
                         hideBtn.innerHTML = "<span>" + lt("Close") + "</span>";
                       return;
                     }
-
-                    let isFastDownload = true; // default
-                    try {
-                      if (
-                        window.__LuaToolsSettings &&
-                        window.__LuaToolsSettings.values &&
-                        window.__LuaToolsSettings.values.general
-                      ) {
-                        if (
-                          typeof window.__LuaToolsSettings.values.general
-                            .fastDownload !== "undefined"
-                        ) {
-                          isFastDownload =
-                            window.__LuaToolsSettings.values.general
-                              .fastDownload;
-                        }
-                      }
-                    } catch (e) {}
-
-                    if (isFastDownload) {
-                      // slsteammoon: fast download runs the backend smart
-                      // source selector (parallel race -> most complete of
-                      // the fastest) instead of picking available[0] by order.
-                      backendLog(
-                        "LuaTools: fast download -> smart selection (" +
-                          available.length + " available)",
-                      );
-                      runState.inProgress = true;
-                      runState.appid = appid;
-                      const smartOverlay = document.querySelector(".luatools-overlay");
-                      if (smartOverlay) {
-                        const st = smartOverlay.querySelector(".luatools-status");
-                        if (st) st.textContent = lt("Initializing download...");
-                        const pw = smartOverlay.querySelector(".luatools-progress-wrap");
-                        if (pw) pw.style.display = "block";
-                        const pi = smartOverlay.querySelector(".luatools-progress-info");
-                        if (pi) pi.style.display = "block";
-                        const cb = smartOverlay.querySelector(".luatools-cancel-btn");
-                        if (cb) cb.style.display = "flex";
-                      } else {
-                        showTestPopup();
-                      }
-                      Millennium.callServerMethod("luatools", "StartAddViaLuaToolsSmart", {
-                        appid,
-                        contentScriptQuery: "",
-                      });
-                      startPolling(appid, function () {});
-                    } else {
-                      // Fast download disabled, let user select
-                      showSourceSelectionModal(appid, available);
-                    }
+                    showSourceSelectionModal(appid, available);
                   } catch (err) {
                     backendLog("LuaTools: CheckApisForApp error: " + err);
                     if (status)
@@ -8663,7 +10138,7 @@
                   node.classList &&
                   (node.classList.contains("steamdb-buttons") ||
                     node.classList.contains("apphub_OtherSiteInfo") ||
-                    node.id === "queueBtnFollow")
+                    node.id === "FeatureTarget_interest-buttons")
                 ) {
                   shouldUpdate = true;
                   break;
@@ -8672,6 +10147,15 @@
             }
           }
           if (shouldUpdate) break;
+        }
+
+        if (
+          window.__LUATOOLS_IS_BIG_PICTURE__ &&
+          document.getElementById("FeatureTarget_interest-buttons") &&
+          (!document.getElementById("luatools-gamepad-actions") ||
+            !document.getElementById("luatools-gamepad-protondb"))
+        ) {
+          shouldUpdate = true;
         }
 
         if (shouldUpdate) {
