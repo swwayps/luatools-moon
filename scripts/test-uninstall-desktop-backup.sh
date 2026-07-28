@@ -6,10 +6,28 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 HOME="$TMP/home"; export HOME
 mkdir -p "$HOME"
-# Load function definitions without executing uninstall main().
-sed '/^main "\$@"$/d' "$HERE/uninstall.sh" > "$TMP/uninstall-lib.sh"
+
+# Tripwire for the load below: if merely loading uninstall.sh reaches main(),
+# it stops Steam on the machine running this suite. Stub the commands that
+# would do it and record any use, so the assertion at the end of this file
+# fails loudly instead of the damage passing unnoticed.
+LOAD_PROBE="$TMP/load-probe"; mkdir -p "$LOAD_PROBE/bin"
+LOAD_PROBE_CALLS="$LOAD_PROBE/calls"; : > "$LOAD_PROBE_CALLS"
+export LOAD_PROBE_CALLS
+for stub in steam pkill pgrep; do
+  printf '#!/bin/sh\nprintf "%s %%s\\n" "$*" >> "$LOAD_PROBE_CALLS"\nexit 1\n' "$stub" \
+    > "$LOAD_PROBE/bin/$stub"
+  chmod +x "$LOAD_PROBE/bin/$stub"
+done
+PATH="$LOAD_PROBE/bin:$PATH"; export PATH
+# Load function definitions without executing uninstall main(). Use the entry
+# guard uninstall.sh already provides: the previous `sed` on the `main "$@"`
+# line matched at column 0, but that call is indented inside the guard, so it
+# was never stripped and sourcing this file ran the REAL uninstaller against
+# the host (stopping Steam and prompting for sudo).
+export SLSPLUGIN_LIB_ONLY=1
 # shellcheck source=/dev/null
-. "$TMP/uninstall-lib.sh"
+. "$HERE/uninstall.sh"
 
 fail=0
 check() {
@@ -51,6 +69,11 @@ check "immutable uninstaller never invokes sudo" "no" "$([ -s "$SUDO_CALLS" ] &&
 # unlike SteamOS above it must take the ordinary sudo path.
 printf 'ID=nixos\nID_LIKE=""\n' > "$TMP/os-release"
 check "nixos uninstaller is not treated as immutable" "sudo" "$(sudo_prefix)"
+
+# Loading this file must never have executed the uninstaller itself (see the
+# tripwire set up before the source at the top).
+check "loading the uninstaller never touches Steam" "no" \
+  "$([ -s "$LOAD_PROBE_CALLS" ] && echo yes || echo no)"
 
 [ "$fail" = 0 ] && echo "ALL PASS" || echo "FAILURES"
 exit "$fail"
