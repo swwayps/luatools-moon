@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # smart_download.sh — smart source selector + download worker for slsteammoon.
 #
 # Replaces the fast-download "first available source" auto-select with a
