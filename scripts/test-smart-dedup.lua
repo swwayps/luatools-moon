@@ -11,7 +11,7 @@ local exec_commands = {}
 local APIS = {
   { name = "Hubcap", url = "https://example.test/<appid>", success_code = 200 },
   { name = "custom/name\tline\nbreak", url = "https://custom.test/<appid>", success_code = 201 },
-  { name = "Missing Key", url = "https://key.test/<appid>?key=<apikey>", success_code = 200 },
+  { name = "Missing Key", url = "https://key.test/<appid>?key=<apikey>", api_key = "   ", success_code = 200 },
 }
 
 local function isdir(p)
@@ -60,7 +60,19 @@ preload("paths", {
 })
 preload("steam_utils", { detect_steam_install_path = function() return TMP .. "/steam" end })
 preload("plugin_utils", { ensure_temp_download_dir = function() return TMP end })
-preload("api_manifest", { load_api_manifest = function() return APIS end })
+preload("api_manifest", {
+  load_api_manifest = function() return APIS end,
+  get_api_credential_state = function(api, hubcap_api_key)
+    local url = tostring(api.url or "")
+    local needs_hubcap = url:find("<moapikey>", 1, true) ~= nil
+    local needs_custom = url:find("<apikey>", 1, true) ~= nil
+    return {
+      needsKey = needs_hubcap or needs_custom,
+      locked = (needs_hubcap and tostring(hubcap_api_key or ""):match("%S") == nil)
+        or (needs_custom and tostring(api.api_key or ""):match("%S") == nil),
+    }
+  end,
+})
 preload("settings.manager", { get_hubcap_api_key = function() return "" end })
 preload("smart_merge", dofile("plugin/backend/smart_merge.lua"))
 preload("json", { -- decode the fields downloads.lua reads from the state file
@@ -134,7 +146,8 @@ check(fields[1] == "0" and fields[2] == "Hubcap"
 check(fields[5] == "1" and fields[6] == "custom/name\tline\nbreak"
   and fields[7] == "https://custom.test/" .. APPID and fields[8] == "201",
   "(D4) arbitrary custom API name survives NUL handoff")
-check(not candidate_data:find("Missing Key", 1, true), "(D5) API missing required key is skipped")
+check(not candidate_data:find("Missing Key", 1, true),
+  "(D5) API with a blank required key is skipped")
 local mode_pipe = io.popen("stat -c %a '" .. candidate_path .. "' 2>/dev/null")
 local mode = mode_pipe and mode_pipe:read("*l") or ""; if mode_pipe then mode_pipe:close() end
 check(mode == "600", "(D6) candidate file is private mode 0600")

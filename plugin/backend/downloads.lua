@@ -249,17 +249,23 @@ function downloads.check_apis_for_app(appid)
         local name = api.name or "Unknown"
         local template = api.url or ""
         local success_code = tonumber(api.success_code) or 200
+        local credential_state = api_manifest.get_api_credential_state(
+            api, hubcap_api_key)
+
+        if credential_state.locked then
+            table.insert(results, {
+                name = name,
+                available = false,
+                needsKey = credential_state.needsKey,
+                locked = true,
+            })
+            goto continue
+        end
 
         if string.find(template, "<moapikey>") then
-            if not hubcap_api_key or hubcap_api_key == "" then
-                goto continue
-            end
             template = template:gsub("<moapikey>", hubcap_api_key)
         end
         if string.find(template, "<apikey>") then
-            if not api.api_key or api.api_key == "" then
-                goto continue
-            end
             template = template:gsub("<apikey>", api.api_key)
         end
 
@@ -295,6 +301,8 @@ function downloads.check_apis_for_app(appid)
             available = available,
             url = available and url or nil,
             successCode = success_code,
+            needsKey = credential_state.needsKey,
+            locked = false,
         })
 
         ::continue::
@@ -464,21 +472,15 @@ function downloads.start_add_via_luatools_smart(appid)
         for index, api in ipairs(apis) do
             local name = tostring(api.name or "Unknown"):gsub("%z", "")
             local template = tostring(api.url or ""):gsub("%z", "")
-            local skip = template == ""
+            local credential_state = api_manifest.get_api_credential_state(
+                api, hubcap_api_key)
+            local skip = template == "" or credential_state.locked
 
-            if string.find(template, "<moapikey>", 1, true) then
-                if not hubcap_api_key or hubcap_api_key == "" then
-                    skip = true
-                else
-                    template = template:gsub("<moapikey>", hubcap_api_key)
-                end
+            if not skip and string.find(template, "<moapikey>", 1, true) then
+                template = template:gsub("<moapikey>", hubcap_api_key)
             end
             if not skip and string.find(template, "<apikey>", 1, true) then
-                if not api.api_key or api.api_key == "" then
-                    skip = true
-                else
-                    template = template:gsub("<apikey>", api.api_key)
-                end
+                template = template:gsub("<apikey>", api.api_key)
             end
 
             if not skip then

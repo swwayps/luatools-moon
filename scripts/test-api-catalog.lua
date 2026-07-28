@@ -6,6 +6,7 @@ local LEGACY_PATH = "/plugin/backend/api.json"
 local USER_PATH = "/plugin/backend/data/api.json"
 local remote_manifest
 local write_count = 0
+local hubcap_api_key = "configured"
 
 local function copy(value)
     if type(value) ~= "table" then return value end
@@ -141,7 +142,7 @@ package.loaded.plugin_utils = {
     end,
 }
 package.loaded["settings.manager"] = {
-    get_hubcap_api_key = function() return "configured" end,
+    get_hubcap_api_key = function() return hubcap_api_key end,
 }
 
 local api_manifest = dofile("plugin/backend/api_manifest.lua")
@@ -179,6 +180,42 @@ check(find_api(all, "Minha SkyAPI") ~= nil,
 local active = api_manifest.load_api_manifest()
 check(find_api(active, "Minha Ryuu") == nil, "disabled API is excluded from downloads")
 check(find_api(active, "API da comunidade") ~= nil, "enabled custom API is used for downloads")
+
+for _, api in ipairs(files[USER_PATH].api_list) do
+    if api.builtin_id == "hubcap" then api.enabled = true end
+end
+table.insert(files[USER_PATH].api_list, {
+    name = "Custom key source",
+    url = "https://custom.invalid/<appid>?key=<apikey>",
+    enabled = true,
+    custom = true,
+})
+
+hubcap_api_key = ""
+local source_status = api_manifest.get_api_list().apis
+local hubcap_status = find_api(source_status, "Sadie (Hubcap)")
+local custom_key_status = find_api(source_status, "Custom key source")
+local keyless_status = find_api(source_status, "Sushi")
+check(hubcap_status and hubcap_status.needsKey == true and hubcap_status.locked == true,
+    "Hubcap remains visible and locked when its key is missing")
+check(custom_key_status and custom_key_status.needsKey == true and custom_key_status.locked == true,
+    "custom placeholder source is locked without its own key")
+check(hubcap_status and hubcap_status.api_key == nil,
+    "source status never exposes the configured credential")
+check(keyless_status and keyless_status.needsKey == false and keyless_status.locked == false,
+    "sources without credentials retain their normal waiting state")
+
+hubcap_api_key = "configured"
+for _, api in ipairs(files[USER_PATH].api_list) do
+    if api.name == "Custom key source" then api.api_key = "configured" end
+end
+source_status = api_manifest.get_api_list().apis
+hubcap_status = find_api(source_status, "Sadie (Hubcap)")
+custom_key_status = find_api(source_status, "Custom key source")
+check(hubcap_status and hubcap_status.needsKey == true and hubcap_status.locked == false,
+    "Hubcap waits normally after its key is configured")
+check(custom_key_status and custom_key_status.needsKey == true and custom_key_status.locked == false,
+    "custom placeholder source unlocks with its own key")
 
 local persisted_custom = find_api(files[USER_PATH].api_list, "API da comunidade")
 check(persisted_custom and persisted_custom.custom == true, "legacy custom API is marked as user-owned")

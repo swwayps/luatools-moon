@@ -19,7 +19,17 @@ check("polling starts only after smart RPC succeeds",
 check("fast branch starts aggregation directly",
   /if \(isFastDownload\) \{\s*startSmartDownload\(appid\);\s*return;\s*\}/s.test(source));
 check("manual branch retains API availability check", apiCheck >= 0);
-check("manual branch retains source selection modal", source.includes("showSourceSelectionModal(appid, available)"));
+check("manual branch retains source selection modal", source.includes("showSourceSelectionModal(appid, selectable)"));
 check("smart RPC remains wired", source.includes('"StartAddViaLuaToolsSmart"'));
+check("missing-key sources render a locked status",
+  source.includes('lt("Needs key")') &&
+  source.includes('data-api-locked') &&
+  source.includes('fa-solid fa-lock'));
+check("polling preserves a locked source status",
+  source.includes('item.getAttribute("data-api-locked") === "true"'));
+check("manual source picker preserves locked sources",
+  source.includes("source.available ||") &&
+  source.includes("source.needsKey === true && source.locked === true") &&
+  source.includes('btn.setAttribute("aria-disabled", "true")'));
 if (failures) process.exit(1);
 console.log("\nALL TESTS OK");

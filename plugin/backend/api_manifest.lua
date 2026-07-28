@@ -383,6 +383,20 @@ function api_manifest.add_custom_api(payload)
     return { success = true }
 end
 
+function api_manifest.get_api_credential_state(api, hubcap_api_key)
+    api = type(api) == "table" and api or {}
+    local url = tostring(api.url or "")
+    local uses_hubcap_key = builtin_id(api, true) == "hubcap"
+        or string.find(url, "<moapikey>", 1, true) ~= nil
+    local uses_custom_key = string.find(url, "<apikey>", 1, true) ~= nil
+    local needs_key = uses_hubcap_key or uses_custom_key
+    local locked = (uses_hubcap_key
+            and tostring(hubcap_api_key or ""):match("%S") == nil)
+        or (uses_custom_key
+            and tostring(api.api_key or ""):match("%S") == nil)
+    return { needsKey = needs_key, locked = locked }
+end
+
 function api_manifest.get_api_list()
     local success, apis = pcall(api_manifest.load_api_manifest)
     if not success then
@@ -392,18 +406,20 @@ function api_manifest.get_api_list()
     local hubcap_api_key = ""
     local ok, settings_manager = pcall(require, "settings.manager")
     if ok and settings_manager and settings_manager.get_hubcap_api_key then
-        hubcap_api_key = settings_manager.get_hubcap_api_key() or ""
+        hubcap_api_key = tostring(settings_manager.get_hubcap_api_key() or "")
     end
 
     local api_names = {}
     for index, api in ipairs(apis) do
-        local url = api.url or ""
-        if not (string.find(url, "<moapikey>", 1, true) and hubcap_api_key == "") then
-            table.insert(api_names, {
-                name = api.name or "Unknown",
-                index = index - 1,
-            })
-        end
+        local credential_state = api_manifest.get_api_credential_state(
+            api, hubcap_api_key)
+
+        table.insert(api_names, {
+            name = api.name or "Unknown",
+            index = index - 1,
+            needsKey = credential_state.needsKey,
+            locked = credential_state.locked,
+        })
     end
     return { success = true, apis = api_names }
 end

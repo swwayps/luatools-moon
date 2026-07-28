@@ -45,6 +45,15 @@ package.loaded.api_manifest = {
             },
         }
     end,
+    get_api_credential_state = function(api, hubcap_api_key)
+        local needs_key = api.builtin_id == "hubcap"
+            or tostring(api.url or ""):find("<moapikey>", 1, true) ~= nil
+        return {
+            needsKey = needs_key,
+            locked = needs_key
+                and tostring(hubcap_api_key or ""):match("%S") == nil,
+        }
+    end,
 }
 package.loaded["settings.manager"] = {
     get_hubcap_api_key = function() return key end,
@@ -75,6 +84,17 @@ check(requested_url ==
     "Hubcap availability uses the authenticated status endpoint")
 check(head_count == 0,
     "Hubcap is identified by source metadata instead of its display name")
+
+key = "   "
+requested_url = nil
+local locked_result = downloads.check_apis_for_app(10)
+check(locked_result.success == true and #locked_result.results == 1
+        and locked_result.results[1].needsKey == true
+        and locked_result.results[1].locked == true
+        and locked_result.results[1].available == false,
+    "Hubcap remains visible as locked when its key is blank")
+check(requested_url == nil,
+    "blank Hubcap key never reaches the network")
 
 if failures > 0 then os.exit(1) end
 print("ALL HUBCAP SOURCE CHECKS PASSED")

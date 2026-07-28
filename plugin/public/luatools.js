@@ -2711,8 +2711,14 @@
               // Create API items
               payload.apis.forEach((api, index) => {
                 const apiItem = document.createElement("div");
+                const sourceNeedsKey =
+                  api.needsKey === true && api.locked === true;
                 apiItem.className = `luatools-api-item luatools-api-${index}`;
                 apiItem.setAttribute("data-api-name", api.name);
+                apiItem.setAttribute(
+                  "data-api-locked",
+                  sourceNeedsKey ? "true" : "false",
+                );
                 apiItem.style.cssText = `display:flex;align-items:center;justify-content:space-between;padding:10px 14px;margin-bottom:8px;background:rgba(${colors.rgbString},0.1);border:1px solid ${colors.borderRgba};border-radius:6px;transition:all 0.2s;`;
 
                 const apiName = document.createElement("div");
@@ -2723,11 +2729,17 @@
                 const apiStatus = document.createElement("div");
                 apiStatus.className = "luatools-api-status";
                 apiStatus.style.cssText = `font-size:14px;color:${colors.textSecondary};display:flex;align-items:center;gap:6px;`;
-                apiStatus.innerHTML =
-                  "<span>" +
-                  lt("Waiting…") +
-                  "</span>" +
-                  '<i class="fa-solid fa-spinner" style="animation: spin 1.5s linear infinite;"></i>';
+                if (sourceNeedsKey) {
+                  apiStatus.innerHTML =
+                    `<span style="color:#ffc107;">${lt("Needs key")}</span>` +
+                    '<i class="fa-solid fa-lock" style="color:#ffc107;"></i>';
+                } else {
+                  apiStatus.innerHTML =
+                    "<span>" +
+                    lt("Waiting…") +
+                    "</span>" +
+                    '<i class="fa-solid fa-spinner" style="animation: spin 1.5s linear infinite;"></i>';
+                }
 
                 apiItem.appendChild(apiName);
                 apiItem.appendChild(apiStatus);
@@ -9195,7 +9207,8 @@
                     if (!payload || !payload.success) {
                       throw new Error(payload.error || "Check failed");
                     }
-                    const available = (payload.results || []).filter(
+                    const results = payload.results || [];
+                    const available = results.filter(
                       (source) => source.available,
                     );
                     if (available.length === 0) {
@@ -9210,7 +9223,12 @@
                         hideBtn.innerHTML = "<span>" + lt("Close") + "</span>";
                       return;
                     }
-                    showSourceSelectionModal(appid, available);
+                    const selectable = results.filter(
+                      (source) =>
+                        source.available ||
+                        (source.needsKey === true && source.locked === true),
+                    );
+                    showSourceSelectionModal(appid, selectable);
                   } catch (err) {
                     backendLog("LuaTools: CheckApisForApp error: " + err);
                     if (status)
@@ -9416,7 +9434,7 @@
               performDownload();
             };
 
-            function showSourceSelectionModal(appid, available) {
+            function showSourceSelectionModal(appid, sources) {
               const overlay = document.querySelector(".luatools-overlay");
               if (!overlay) return;
 
@@ -9433,15 +9451,30 @@
                 apiList.style.cssText =
                   "display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top:16px;";
 
-                available.forEach((source) => {
+                sources.forEach((source) => {
+                  const sourceNeedsKey =
+                    source.needsKey === true && source.locked === true;
                   const btn = document.createElement("a");
-                  btn.href = "#";
-                  btn.className = "luatools-btn focusable";
-                  btn.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;flex:1;min-width:80px;padding:12px 8px;background:rgba(${colors.rgbString},0.06);border:1px solid ${colors.borderRgba};border-radius:12px;text-decoration:none;transition:all 0.2s ease;text-align:center;`;
+                  btn.className = sourceNeedsKey
+                    ? "luatools-btn luatools-api-item"
+                    : "luatools-btn focusable";
+                  btn.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;flex:1;min-width:80px;padding:12px 8px;background:rgba(${colors.rgbString},0.06);border:1px solid ${sourceNeedsKey ? "#ffc107" : colors.borderRgba};border-radius:12px;text-decoration:none;transition:all 0.2s ease;text-align:center;${sourceNeedsKey ? "cursor:default;opacity:0.8;" : ""}`;
+                  btn.setAttribute("data-api-name", source.name);
+                  btn.setAttribute(
+                    "data-api-locked",
+                    sourceNeedsKey ? "true" : "false",
+                  );
+                  if (sourceNeedsKey) {
+                    btn.setAttribute("aria-disabled", "true");
+                  } else {
+                    btn.href = "#";
+                  }
 
                   const srcIcon = document.createElement("i");
-                  srcIcon.className = "fa-solid fa-server";
-                  srcIcon.style.cssText = `font-size:18px;color:${colors.accent};`;
+                  srcIcon.className = sourceNeedsKey
+                    ? "fa-solid fa-lock"
+                    : "fa-solid fa-server";
+                  srcIcon.style.cssText = `font-size:18px;color:${sourceNeedsKey ? "#ffc107" : colors.accent};`;
 
                   const name = document.createElement("div");
                   name.style.cssText = `font-size:11px; font-weight:500; color:${colors.text};line-height:1.2;`;
@@ -9449,6 +9482,17 @@
 
                   btn.appendChild(srcIcon);
                   btn.appendChild(name);
+
+                  if (sourceNeedsKey) {
+                    const lockedStatus = document.createElement("div");
+                    lockedStatus.className = "luatools-api-status";
+                    lockedStatus.style.cssText =
+                      "font-size:11px;font-weight:600;color:#ffc107;";
+                    lockedStatus.textContent = lt("Needs key");
+                    btn.appendChild(lockedStatus);
+                    apiList.appendChild(btn);
+                    return;
+                  }
 
                   btn.onmouseover = function () {
                     this.style.background = `rgba(${colors.rgbString},0.25)`;
@@ -9543,6 +9587,8 @@
     let done = false;
     let lastCheckedApi = null;
     let successfulApi = null; // Track which API successfully found the file
+    const isLockedApiItem = (item) =>
+      item.getAttribute("data-api-locked") === "true";
     const pollers =
       window.__LuaToolsPollers || (window.__LuaToolsPollers = Object.create(null));
     if (pollers[appid]) clearInterval(pollers[appid]);
@@ -9607,6 +9653,7 @@
                 // Mark all APIs: not found before successful, skipped after
                 let foundSuccessful = false;
                 apiItems.forEach((item) => {
+                  if (isLockedApiItem(item)) return;
                   const apiName = item.getAttribute("data-api-name");
                   const apiStatus = item.querySelector(".luatools-api-status");
                   if (!apiStatus) return;
@@ -9651,6 +9698,7 @@
                 lastCheckedApi
               ) {
                 apiItems.forEach((item) => {
+                  if (isLockedApiItem(item)) return;
                   const apiName = item.getAttribute("data-api-name");
                   const apiStatus = item.querySelector(".luatools-api-status");
                   if (!apiStatus) return;
@@ -9666,6 +9714,7 @@
               // Update current API status during checking
               if (st.status === "checking" && st.currentApi) {
                 apiItems.forEach((item) => {
+                  if (isLockedApiItem(item)) return;
                   const apiName = item.getAttribute("data-api-name");
                   const apiStatus = item.querySelector(".luatools-api-status");
                   if (!apiStatus) return;
@@ -9683,6 +9732,7 @@
               // Show error statuses for APIs that errored (when not checking them anymore)
               if (st.apiErrors && typeof st.apiErrors === "object") {
                 apiItems.forEach((item) => {
+                  if (isLockedApiItem(item)) return;
                   const apiName = item.getAttribute("data-api-name");
                   const apiStatus = item.querySelector(".luatools-api-status");
                   if (!apiStatus || !apiName) return;
@@ -9976,6 +10026,7 @@
                 const colors = getThemeColors();
                 const apiItems = overlay.querySelectorAll(".luatools-api-item");
                 apiItems.forEach((item) => {
+                  if (isLockedApiItem(item)) return;
                   const apiName = item.getAttribute("data-api-name");
                   const apiStatus = item.querySelector(".luatools-api-status");
                   if (!apiStatus) return;
