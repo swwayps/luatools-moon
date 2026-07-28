@@ -111,7 +111,9 @@ ln -sf "$FAKESTORE/steam" "$FAKEBIN/steam"
 # which isn't under /nix/store on a dev host — so fake `readlink` to prove the
 # branch's logic (real /nix/store/* prefix) without needing an actual store.
 readlink() { case "$*" in "-f "*) printf '/nix/store/abc123-steam-1.0/bin/steam\n' ;; esac; }
-detect_steam_type_result="$(PATH="$FAKEBIN:$PATH" detect_steam_type)"
+detect_steam_type_result="$(
+	STEAM_FIXED_CANDIDATES="" STEAM_SEARCH_PATH="$FAKEBIN" detect_steam_type
+)"
 [ "$detect_steam_type_result" = "native" ]; check "steam type: nixos + steam resolving into /nix/store -> native" $?
 unset -f readlink
 rm -rf "$FAKEBIN" "$FAKESTORE"
@@ -120,9 +122,56 @@ rm -rf "$FAKEBIN" "$FAKESTORE"
 # script) must not be misdetected as native.
 FAKEBIN2="$TESTDIR/fakebin2"; mkdir -p "$FAKEBIN2"
 printf '#!/bin/sh\n' > "$FAKEBIN2/steam"; chmod +x "$FAKEBIN2/steam"
-detect_steam_type_result="$(PATH="$FAKEBIN2:$PATH" detect_steam_type)"
+detect_steam_type_result="$(
+	STEAM_FIXED_CANDIDATES="" STEAM_SEARCH_PATH="$FAKEBIN2" detect_steam_type
+)"
 [ "$detect_steam_type_result" != "native" ]; check "steam type: nixos + steam outside /nix/store -> not native" $?
 rm -rf "$FAKEBIN2"
+
+# Reinstall: setup.sh's wrapper is first, but detection must continue to the
+# native NixOS launcher later in PATH.
+WRAPPERBIN="$TESTDIR/home/.local/share/SLSsteam/path"
+NATIVEBIN="$TESTDIR/nativebin"
+mkdir -p "$WRAPPERBIN" "$NATIVEBIN"
+printf '#!/bin/sh\n' > "$WRAPPERBIN/steam"; chmod +x "$WRAPPERBIN/steam"
+printf '#!/bin/sh\n' > "$NATIVEBIN/steam"; chmod +x "$NATIVEBIN/steam"
+readlink() {
+	case "$2" in
+		"$NATIVEBIN/steam") printf '/nix/store/abc123-steam-1.0/bin/steam\n' ;;
+		*) printf '%s\n' "$2" ;;
+	esac
+}
+detect_steam_type_result="$(
+	HOME="$TESTDIR/home" STEAM_FIXED_CANDIDATES="" \
+	STEAM_SEARCH_PATH="$WRAPPERBIN:$NATIVEBIN" detect_steam_type
+)"
+[ "$detect_steam_type_result" = "native" ]; check "steam type: reinstall skips own wrapper and finds native Steam" $?
+unset -f readlink
+
+# The same wrapper must be removed before control passes to slsteam-moon's own
+# setup.sh, which performs a separate Steam lookup after recreating the wrapper.
+setup_path="$(
+	HOME="$TESTDIR/home" path_without_slsteam_wrapper "$WRAPPERBIN:$NATIVEBIN:/usr/bin"
+)"
+[ "$setup_path" = "$NATIVEBIN:/usr/bin" ]; check "setup handoff: strips own wrapper and preserves remaining PATH order" $?
+rm -rf "$WRAPPERBIN" "$NATIVEBIN"
+
+# NixOS preflight is independently testable and fails before main can reach
+# check_internet, Steam shutdown, or cleanup.
+PREREQBIN="$TESTDIR/prereqbin"; mkdir -p "$PREREQBIN"
+for tool in jq tar unzip; do
+	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
+	chmod +x "$PREREQBIN/$tool"
+done
+if NIXOS_PREREQ_PATH="$PREREQBIN" check_nixos_prerequisites >/dev/null 2>&1; then r=1; else r=0; fi
+check "nixos preflight: missing curl and steam-run fails closed" "$r"
+for tool in curl steam-run; do
+	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
+	chmod +x "$PREREQBIN/$tool"
+done
+NIXOS_PREREQ_PATH="$PREREQBIN" check_nixos_prerequisites >/dev/null 2>&1
+check "nixos preflight: complete toolset passes" $?
+rm -rf "$PREREQBIN"
 
 # nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?

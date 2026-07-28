@@ -475,10 +475,34 @@ check_internet() {
 	log_success "$(L "Internet reachable" "Internet acessível")"
 }
 
+# Remove the installer-managed Steam wrapper from a PATH value. During a
+# reinstall setup.sh recreates that wrapper before looking up Steam, so merely
+# teaching our own detector to skip it is not enough: setup.sh must see the
+# underlying native launcher too.
+path_without_slsteam_wrapper() {
+	local input_path="${1-}" wrapper_dir="$HOME/.local/share/SLSsteam/path"
+	local dir output=""
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || dir="."
+		[ "${dir%/}" = "$wrapper_dir" ] && continue
+		if [ -n "$output" ]; then
+			output="$output:$dir"
+		else
+			output="$dir"
+		fi
+	done < <(printf '%s\n' "$input_path" | tr ':' '\n')
+	printf '%s\n' "$output"
+}
+
 # How is Steam installed? native / flatpak / snap / none.
 detect_steam_type() {
 	# A native package-manager install puts the launcher in a system bin dir.
-	for c in /usr/bin/steam /usr/games/steam /usr/local/bin/steam /bin/steam; do
+	# Both search lists are overridable so tests can be isolated from whatever
+	# Steam happens to be installed on the host running them.
+	local fixed_candidates="${STEAM_FIXED_CANDIDATES-/usr/bin/steam /usr/games/steam /usr/local/bin/steam /bin/steam}"
+	local search_path="${STEAM_SEARCH_PATH-${PATH:-}}"
+	local c dir resolved wrapper_dir
+	for c in $fixed_candidates; do
 		if [ -x "$c" ]; then
 			echo "native"
 			return
@@ -487,14 +511,27 @@ detect_steam_type() {
 	# NixOS has no /usr/bin: `programs.steam.enable` symlinks the launcher into
 	# the user's profile (e.g. /run/current-system/sw/bin/steam) instead. Accept
 	# `steam` off PATH only when it resolves into the Nix store, so we don't
-	# misdetect a flatpak/snap shim that happens to shadow the name.
-	if [ "$(get_distro_id)" = "nixos" ] && command -v steam >/dev/null 2>&1; then
-		case "$(readlink -f "$(command -v steam)" 2>/dev/null)" in
-			/nix/store/*)
-				echo "native"
-				return
-				;;
-		esac
+	# misdetect a flatpak/snap shim that happens to shadow the name. Inspect
+	# every PATH entry: setup.sh prepends its own wrapper directory, so the
+	# first match on a reinstall is not necessarily the native launcher.
+	if [ "$(get_distro_id)" = "nixos" ]; then
+		wrapper_dir="$HOME/.local/share/SLSsteam/path"
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || dir="."
+			c="${dir%/}/steam"
+			[ -x "$c" ] || continue
+			case "$c" in
+				"$wrapper_dir"/*) continue ;;
+			esac
+			resolved="$(readlink -f "$c" 2>/dev/null || printf '%s\n' "$c")"
+			case "$resolved" in
+				"$wrapper_dir"/*) continue ;;
+				/nix/store/*)
+					echo "native"
+					return
+					;;
+			esac
+		done < <(printf '%s\n' "$search_path" | tr ':' '\n')
 	fi
 	if command -v flatpak >/dev/null 2>&1 && flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
 		echo "flatpak"
@@ -633,6 +670,46 @@ nixos_pkg_for() {
 		notify-send) echo "libnotify" ;;
 		*)           echo "$1" ;;
 	esac
+}
+
+# NixOS cannot repair missing tools later with a conventional package manager,
+# and Lumen's prebuilt ELF also needs steam-run. Check all hard prerequisites
+# before check_internet (which itself needs curl), before stopping Steam, and
+# before removing a working installation.
+check_nixos_prerequisites() {
+	[ "$(get_distro_id)" = "nixos" ] || return 0
+
+	local missing=() tool dir found nix_attrs="" flake_attrs=""
+	local prereq_path="${NIXOS_PREREQ_PATH-${PATH:-}}"
+	for tool in jq curl tar unzip steam-run; do
+		found=0
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || dir="."
+			if [ -x "${dir%/}/$tool" ]; then
+				found=1
+				break
+			fi
+		done < <(printf '%s\n' "$prereq_path" | tr ':' '\n')
+		[ "$found" -eq 1 ] || missing+=("$tool")
+	done
+	[ "${#missing[@]}" -gt 0 ] || return 0
+
+	for tool in "${missing[@]}"; do
+		nix_attrs="$nix_attrs nixpkgs#$(nixos_pkg_for "$tool")"
+		flake_attrs="$flake_attrs $(nixos_pkg_for "$tool")"
+	done
+	echo ""
+	log_error "$(L "Missing required NixOS tools: ${missing[*]}" \
+	              "Ferramentas necessárias ausentes no NixOS: ${missing[*]}")"
+	echo ""
+	echo -e "  $(L "Add them to environment.systemPackages in configuration.nix and rebuild:" \
+	               "Adicione-as a environment.systemPackages no configuration.nix e reconstrua:")"
+	echo -e "       ${GREEN}${flake_attrs# }${NC}"
+	echo -e "  $(L "...or install them for this user only, right now:" \
+	               "...ou instale-as só para este usuário, agora mesmo:")"
+	echo -e "       ${GREEN}nix profile install${nix_attrs}${NC}"
+	echo ""
+	return 1
 }
 
 # Map a generic tool name to the package that provides it on each family.
@@ -1336,7 +1413,7 @@ PY
 # We just download, extract, and run setup.sh install — which also kills Steam.
 # ============================================================================
 install_slsteam_moon() {
-	local url tmp zip extract_root setup rc
+	local url tmp zip extract_root setup setup_path rc
 
 	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
 	             "Buscando a última release do slsteam-moon (Lumen)")"
@@ -1370,8 +1447,11 @@ install_slsteam_moon() {
 	log_info "$(L "Running slsteam-moon setup (this will stop Steam)" \
 	             "Rodando o setup do slsteam-moon (isto vai parar a Steam)")"
 
-	# setup.sh resolves its own paths relative to the extracted dir.
-	( cd "$extract_root" && bash "$setup" install ) \
+	# setup.sh resolves its own paths relative to the extracted dir. Give it a
+	# PATH without an older SLSsteam wrapper: setup recreates that wrapper
+	# before detecting Steam, otherwise a second install can select itself.
+	setup_path="$(path_without_slsteam_wrapper "${PATH:-}")"
+	( cd "$extract_root" && PATH="$setup_path" bash "$setup" install ) \
 		|| fail "$(L "slsteam-moon setup failed" "Falha no setup do slsteam-moon")"
 
 	log_success "$(L "slsteam-moon installed" "slsteam-moon instalado")"
@@ -2214,6 +2294,9 @@ main() {
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
 	check_not_root
 	check_arch
+	check_nixos_prerequisites || fail "$(L \
+		"Aborted before stopping Steam or changing the existing installation." \
+		"Abortado antes de parar a Steam ou alterar a instalação existente.")"
 	check_internet
 	check_steam_native
 	check_steam_bootstrapped
