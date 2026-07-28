@@ -164,27 +164,53 @@ for tool in jq tar unzip; do
 	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
 	chmod +x "$PREREQBIN/$tool"
 done
-if (DEPENDENCY_PATH="$PREREQBIN" install_dependencies >/dev/null 2>&1); then r=1; else r=0; fi
+if (DEPENDENCY_PATH="$PREREQBIN" check_dependencies >/dev/null 2>&1); then r=1; else r=0; fi
 check "nixos preflight: missing curl and steam-run fails closed" "$r"
 for tool in curl steam-run; do
 	printf '#!/bin/sh\nexit 0\n' > "$PREREQBIN/$tool"
 	chmod +x "$PREREQBIN/$tool"
 done
-DEPENDENCY_PATH="$PREREQBIN" install_dependencies >/dev/null 2>&1
+DEPENDENCY_PATH="$PREREQBIN" check_dependencies >/dev/null 2>&1
 check "nixos preflight: complete toolset passes" $?
+
+# The preflight gate must stay side-effect free: a mutable distro missing tools
+# defers to install_dependencies instead of invoking sudo/the package manager.
+fixture 'ID=ubuntu
+ID_LIKE=debian'
+rm -f "$PREREQBIN/curl" "$PREREQBIN/steam-run"
+SUDO_CALLS="$TESTDIR/sudo.calls"; : > "$SUDO_CALLS"
+printf '#!/bin/sh\nprintf called >> "$SUDO_CALLS"\nexit 1\n' > "$PREREQBIN/sudo"
+chmod +x "$PREREQBIN/sudo"
+(PATH="$PREREQBIN:$PATH" SUDO_CALLS="$SUDO_CALLS" DEPENDENCY_PATH="$PREREQBIN" \
+	check_dependencies >/dev/null 2>&1)
+check "mutable preflight: defers instead of aborting" $?
+if [ -s "$SUDO_CALLS" ]; then r=1; else r=0; fi
+check "mutable preflight: never invokes sudo" "$r"
 rm -rf "$PREREQBIN"
 
-# Pin the destructive-action ordering that motivated this preflight.
-dependency_calls="$(grep -Ec '^[[:space:]]+install_dependencies$' "$INSTALL_SH")"
-dependency_line="$(grep -nE '^[[:space:]]+install_dependencies$' "$INSTALL_SH" | cut -d: -f1)"
+fixture 'ID=nixos
+ID_LIKE=""'
+
+# Pin the destructive-action ordering that motivated this preflight: pure
+# detection before anything is touched, package installation only after the
+# machine has been validated.
+detect_calls="$(grep -Ec '^[[:space:]]+check_dependencies$' "$INSTALL_SH")"
+install_calls="$(grep -Ec '^[[:space:]]+install_dependencies$' "$INSTALL_SH")"
+detect_line="$(grep -nE '^[[:space:]]+check_dependencies$' "$INSTALL_SH" | cut -d: -f1)"
+install_line="$(grep -nE '^[[:space:]]+install_dependencies$' "$INSTALL_SH" | cut -d: -f1)"
 internet_line="$(grep -nE '^[[:space:]]+check_internet$' "$INSTALL_SH" | cut -d: -f1)"
+native_line="$(grep -nE '^[[:space:]]+check_steam_native$' "$INSTALL_SH" | cut -d: -f1)"
+bootstrap_line="$(grep -nE '^[[:space:]]+check_steam_bootstrapped$' "$INSTALL_SH" | cut -d: -f1)"
 stop_line="$(grep -nE '^[[:space:]]+stop_steam$' "$INSTALL_SH" | cut -d: -f1)"
 cleanup_line="$(grep -nE '^[[:space:]]+cleanup_previous_install$' "$INSTALL_SH" | cut -d: -f1)"
-[ "$dependency_calls" -eq 1 ]; check "dependency preflight: called exactly once" $?
-[ "$dependency_line" -lt "$internet_line" ] \
-	&& [ "$dependency_line" -lt "$stop_line" ] \
-	&& [ "$dependency_line" -lt "$cleanup_line" ]
-check "dependency preflight: runs before internet, Steam shutdown, and cleanup" $?
+[ "$detect_calls" -eq 1 ]; check "dependency detection: called exactly once" $?
+[ "$install_calls" -eq 1 ]; check "dependency install: called exactly once" $?
+[ "$detect_line" -lt "$internet_line" ] \
+	&& [ "$detect_line" -lt "$stop_line" ] \
+	&& [ "$detect_line" -lt "$cleanup_line" ]
+check "dependency detection: runs before internet, Steam shutdown, and cleanup" $?
+[ "$install_line" -gt "$native_line" ] && [ "$install_line" -gt "$bootstrap_line" ]
+check "dependency install: runs only after the machine is validated" $?
 
 # nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?

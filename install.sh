@@ -744,13 +744,23 @@ immutable_install_hint() {
 	esac
 }
 
-# Ensure the generic CLI tools this installer + the stack need are present.
-install_dependencies() {
+# Which required tools are missing, and the package that provides each one.
+# Published by detect_missing_tools so the preflight gate and the later install
+# step share one probe instead of scanning PATH twice.
+DEP_MISSING_TOOLS=()
+DEP_MISSING_PKGS=()
+
+# Pure detection: no sudo, no package manager, no filesystem writes. Safe to
+# call from preflight, before the installer has decided this machine is even
+# supported.
+detect_missing_tools() {
 	local family distro_id
 	family="$(get_distro_family)"
 	distro_id="$(get_distro_id)"
 
 	local required_tools=(jq curl tar unzip notify-send)
+	# Lumen's prebuilt ELF runs through steam-run on NixOS, so it is a hard
+	# prerequisite there and must be detected with the rest.
 	[ "$distro_id" = "nixos" ] && required_tools+=(steam-run)
 	log_info "$(L "Checking required tools (${required_tools[*]})" \
 	             "Verificando ferramentas necessárias (${required_tools[*]})")"
@@ -758,7 +768,9 @@ install_dependencies() {
 	# The override keeps detection tests isolated from tools installed on the
 	# host running them. Production uses PATH.
 	local dependency_path="${DEPENDENCY_PATH-${PATH:-}}"
-	local missing_tools=() missing_pkgs=() tool dir found
+	DEP_MISSING_TOOLS=()
+	DEP_MISSING_PKGS=()
+	local tool dir found
 	for tool in "${required_tools[@]}"; do
 		found=0
 		while IFS= read -r dir; do
@@ -769,25 +781,44 @@ install_dependencies() {
 			fi
 		done < <(printf '%s\n' "$dependency_path" | tr ':' '\n')
 		if [ "$found" -eq 0 ]; then
-			missing_tools+=("$tool")
-			missing_pkgs+=("$(pkg_for "$tool" "$family")")
+			DEP_MISSING_TOOLS+=("$tool")
+			DEP_MISSING_PKGS+=("$(pkg_for "$tool" "$family")")
 		fi
 	done
+}
+
+# Preflight gate. Aborts BEFORE Steam is stopped or an existing installation is
+# touched when this system cannot install the missing tools for the user:
+# NixOS (declarative; packages come from a rebuild or `nix profile install`) and
+# immutable/atomic systems (read-only root). Both of those paths only print
+# instructions, so this whole function is side-effect free. Mutable distros are
+# deferred to install_dependencies, which runs after the machine has been
+# validated — that keeps sudo and the package manager off machines the installer
+# is going to reject anyway.
+check_dependencies() {
+	detect_missing_tools
 
 	# Everything present (the common case on Bazzite/SteamOS, which ship these
 	# tools) — nothing to do.
-	if [ "${#missing_tools[@]}" -eq 0 ]; then
+	if [ "${#DEP_MISSING_TOOLS[@]}" -eq 0 ]; then
 		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
 		return 0
 	fi
 
+	local distro_id; distro_id="$(get_distro_id)"
+	if [ "$distro_id" != "nixos" ] && ! is_immutable_distro; then
+		# Mutable distro: the package manager can fix this later.
+		return 0
+	fi
+
+	local tool
 	# NixOS: there is no ad-hoc package-manager install — packages come from
 	# environment.systemPackages + a system rebuild (or `nix profile install`
 	# for a one-off). Same "never touch the system for the user" contract as
 	# the immutable branch below, but with NixOS-flavored instructions.
 	if [ "$distro_id" = "nixos" ]; then
 		local essential=()
-		for tool in "${missing_tools[@]}"; do
+		for tool in "${DEP_MISSING_TOOLS[@]}"; do
 			[ "$tool" = "notify-send" ] || essential+=("$tool")
 		done
 		if [ "${#essential[@]}" -eq 0 ]; then
@@ -821,39 +852,50 @@ install_dependencies() {
 	# notify-send only powers optional in-Steam popups, so if that's the ONLY
 	# gap we degrade gracefully; anything essential missing aborts with
 	# distro-correct manual instructions.
-	if is_immutable_distro; then
-		local essential=()
-		for tool in "${missing_tools[@]}"; do
-			[ "$tool" = "notify-send" ] || essential+=("$tool")
-		done
-		if [ "${#essential[@]}" -eq 0 ]; then
-			log_warn "$(L "notify-send not found; in-Steam popups will be disabled (everything else works)." \
-			             "notify-send não encontrado; os popups dentro da Steam ficarão desativados (o resto funciona).")"
-			log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
-			return 0
-		fi
-		echo ""
-		log_error "$(L "Missing required tools on an immutable system: ${essential[*]}" \
-		              "Ferramentas necessárias ausentes num sistema imutável: ${essential[*]}")"
-		echo ""
-		echo -e "  $(L "This system's root is read-only, so install them yourself:" \
-		               "A raiz deste sistema é somente-leitura, então instale-as você mesmo:")"
-		echo -e "       ${GREEN}$(immutable_install_hint "${missing_pkgs[*]}")${NC}"
-		echo ""
-		fail "$(L "Aborted. Install the tools above, then re-run this installer." \
-		          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
+	local essential=()
+	for tool in "${DEP_MISSING_TOOLS[@]}"; do
+		[ "$tool" = "notify-send" ] || essential+=("$tool")
+	done
+	if [ "${#essential[@]}" -eq 0 ]; then
+		log_warn "$(L "notify-send not found; in-Steam popups will be disabled (everything else works)." \
+		             "notify-send não encontrado; os popups dentro da Steam ficarão desativados (o resto funciona).")"
+		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+		return 0
+	fi
+	echo ""
+	log_error "$(L "Missing required tools on an immutable system: ${essential[*]}" \
+	              "Ferramentas necessárias ausentes num sistema imutável: ${essential[*]}")"
+	echo ""
+	echo -e "  $(L "This system's root is read-only, so install them yourself:" \
+	               "A raiz deste sistema é somente-leitura, então instale-as você mesmo:")"
+	echo -e "       ${GREEN}$(immutable_install_hint "${DEP_MISSING_PKGS[*]}")${NC}"
+	echo ""
+	fail "$(L "Aborted. Install the tools above, then re-run this installer." \
+	          "Abortado. Instale as ferramentas acima e rode este instalador novamente.")"
+}
+
+# Install the tools detected as missing by the preflight gate. Only reached on
+# mutable distros (NixOS and immutable systems already aborted in
+# check_dependencies), and only after the machine has been validated, so sudo
+# and the package manager never run on a host the installer will reject.
+install_dependencies() {
+	# Standalone/defensive: if the preflight gate did not run, probe now.
+	[ "${#DEP_MISSING_TOOLS[@]}" -gt 0 ] || detect_missing_tools
+	if [ "${#DEP_MISSING_TOOLS[@]}" -eq 0 ]; then
+		log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
+		return 0
 	fi
 
-	# Mutable distro: install via the package manager as before.
-	log_warn "$(L "Installing missing tools: ${missing_pkgs[*]}" \
-	             "Instalando ferramentas ausentes: ${missing_pkgs[*]}")"
+	local family; family="$(get_distro_family)"
+	log_warn "$(L "Installing missing tools: ${DEP_MISSING_PKGS[*]}" \
+	             "Instalando ferramentas ausentes: ${DEP_MISSING_PKGS[*]}")"
 	if [ "$family" = "unknown" ]; then
-		fail "$(L "Unknown distro — please install manually: ${missing_pkgs[*]}" \
-		          "Distro desconhecida — instale manualmente: ${missing_pkgs[*]}")"
+		fail "$(L "Unknown distro — please install manually: ${DEP_MISSING_PKGS[*]}" \
+		          "Distro desconhecida — instale manualmente: ${DEP_MISSING_PKGS[*]}")"
 	fi
-	if ! pm_install "$family" "${missing_pkgs[@]}"; then
-		fail "$(L "Failed to install: ${missing_pkgs[*]}. Install them manually and re-run." \
-		          "Falha ao instalar: ${missing_pkgs[*]}. Instale manualmente e rode de novo.")"
+	if ! pm_install "$family" "${DEP_MISSING_PKGS[@]}"; then
+		fail "$(L "Failed to install: ${DEP_MISSING_PKGS[*]}. Install them manually and re-run." \
+		          "Falha ao instalar: ${DEP_MISSING_PKGS[*]}. Instale manualmente e rode de novo.")"
 	fi
 	log_success "$(L "Required tools present" "Ferramentas necessárias presentes")"
 }
@@ -2271,7 +2313,9 @@ main() {
 	print_section "$(L "Pre-flight checks" "Verificações iniciais")"
 	check_not_root
 	check_arch
-	install_dependencies
+	# Pure detection first: on NixOS / immutable systems a missing prerequisite
+	# aborts here, before Steam is stopped or a working install is removed.
+	check_dependencies
 	check_internet
 	check_steam_native
 	check_steam_bootstrapped
@@ -2287,6 +2331,11 @@ main() {
 
 	print_section "$(L "Cleaning up previous installation" "Limpando instalação anterior")"
 	cleanup_previous_install
+
+	# Mutable distros only: sudo + package manager, deliberately after the
+	# machine has been validated.
+	print_section "$(L "Dependencies" "Dependências")"
+	install_dependencies
 
 	print_section "$(L "Installing slsteam-moon" "Instalando slsteam-moon")"
 	install_slsteam_moon
