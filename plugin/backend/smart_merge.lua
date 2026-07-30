@@ -11,30 +11,67 @@ local function normalize_decimal(value)
     if not text:match("^%d+$") then return nil end
     text = text:gsub("^0+", "")
     if text == "" then return nil end
+    local maximum = "18446744073709551615"
+    if #text > #maximum or (#text == #maximum and text > maximum) then return nil end
     return text
 end
 
-local function strip_comment(line)
-    local quote, escaped = nil, false
-    for i = 1, #line do
-        local ch = line:sub(i, i)
-        if quote then
-            if escaped then escaped = false
-            elseif ch == "\\" then escaped = true
-            elseif ch == quote then quote = nil end
-        elseif ch == '"' or ch == "'" then
-            quote = ch
-        elseif ch == "-" and line:sub(i, i + 1) == "--" then
-            return line:sub(1, i - 1)
+local function lua_long_open(line, pos)
+    local equals = line:sub(pos):match("^%[(=*)%[")
+    if equals == nil then return nil end
+    return "]" .. equals .. "]", #equals + 2
+end
+
+local function strip_non_code(line, long_close)
+    local out, pos = {}, 1
+    while pos <= #line do
+        if long_close then
+            local first, last = line:find(long_close, pos, true)
+            if not first then return table.concat(out), long_close end
+            out[#out + 1] = " "
+            pos, long_close = last + 1, nil
+        else
+            local ch = line:sub(pos, pos)
+            if ch == '"' or ch == "'" then
+                local quote, escaped = ch, false
+                out[#out + 1] = ch
+                pos = pos + 1
+                while pos <= #line do
+                    ch = line:sub(pos, pos)
+                    out[#out + 1] = ch
+                    pos = pos + 1
+                    if escaped then escaped = false
+                    elseif ch == "\\" then escaped = true
+                    elseif ch == quote then break end
+                end
+            elseif line:sub(pos, pos + 1) == "--" then
+                local close, width = lua_long_open(line, pos + 2)
+                if not close then break end
+                out[#out + 1] = " "
+                long_close, pos = close, pos + 2 + width
+            else
+                local close, width = lua_long_open(line, pos)
+                if close then
+                    out[#out + 1] = " "
+                    long_close, pos = close, pos + width
+                else
+                    out[#out + 1] = ch
+                    pos = pos + 1
+                end
+            end
         end
     end
-    return line
+    return table.concat(out), long_close
 end
 
 function smart_merge.parse_lua(text)
     local parsed = { bare = {}, keys = {}, manifests = {} }
-    for raw in tostring(text or ""):gmatch("[^\r\n]+") do
-        local line = strip_comment(raw):match("^%s*(.-)%s*$")
+    local normalized = tostring(text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+    local long_close = nil
+    for raw in (normalized .. "\n"):gmatch("([^\n]*)\n") do
+        local cleaned
+        cleaned, long_close = strip_non_code(raw, long_close)
+        local line = cleaned:match("^%s*(.-)%s*$")
         local id = line:match("^addappid%s*%(%s*(%d+)%s*%)%s*;?%s*$")
         if id then
             id = positive_integer(id)
@@ -227,6 +264,20 @@ function smart_merge.parse_appinfo_depots(text)
     return result
 end
 
+function smart_merge.parse_appinfo_dlc_appids(text)
+    local body = parse_appinfo_body(text)
+    local result = {}
+    for _, info in pairs(smart_merge.parse_appinfo_depots(text)) do
+        if info.dlcappid then result[info.dlcappid] = true end
+    end
+    local extended = type(body.extended) == "table" and body.extended or {}
+    for value in tostring(extended.listofdlc or ""):gmatch("%d+") do
+        local id = positive_integer(value)
+        if id then result[id] = true end
+    end
+    return result
+end
+
 function smart_merge.parse_appinfo_gids(text)
     local result = {}
     for depot, info in pairs(smart_merge.parse_appinfo_depots(text)) do
@@ -386,7 +437,7 @@ function smart_merge.parse_manifest(bytes, expected_depot, expected_gid)
     return metadata
 end
 
-function smart_merge.select_preferred(manifests, current_gids)
+function smart_merge.select_preferred_items(manifests, current_gids)
     local grouped, selected = {}, {}
     for _, item in ipairs(manifests or {}) do
         grouped[item.depot] = grouped[item.depot] or {}
@@ -417,7 +468,15 @@ function smart_merge.select_preferred(manifests, current_gids)
                 best = item
             end
         end
-        if best then selected[depot] = best.gid end
+        if best then selected[depot] = best end
+    end
+    return selected
+end
+
+function smart_merge.select_preferred(manifests, current_gids)
+    local selected = {}
+    for depot, item in pairs(smart_merge.select_preferred_items(manifests, current_gids)) do
+        selected[depot] = item.gid
     end
     return selected
 end
@@ -449,10 +508,105 @@ local function default_options(opts)
     return opts
 end
 
-function smart_merge.install(appid, collection_dir, supplied_opts)
+local JOURNAL_HEADER = "LUATOOLS-PUBLISH-1"
+
+local function journal_path(opts)
+    if opts.journal_path then return opts.journal_path end
+    local home = opts.home or os.getenv("HOME") or ""
+    if home == "" then return nil end
+    return home .. "/.config/SLSsteam/.luatools-publish.journal"
+end
+
+local function encode_journal(publications, snapshots, staged)
+    local out = { JOURNAL_HEADER, "\n", tostring(#publications), "\n" }
+    for index, publication in ipairs(publications) do
+        local prior = snapshots[index]
+        local path = tostring(publication.path)
+        local content = prior.existed and tostring(prior.content or "") or ""
+        local temp = tostring(staged[index] or "")
+        out[#out + 1] = table.concat({
+            tostring(#path), prior.existed and "1" or "0",
+            tostring(#content), tostring(#temp),
+        }, ":") .. "\n"
+        out[#out + 1] = path
+        out[#out + 1] = content
+        out[#out + 1] = temp
+    end
+    return table.concat(out)
+end
+
+local function decode_journal(raw)
+    if type(raw) ~= "string" then return nil, "invalid recovery journal" end
+    local pos = 1
+    local function line()
+        local last = raw:find("\n", pos, true)
+        if not last then return nil end
+        local value = raw:sub(pos, last - 1)
+        pos = last + 1
+        return value
+    end
+    if line() ~= JOURNAL_HEADER then return nil, "invalid recovery journal" end
+    local count = tonumber(line() or "")
+    if not count or count < 0 or count > 4096 or count ~= math.floor(count) then
+        return nil, "invalid recovery journal"
+    end
+    local records = {}
+    for _ = 1, count do
+        local path_len, existed, content_len, staged_len = (line() or ""):match(
+            "^(%d+):([01]):(%d+):(%d+)$")
+        path_len, content_len, staged_len = tonumber(path_len), tonumber(content_len), tonumber(staged_len)
+        if not path_len or not content_len or not staged_len
+            or path_len < 1 or path_len + content_len + staged_len > #raw - pos + 1 then
+            return nil, "invalid recovery journal"
+        end
+        local path = raw:sub(pos, pos + path_len - 1); pos = pos + path_len
+        local content = raw:sub(pos, pos + content_len - 1); pos = pos + content_len
+        local temp = raw:sub(pos, pos + staged_len - 1); pos = pos + staged_len
+        records[#records + 1] = {
+            path = path, existed = existed == "1", content = content, staged = temp,
+        }
+    end
+    if pos ~= #raw + 1 then return nil, "invalid recovery journal" end
+    return records
+end
+
+-- A publication is intentionally considered committed only after this journal
+-- disappears. If the sidecar dies between destination renames, the next
+-- preview/commit restores every original byte before doing any new work.
+function smart_merge.recover_pending(supplied_opts)
+    local opts = default_options(supplied_opts)
+    local path = journal_path(opts)
+    if not path or not opts.exists(path) then return true end
+    local records, decode_error = decode_journal(opts.read_file(path))
+    if not records then return nil, decode_error end
+    for _, record in ipairs(records) do
+        if record.existed then
+            if not opts.write_file(record.path, record.content)
+                or opts.read_file(record.path) ~= record.content then
+                return nil, "failed to recover " .. record.path
+            end
+            if opts.protect_file and not opts.protect_file(record.path) then
+                return nil, "failed to protect recovered " .. record.path
+            end
+        else
+            opts.remove(record.path)
+            if opts.exists(record.path) then return nil, "failed to recover " .. record.path end
+        end
+        if record.staged ~= "" then opts.remove(record.staged) end
+    end
+    opts.remove(path)
+    if opts.exists(path) then
+        return nil, "failed to clear recovery journal"
+    end
+    return true
+end
+
+function smart_merge.preview(appid, collection_dir, supplied_opts)
     appid = positive_integer(appid)
     if not appid then return nil, "invalid appid" end
     local opts = default_options(supplied_opts)
+    local recovered, recovery_error = smart_merge.recover_pending(opts)
+    if not recovered then return nil, recovery_error end
     if type(opts.list_recursive) ~= "function" then return nil, "list_recursive unavailable" end
     local current_gids = smart_merge.parse_appinfo_gids(opts.appinfo_text or "")
     local by_root, manifest_by_name = {}, {}
@@ -527,7 +681,219 @@ function smart_merge.install(appid, collection_dir, supplied_opts)
     for _, item in pairs(manifest_by_name) do manifests[#manifests + 1] = item end
 
     local lua_text = smart_merge.emit_lua(appid, result)
-    local preferred = smart_merge.select_preferred(manifests, current_gids)
+    local preferred_items = smart_merge.select_preferred_items(manifests, current_gids)
+    local preferred = {}
+    for depot, item in pairs(preferred_items) do preferred[depot] = item.gid end
+
+    local dlc_set = smart_merge.parse_appinfo_dlc_appids(opts.appinfo_text or "")
+    for _, id in ipairs(sorted_numeric_keys(result.bare)) do
+        if id ~= appid then dlc_set[id] = true end
+    end
+    local dlc_appids = sorted_numeric_keys(dlc_set)
+    local depot_ids, depot_seen = {}, {}
+    for depot in pairs(result.keys or {}) do depot_seen[depot] = true end
+    for _, item in ipairs(manifests) do depot_seen[item.depot] = true end
+    for depot, info in pairs(evaluation.depots or {}) do
+        if info.kind == "virtual_dlc" then depot_seen[depot] = true end
+    end
+    for depot in pairs(depot_seen) do depot_ids[#depot_ids + 1] = depot end
+    table.sort(depot_ids)
+    local depots = {}
+    local base_depots, base_depot_set = {}, {}
+    for depot, info in pairs(evaluation.depots or {}) do
+        if info.kind == "base" and info.relevant then
+            base_depots[#base_depots + 1] = depot
+            base_depot_set[depot] = true
+        end
+    end
+    table.sort(base_depots)
+    for _, depot in ipairs(depot_ids) do
+        local selected = preferred_items[depot]
+        local gid = selected and selected.gid or nil
+        local info = evaluation.depots[depot] or {}
+        depots[#depots + 1] = {
+            depot = depot,
+            key = result.keys[depot] or "",
+            gid = gid or "",
+            has_manifest = gid ~= nil,
+            base_depot = base_depot_set[depot] == true,
+            kind = info.kind or "unknown",
+            dlc_appid = info.dlcappid,
+            requires_key = info.kind ~= "virtual_dlc",
+            manifest_source = selected and selected.source_name or nil,
+        }
+    end
+
+    result.appid = appid
+    result.lua_text = lua_text
+    result.dlc_appids = dlc_appids
+    result.depots = depots
+    result.base_depots = base_depots
+    result.manifests = manifests
+    result.preferred = preferred
+    result.manifest_count = #manifests
+    return result
+end
+
+function smart_merge.build_edited_lua(appid, edits, preview)
+    appid = positive_integer(appid)
+    if not appid then return nil, "invalid appid" end
+    if edits == nil then return preview and preview.lua_text or nil end
+    if type(edits) ~= "table" then return nil, "invalid draft" end
+
+    local dlcs = {}
+    for _, value in ipairs(type(edits.dlc_appids) == "table" and edits.dlc_appids or {}) do
+        local id = positive_integer(value)
+        if not id then return nil, "invalid DLC appid" end
+        if id ~= appid then dlcs[id] = true end
+    end
+
+    local depots, key_count = {}, 0
+    for _, row in ipairs(type(edits.depots) == "table" and edits.depots or {}) do
+        if type(row) ~= "table" then return nil, "invalid depot row" end
+        local depot = positive_integer(row.depot)
+        if not depot then return nil, "invalid depot id" end
+        if depots[depot] then return nil, "duplicate depot " .. tostring(depot) end
+        local key = tostring(row.key or ""):match("^%s*(.-)%s*$"):lower()
+        if key ~= "" and (#key ~= 64 or not key:match("^[0-9a-f]+$")) then
+            return nil, "invalid key for depot " .. tostring(depot)
+        end
+        local raw_gid = tostring(row.gid or ""):match("^%s*(.-)%s*$")
+        local gid = raw_gid ~= "" and normalize_decimal(raw_gid) or nil
+        if raw_gid ~= "" and not gid then
+            return nil, "invalid manifest gid for depot " .. tostring(depot)
+        end
+        if key ~= "" then key_count = key_count + 1 end
+        depots[depot] = { key = key, gid = gid }
+    end
+    local base_depots = type(preview) == "table" and preview.base_depots or nil
+    if type(base_depots) == "table" and #base_depots > 0 then
+        local has_base_key = false
+        for _, depot in ipairs(base_depots) do
+            local row = depots[positive_integer(depot)]
+            if row and row.key ~= "" then has_base_key = true; break end
+        end
+        if not has_base_key then return nil, "no_usable_base_key" end
+    elseif key_count == 0 then
+        return nil, "at least one depot key is required"
+    end
+
+    local lines = { "addappid(" .. tostring(appid) .. ")" }
+    for _, id in ipairs(sorted_numeric_keys(dlcs)) do
+        lines[#lines + 1] = "addappid(" .. tostring(id) .. ")"
+    end
+    for _, depot in ipairs(sorted_numeric_keys(depots)) do
+        local row = depots[depot]
+        if row.key ~= "" then
+            lines[#lines + 1] = string.format('addappid(%d, 1, "%s")', depot, row.key)
+        end
+    end
+    for _, depot in ipairs(sorted_numeric_keys(depots)) do
+        local gid = depots[depot].gid
+        if gid then lines[#lines + 1] = string.format('setManifestid(%d, "%s")', depot, gid) end
+    end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+local function split_lines(text)
+    local lines = {}
+    text = tostring(text or "")
+    local trailing = text:sub(-1) == "\n"
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do lines[#lines + 1] = line end
+    if trailing then lines[#lines] = nil end
+    return lines, trailing
+end
+
+local function join_lines(lines, trailing)
+    local text = table.concat(lines, "\n")
+    return trailing and (text .. "\n") or text
+end
+
+local function manifest_block_end(lines, header)
+    local last = #lines
+    for index = header + 1, #lines do
+        if lines[index]:match("^%S") then last = index - 1; break end
+    end
+    return last
+end
+
+local function sync_manifest_pins(config, appid, lua_text)
+    if type(config) ~= "string" or config == "" then return nil, "config.yaml not found" end
+    local parsed = smart_merge.parse_lua(lua_text)
+    local gids = parsed.manifests or {}
+    local lines, trailing = split_lines(config)
+    local header
+    for index, line in ipairs(lines) do
+        local after = line:match("^ManifestPins%s*:%s*(.-)%s*$")
+        if after ~= nil then
+            local code = after:gsub("#.*$", ""):match("^%s*(.-)%s*$")
+            if code ~= "" then return nil, "ManifestPins has an inline value" end
+            header = index; break
+        end
+    end
+
+    local app_start, app_end
+    if header then
+        local block_end = manifest_block_end(lines, header)
+        for index = header + 1, block_end do
+            local id = lines[index]:match("^  (%d+)%s*:%s*$")
+            if id and tonumber(id) == appid then
+                app_start, app_end = index, block_end
+                for cursor = index + 1, block_end do
+                    if lines[cursor]:match("^  %S") then app_end = cursor - 1; break end
+                end
+                break
+            end
+        end
+    end
+
+    if app_start then
+        for index = app_end, app_start, -1 do table.remove(lines, index) end
+    end
+
+    local depot_ids = sorted_numeric_keys(gids)
+    if #depot_ids > 0 then
+        if not header then
+            if #lines > 0 and lines[#lines] ~= "" then lines[#lines + 1] = "" end
+            lines[#lines + 1] = "ManifestPins:"
+            header = #lines
+        end
+        local insert_at = manifest_block_end(lines, header) + 1
+        local block = {
+            "  " .. tostring(appid) .. ":",
+            "    locked: true",
+            "    depots:",
+        }
+        for _, depot in ipairs(depot_ids) do
+            block[#block + 1] = string.format('      %d: "%s"', depot, gids[depot])
+        end
+        for offset, line in ipairs(block) do table.insert(lines, insert_at + offset - 1, line) end
+    elseif header then
+        local block_end = manifest_block_end(lines, header)
+        local any_app = false
+        for index = header + 1, block_end do
+            if lines[index]:match("^  %d+%s*:%s*$") then any_app = true; break end
+        end
+        if not any_app then table.remove(lines, header) end
+    end
+    return join_lines(lines, trailing)
+end
+
+local function mark_import(text, appid)
+    local ids = { [appid] = true }
+    for line in (tostring(text or "") .. "\n"):gmatch("([^\n]*)\n") do
+        local id = positive_integer(line:match("^%s*(%d+)%s*$"))
+        if id then ids[id] = true end
+    end
+    local lines = {}
+    for _, id in ipairs(sorted_numeric_keys(ids)) do lines[#lines + 1] = tostring(id) end
+    return table.concat(lines, "\n") .. "\n"
+end
+
+local function publish_preview(appid, preview, lua_text, supplied_opts)
+    local opts = default_options(supplied_opts)
+    local manifests = preview.manifests or {}
+    local preferred = preview.preferred or {}
 
     local home = opts.home or os.getenv("HOME") or ""
     local steam_root = opts.steam_root or ""
@@ -545,6 +911,19 @@ function smart_merge.install(appid, collection_dir, supplied_opts)
         publications[#publications + 1] = { path = store_dir .. "/.preferred_" .. depot, content = preferred[depot] .. "\n" }
     end
     publications[#publications + 1] = { path = target, content = lua_text }
+    if opts.sync_pins then
+        local config_path = opts.config_path or (home .. "/.config/SLSsteam/config.yaml")
+        local imports_path = opts.imports_path or (home .. "/.config/SLSsteam/lumen_lua_imports.txt")
+        local config_text, config_error = sync_manifest_pins(
+            opts.read_file(config_path), appid, lua_text)
+        if not config_text then return nil, config_error end
+        opts.mkdir(parent_path(config_path)); opts.mkdir(parent_path(imports_path))
+        publications[#publications + 1] = { path = config_path, content = config_text }
+        publications[#publications + 1] = {
+            path = imports_path,
+            content = mark_import(opts.read_file(imports_path), appid),
+        }
+    end
 
     local nonce = tostring(os.time()) .. "." .. tostring(math.random(100000, 999999))
     local staged, snapshots = {}, {}
@@ -555,24 +934,69 @@ function smart_merge.install(appid, collection_dir, supplied_opts)
             for _, path in ipairs(staged) do opts.remove(path) end
             return nil, "failed to stage " .. publication.path
         end
+        if opts.protect_file and not opts.protect_file(temp) then
+            opts.remove(temp)
+            for _, path in ipairs(staged) do opts.remove(path) end
+            return nil, "failed to protect " .. publication.path
+        end
         staged[#staged + 1] = temp
-        snapshots[index] = { existed = opts.exists(publication.path), content = opts.read_file(publication.path) }
+        local existed = opts.exists(publication.path)
+        local prior = existed and opts.read_file(publication.path) or nil
+        if existed and prior == nil then
+            for _, path in ipairs(staged) do opts.remove(path) end
+            return nil, "failed to snapshot " .. publication.path
+        end
+        snapshots[index] = { existed = existed, content = prior }
+    end
+
+    local recovery_path = journal_path(opts)
+    if not recovery_path then
+        for _, path in ipairs(staged) do opts.remove(path) end
+        return nil, "recovery path unavailable"
+    end
+    opts.mkdir(parent_path(recovery_path))
+    local journal_temp = recovery_path .. ".tmp." .. nonce
+    local journal = encode_journal(publications, snapshots, staged)
+    opts.remove(journal_temp)
+    if not opts.write_file(journal_temp, journal) or opts.read_file(journal_temp) ~= journal
+        or (opts.protect_file and not opts.protect_file(journal_temp))
+        or not opts.rename(journal_temp, recovery_path) then
+        opts.remove(journal_temp)
+        for _, path in ipairs(staged) do opts.remove(path) end
+        return nil, "failed to create recovery journal"
     end
 
     for index, publication in ipairs(publications) do
         if not opts.rename(staged[index], publication.path) then
-            for _, path in ipairs(staged) do opts.remove(path) end
-            for restore_index, prior in ipairs(snapshots) do
-                local path = publications[restore_index].path
-                if prior.existed then opts.write_file(path, prior.content) else opts.remove(path) end
-            end
+            local recovered, recovery_error = smart_merge.recover_pending(opts)
+            if not recovered then return nil, recovery_error end
             return nil, "failed to publish " .. publication.path
         end
     end
-    result.installed_path = target
-    result.preferred = preferred
-    result.manifest_count = #manifests
-    return result
+    opts.remove(recovery_path)
+    if opts.exists(recovery_path) then
+        local recovered, recovery_error = smart_merge.recover_pending(opts)
+        if not recovered then return nil, recovery_error end
+        return nil, "failed to finalize publication"
+    end
+    preview.lua_text = lua_text
+    preview.installed_path = target
+    preview.preferred = preferred
+    preview.manifest_count = #manifests
+    preview.pins_synced = opts.sync_pins == true
+    return preview
+end
+
+function smart_merge.commit(appid, collection_dir, edits, supplied_opts)
+    local preview, err = smart_merge.preview(appid, collection_dir, supplied_opts)
+    if not preview then return nil, err end
+    local lua_text, lua_error = smart_merge.build_edited_lua(appid, edits, preview)
+    if not lua_text then return nil, lua_error end
+    return publish_preview(appid, preview, lua_text, supplied_opts)
+end
+
+function smart_merge.install(appid, collection_dir, supplied_opts)
+    return smart_merge.commit(appid, collection_dir, nil, supplied_opts)
 end
 
 return smart_merge

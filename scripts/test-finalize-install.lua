@@ -33,7 +33,7 @@ end
 local function harness(initial)
   local files, dirs = {}, {}
   for path, content in pairs(initial or {}) do files[path]=content end
-  local fail_destination
+  local fail_destination, crash_destination
   local function list_recursive(root)
     local out={}
     for path in pairs(files) do
@@ -48,10 +48,12 @@ local function harness(initial)
     list_recursive=list_recursive,mkdir=function(p) dirs[p]=true; return true end,
     remove=function(p) files[p]=nil; return true end,
     rename=function(src,dst)
+      if dst==crash_destination then crash_destination=nil; error("simulated process death") end
       if dst==fail_destination then fail_destination=nil; return false end
       if files[src]==nil then return false end; files[dst]=files[src]; files[src]=nil; return true
     end}
-  return files,opts,function(path) fail_destination=path end
+  return files,opts,function(path) fail_destination=path end,
+    function(path) crash_destination=path end
 end
 local APP=250900; local G11="3238948344654627795"; local G12="9223372036854770000"
 local K1=string.rep("a",64); local K2=string.rep("b",64); local KX=string.rep("c",64)
@@ -66,6 +68,15 @@ local files,opts,fail_on=harness({
   [root.."/source_0001/99_1.manifest"]="bad",
 })
 opts.appinfo_text='"appinfo" { "depots" { "11" { "manifests" { "public" { "gid" "'..G11..'" } } } } }'
+local preview,preview_err=merge.preview(APP,root,opts)
+check("preview validates without publishing",preview~=nil and preview_err==nil
+  and files["/steam/config/stplug-in/"..APP..".lua"]==nil)
+check("preview exposes source contributors",preview and preview.contributors[1]=="Hubcap"
+  and preview.contributors[2]=="Ryuu")
+check("preview exposes editable keys",preview and preview.depots[1].key==K1
+  and preview.depots[2].key==K2)
+check("preview pre-fills gid only from a real package manifest",preview
+  and preview.depots[1].gid==G11 and preview.depots[1].has_manifest==true)
 local installed,err=merge.install(APP,root,opts)
 check("transaction installs merged result",installed~=nil and err==nil)
 local target=files["/steam/config/stplug-in/"..APP..".lua"] or ""
@@ -77,6 +88,36 @@ check("invalid manifest rejected",files["/home/test/.config/SLSsteam/manifests/9
 check("nothing written to depotcache",files["/steam/depotcache/11_"..G11..".manifest"]==nil)
 check("exact gid marked preferred",files["/home/test/.config/SLSsteam/manifests/.preferred_11"]==G11.."\n")
 check("conflict recorded without prompt",#installed.conflicts==1)
+
+local edited_files,edited_opts=harness({
+  ["/home/test/.config/SLSsteam/config.yaml"]="AdditionalApps:\nManifestPins:\n  "..APP..":\n    locked: true\n    depots:\n      11: \"old\"\nLogLevel: 2\n",
+  ["/home/test/.config/SLSsteam/lumen_lua_imports.txt"]="123\n",
+  [root.."/source_0000/.source-name"]="Hubcap", [root.."/source_0000/.source-priority"]="0\n",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+})
+edited_opts.sync_pins=true
+edited_opts.config_path="/home/test/.config/SLSsteam/config.yaml"
+edited_opts.imports_path="/home/test/.config/SLSsteam/lumen_lua_imports.txt"
+local edited_result,edited_err=merge.commit(APP,root,{
+  dlc_appids={401920}, depots={
+    {depot=11,key=K1,gid=""},
+    {depot=12,key=K2,gid=G12},
+  },
+},edited_opts)
+local edited_lua=edited_files["/steam/config/stplug-in/"..APP..".lua"] or ""
+check("edited commit publishes only after confirmation",edited_result~=nil and edited_err==nil)
+check("edited commit keeps a user-entered gid without a local manifest",
+  edited_lua:find('setManifestid(12, "'..G12..'")',1,true)~=nil)
+check("cleared packaged gid means latest",edited_lua:find("setManifestid(11",1,true)==nil)
+check("edited commit retains downloaded manifest archive",
+  edited_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]~=nil)
+local edited_config=edited_files[edited_opts.config_path] or ""
+check("edited commit synchronizes ManifestPins in the same transaction",
+  edited_config:find('12: "'..G12..'"',1,true)~=nil
+  and edited_config:find('11: "old"',1,true)==nil)
+check("edited commit marks the source-created game in the same transaction",
+  (edited_files[edited_opts.imports_path] or ""):find(tostring(APP),1,true)~=nil)
 
 local oldlua='addappid('..APP..')\n-- old\n'
 local empty_files,empty_opts=harness({["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
@@ -137,16 +178,56 @@ check("DLC-only key set cannot masquerade as a usable base game",
 
 local rollback_files,rollback_opts,set_fail=harness({
   ["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
+  ["/home/test/.config/SLSsteam/config.yaml"]="ManifestPins:\n  "..APP..":\n    locked: true\n    depots:\n      11: \"old\"\n",
+  ["/home/test/.config/SLSsteam/lumen_lua_imports.txt"]="123\n",
   ["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]="old-manifest",
   [root.."/source_0000/.source-name"]="Hubcap",[root.."/source_0000/.source-priority"]="0",
   [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
   [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
 })
-set_fail("/steam/config/stplug-in/"..APP..".lua")
+rollback_opts.sync_pins=true
+rollback_opts.config_path="/home/test/.config/SLSsteam/config.yaml"
+rollback_opts.imports_path="/home/test/.config/SLSsteam/lumen_lua_imports.txt"
+local old_config=rollback_files[rollback_opts.config_path]
+set_fail(rollback_opts.config_path)
 local rolled=merge.install(APP,root,rollback_opts)
 check("publication failure reports failure",rolled==nil)
 check("publication failure restores target lua",rollback_files["/steam/config/stplug-in/"..APP..".lua"]==oldlua)
 check("publication failure restores manifest",rollback_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]=="old-manifest")
+check("publication failure restores ManifestPins",rollback_files[rollback_opts.config_path]==old_config)
+check("publication failure does not mark the game",
+  rollback_files[rollback_opts.imports_path]=="123\n")
+
+local crash_files,crash_opts,_,crash_on=harness({
+  ["/steam/config/stplug-in/"..APP..".lua"]=oldlua,
+  ["/home/test/.config/SLSsteam/config.yaml"]="ManifestPins:\n  "..APP..":\n    locked: true\n    depots:\n      11: \"old\"\n",
+  ["/home/test/.config/SLSsteam/lumen_lua_imports.txt"]="123\n",
+  ["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]="old-manifest",
+  [root.."/source_0000/.source-name"]="Hubcap",[root.."/source_0000/.source-priority"]="0",
+  [root.."/source_0000/"..APP..".lua"]='addappid('..APP..')\naddappid(11,1,"'..K1..'")\n',
+  [root.."/source_0000/11_"..G11..".manifest"]=manifest(11,G11,100),
+})
+crash_opts.sync_pins=true
+crash_opts.config_path="/home/test/.config/SLSsteam/config.yaml"
+crash_opts.imports_path="/home/test/.config/SLSsteam/lumen_lua_imports.txt"
+crash_on(crash_opts.config_path)
+local survived=pcall(merge.install,APP,root,crash_opts)
+check("simulated process death interrupts publication",survived==false)
+check("interrupted publication leaves a durable recovery journal",
+  crash_files["/home/test/.config/SLSsteam/.luatools-publish.journal"]~=nil)
+local recovered_preview,recovery_error=merge.preview(APP,root,crash_opts)
+check("next operation recovers an interrupted publication",
+  recovered_preview~=nil and recovery_error==nil)
+check("crash recovery restores target lua",
+  crash_files["/steam/config/stplug-in/"..APP..".lua"]==oldlua)
+check("crash recovery restores manifest",
+  crash_files["/home/test/.config/SLSsteam/manifests/11_"..G11..".manifest"]=="old-manifest")
+check("crash recovery restores ManifestPins",
+  crash_files[crash_opts.config_path]:find('11: "old"',1,true)~=nil)
+check("crash recovery restores import marker",
+  crash_files[crash_opts.imports_path]=="123\n")
+check("crash recovery consumes its journal",
+  crash_files["/home/test/.config/SLSsteam/.luatools-publish.journal"]==nil)
 
 -- Filesystem traversal order must not affect source metadata. Deliberately
 -- enumerate source_0000's manifest before its priority/name metadata.

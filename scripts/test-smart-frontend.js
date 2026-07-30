@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const fs = require("fs");
 const source = fs.readFileSync("plugin/public/luatools.js", "utf8");
+const backend = fs.readFileSync("plugin/backend/main.lua", "utf8");
 let failures = 0;
 function check(name, condition) {
   if (condition) console.log(`ok   - ${name}`);
@@ -21,6 +22,10 @@ check("fast branch starts aggregation directly",
 check("manual branch retains API availability check", apiCheck >= 0);
 check("manual branch retains source selection modal", source.includes("showSourceSelectionModal(appid, selectable)"));
 check("smart RPC remains wired", source.includes('"StartAddViaLuaToolsSmart"'));
+check("draft commit matches Millennium alphabetical argument order",
+  /function CommitGameDraft\(params, edits, session\)/.test(backend));
+check("Steam catalog search is exposed through the plugin backend",
+  /function SearchSteamGames\(language, query\)/.test(backend));
 check("missing-key sources render a locked status",
   source.includes('lt("Needs key")') &&
   source.includes('data-api-locked') &&

@@ -229,10 +229,14 @@ while :; do
   running=0; bytes=0; poll_ms="$(now_ms)"
   for ((i=0; i<n; i++)); do
     size="$(stat -c %s "${C_ZIP[i]}" 2>/dev/null || echo 0)"
-    bytes=$((bytes + size))
-    if [[ "$size" -gt "${C_SIZE[i]:-0}" ]]; then
-      C_SIZE[i]="$size"
-      C_LAST_PROGRESS[i]="$poll_ms"
+    live_http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
+      "${C_HEAD[i]}" 2>/dev/null)"
+    if [[ "${live_http:-0}" == "${C_CODE[i]}" ]]; then
+      bytes=$((bytes + size))
+      if [[ "$size" -gt "${C_SIZE[i]:-0}" ]]; then
+        C_SIZE[i]="$size"
+        C_LAST_PROGRESS[i]="$poll_ms"
+      fi
     fi
     [[ "${C_STATE[i]}" == pending ]] || continue
     if kill -0 "${C_PID[i]}" 2>/dev/null; then
@@ -273,7 +277,11 @@ while :; do
     if [[ -f "${C_TOTAL_FILE[i]}" ]]; then
       IFS= read -r 'C_TOTAL[i]' < "${C_TOTAL_FILE[i]}" || true
     fi
-    if [[ "${C_TOTAL[i]}" =~ ^[0-9]+$ ]]; then
+    total_http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
+      "${C_HEAD[i]}" 2>/dev/null)"
+    if [[ "${total_http:-0}" != "${C_CODE[i]}" ]]; then
+      if [[ "${C_STATE[i]}" == pending ]]; then totals_known=0; fi
+    elif [[ "${C_TOTAL[i]}" =~ ^[0-9]+$ ]]; then
       aggregate_total=$((aggregate_total + 10#${C_TOTAL[i]}))
     else
       totals_known=0

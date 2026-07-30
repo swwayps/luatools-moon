@@ -57,6 +57,16 @@ local function json_ok_array(data, field)
     return encoded:sub(1, -2) .. separator .. cjson.encode(field) .. ":[]}"
 end
 
+local function trim(value)
+    return tostring(value or ""):match("^%s*(.-)%s*$") or ""
+end
+
+local function url_encode(value)
+    return (tostring(value or ""):gsub("([^%w%-_%.~])", function(char)
+        return string.format("%%%02X", string.byte(char))
+    end))
+end
+
 -- ── Webkit file management ───────────────────────────────────────────────────
 
 local function copy_webkit_files()
@@ -222,6 +232,97 @@ function GetAddViaLuaToolsStatus(appid)
     local ok, res = pcall(downloads.get_add_status, tonumber(appid))
     if not ok then return json_err(res) end
     return json_ok(res)
+end
+
+function StartGameDraft(params)
+    local appid = type(params) == "table" and params.appid or params
+    local ok, res = pcall(downloads.start_game_draft, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function GetGameDraftStatus(params, session)
+    local appid = params
+    if type(params) == "table" then
+        appid, session = params.appid, params.session
+    end
+    local ok, res = pcall(downloads.get_game_draft_status,
+        tonumber(appid), tostring(session or ""))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+-- Lumen/Millennium passes object values alphabetically: appid, editsJson,
+-- session. Keep this signature in that exact order.
+function CommitGameDraft(params, edits, session)
+    local appid = params
+    if type(params) == "table" then
+        appid, session = params.appid, params.session
+        edits = params.edits or params.editsJson
+    end
+    if type(edits) == "string" then
+        local decoded, value = pcall(cjson.decode, edits)
+        if not decoded or type(value) ~= "table" then return json_err("Invalid draft edits") end
+        edits = value
+    end
+    local ok, res = pcall(downloads.commit_game_draft,
+        tonumber(appid), tostring(session or ""), edits)
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function CancelGameDraft(params, session)
+    local appid = params
+    if type(params) == "table" then
+        appid, session = params.appid, params.session
+    end
+    local ok, res = pcall(downloads.cancel_game_draft,
+        tonumber(appid), tostring(session or ""))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+-- Lumen/Millennium sorts { language, query } alphabetically and passes the
+-- values positionally. Keep this signature in that order.
+function SearchSteamGames(language, query)
+    if type(language) == "table" then
+        query, language = language.query, language.language
+    end
+    query = trim(query)
+    if query == "" then return json_err("Search query is required") end
+    if #query > 160 then query = query:sub(1, 160) end
+
+    language = tostring(language or "english")
+    if language ~= "english" and language ~= "brazilian" then
+        language = "english"
+    end
+    local endpoint = "https://store.steampowered.com/api/storesearch/?term="
+        .. url_encode(query) .. "&l=" .. language .. "&cc=BR"
+    local ok_request, response = pcall(http_client.get, endpoint, { timeout = 8 })
+    if not ok_request or type(response) ~= "table" or response.status ~= 200
+        or type(response.body) ~= "string" then
+        return json_err("Steam catalog is unavailable")
+    end
+    local ok_decode, payload = pcall(cjson.decode, response.body)
+    if not ok_decode or type(payload) ~= "table" then
+        return json_err("Steam catalog returned invalid data")
+    end
+
+    local items = {}
+    for _, item in ipairs(type(payload.items) == "table" and payload.items or {}) do
+        local id = tonumber(type(item) == "table" and item.id or nil)
+        if type(item) == "table" and item.type == "app" and id and id > 0
+            and id % 1 == 0 then
+            items[#items + 1] = {
+                id = id,
+                name = trim(item.name) ~= "" and trim(item.name) or ("App " .. tostring(id)),
+                tiny_image = type(item.tiny_image) == "string" and item.tiny_image or "",
+                type = "app",
+            }
+            if #items >= 8 then break end
+        end
+    end
+    return json_ok_array({ success = true, items = items }, "items")
 end
 
 function GetApiList()

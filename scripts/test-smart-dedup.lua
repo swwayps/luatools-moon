@@ -98,7 +98,8 @@ do
     .. ' "manifests" { "public" { "gid" "9002" } } }'
     .. ' "367523" { "config" { "oslist" "macos" }'
     .. ' "manifests" { "public" { "gid" "9003" } } }'
-    .. '} }')
+    .. ' "400001" { "dlcappid" "400001" }'
+    .. '} "extended" { "listofdlc" "400000,400001,4093670" } }')
   f:close()
 end
 
@@ -240,6 +241,109 @@ do
   check(h == nil, "(E3) stray 'failed' state file removed by latch")
   if h then h:close() end
 end
+
+-- ── isolated source draft ──────────────────────────────────────────────────
+-- A draft reuses the configured smart sources but must not publish anything
+-- until CommitGameDraft supplies the user's edited rows.
+exec_commands = {}
+os.remove(TMP .. "/steam/config/stplug-in/" .. APPID .. ".lua")
+local stale_draft = TMP .. "/draft_1_deadbeef"
+os.execute("mkdir -p '" .. stale_draft .. "' && touch -d '3 hours ago' '" .. stale_draft .. "'")
+local config_path = TMP .. "/home/.config/SLSsteam/config.yaml"
+local config = assert(io.open(config_path, "w"))
+config:write("AdditionalApps:\nManifestPins:\n  " .. APPID
+  .. ":\n    locked: true\n    depots:\n      " .. (APPID + 1)
+  .. ": \"old\"\nLogLevel: 2\n")
+config:close()
+local started = downloads.start_game_draft(APPID)
+check(started and started.success == true and type(started.session) == "string",
+  "(F1) draft starts with a private session")
+check(not isdir(stale_draft), "(F1b) starting a draft collects abandoned stale sessions")
+local draft_root = TMP .. "/draft_" .. APPID .. "_" .. started.session
+local draft_mode = io.popen("stat -c %a '" .. draft_root .. "' 2>/dev/null")
+local draft_permissions = draft_mode and draft_mode:read("*l") or nil
+if draft_mode then draft_mode:close() end
+check(draft_permissions == "700", "(F1a) draft directory is private")
+local draft_collection = draft_root .. "/extracted_" .. APPID
+local draft_source = draft_collection .. "/source_0000"
+os.execute("mkdir -p '" .. draft_source .. "'")
+local df = assert(io.open(draft_source .. "/.source-name", "w")); df:write("Draft source"); df:close()
+df = assert(io.open(draft_source .. "/.source-priority", "w")); df:write("0\n"); df:close()
+df = assert(io.open(draft_source .. "/" .. APPID .. ".lua", "w"))
+df:write("addappid(" .. APPID .. ")\naddappid(" .. (APPID + 1)
+  .. ",1,\"" .. string.rep("d", 64) .. "\")\n")
+df:close()
+os.execute("printf '%s' '{\"status\":\"collected\"}' > '" .. draft_root .. "/state.json'")
+
+local draft_status = downloads.get_game_draft_status(APPID, started.session)
+check(draft_status and draft_status.success and draft_status.state.status == "ready",
+  "(F2) collected source becomes an editable ready draft")
+check(draft_status.state.draft and draft_status.state.draft.depots[1]
+  and draft_status.state.draft.depots[1].key == string.rep("d", 64),
+  "(F3) ready draft exposes the real editable key")
+local draft_dlcs, virtual_row = {}, nil
+for _, id in ipairs(draft_status.state.draft.dlc_appids or {}) do draft_dlcs[id] = true end
+for _, row in ipairs(draft_status.state.draft.depots or {}) do
+  if row.depot == 400001 then virtual_row = row end
+end
+check(draft_dlcs[400000] and draft_dlcs[400001] and draft_dlcs[4093670],
+  "(F3a) draft combines all official product-info DLC appids")
+check(virtual_row and virtual_row.virtualDepot == true and virtual_row.requiresKey == false,
+  "(F3b) public draft marks virtual DLC as keyless")
+local before_commit = io.open(TMP .. "/steam/config/stplug-in/" .. APPID .. ".lua", "r")
+check(before_commit == nil, "(F4) preview publishes no game Lua")
+if before_commit then before_commit:close() end
+
+local committed = downloads.commit_game_draft(APPID, started.session, {
+  dlc_appids = { APPID + 10 },
+  depots = { { depot = APPID + 1, key = string.rep("e", 64), gid = "" } },
+})
+check(committed and committed.success and committed.lua:find(string.rep("e", 64), 1, true),
+  "(F5) confirmation publishes the edited key")
+check(committed and committed.pinsSynced == true,
+  "(F5a) draft commit reports atomic ManifestPins synchronization")
+check(committed.lua:find("setManifestid", 1, true) == nil,
+  "(F6) blank draft manifest commits as Latest")
+local committed_config = io.open(config_path, "r")
+local committed_config_text = committed_config and committed_config:read("*a") or ""
+if committed_config then committed_config:close() end
+check(not committed_config_text:find("old", 1, true),
+  "(F6a) Latest clears the older pin inside the draft transaction")
+local import_marker_path = TMP .. "/home/.config/SLSsteam/lumen_lua_imports.txt"
+local import_marker = io.open(import_marker_path, "r")
+local import_marker_text = import_marker and import_marker:read("*a") or ""
+if import_marker then import_marker:close() end
+check(import_marker_text:find(tostring(APPID), 1, true) ~= nil,
+  "(F6b) draft transaction records the source-created game")
+local committed_retry = downloads.commit_game_draft(APPID, started.session, {
+  dlc_appids = {}, depots = {},
+})
+check(committed_retry and committed_retry.success
+  and committed_retry.lua == committed.lua,
+  "(F6c) committed draft retries return the same result without republishing")
+local finalize_committed = downloads.cancel_game_draft(APPID, started.session)
+check(finalize_committed and finalize_committed.success,
+  "(F6d) completed distributed draft can be finalized and discarded")
+
+exec_count = 0
+local cached_draft = downloads.start_game_draft(APPID)
+local cached_status = cached_draft and downloads.get_game_draft_status(
+  APPID, cached_draft.session)
+check(cached_draft and cached_draft.success and exec_count == 0,
+  "(F6e) repeated draft restores its validated private cache without a download")
+check(cached_status and cached_status.success and cached_status.state.status == "ready",
+  "(F6f) cached source package immediately recreates an editable draft")
+if cached_draft then downloads.cancel_game_draft(APPID, cached_draft.session) end
+
+local cancelled_draft = downloads.start_game_draft(APPID)
+local cancelled_result = cancelled_draft and downloads.cancel_game_draft(
+  APPID, cancelled_draft.session)
+check(cancelled_result and cancelled_result.success == true,
+  "(F7) one draft session can be cancelled independently")
+local traditional_state = io.open(SF, "r")
+check(traditional_state == nil,
+  "(F8) draft lifecycle does not recreate the traditional add state")
+if traditional_state then traditional_state:close() end
 
 os.execute("rm -rf " .. TMP)
 print((fails == 0) and "\nALL DEDUP + LATCH CHECKS PASSED" or ("\n" .. fails .. " CHECK(S) FAILED"))

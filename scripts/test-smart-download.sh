@@ -97,7 +97,10 @@ class H(http.server.BaseHTTPRequestHandler):
     elif slow: source='slow.zip'
     else: source=name
     path=os.path.join(root, source)
-    if not os.path.isfile(path): self.send_response(404); self.end_headers(); return
+    if not os.path.isfile(path):
+      data=b'404 not found\n'
+      self.send_response(404); self.send_header('Content-Length',str(len(data))); self.end_headers()
+      self.wfile.write(data); return
     if name == 'other.zip': time.sleep(0.7)
     if name == 'othercovered.zip': time.sleep(2.0)
     data=open(path,'rb').read(); self.send_response(status)
@@ -183,6 +186,8 @@ write_candidate "$C0F" 1 "Missing B" "http://127.0.0.1:$PORT/missing-b.zip" 200
 "$SCRIPT" 1134710 "$D0F/state.json" "$D0F" "$C0F" "$TMP/no-coverage" >/dev/null 2>&1 || true
 check "all-404 response is classified as not found" \
   '[[ "$(state_field "$D0F/state.json" errorCode)" == "not_found" ]]'
+check "all-404 response never counts its error bodies as downloaded data" \
+  '[[ "$(state_field "$D0F/state.json" bytesRead)" == "0" ]]'
 check "all-404 message does not blame the connection" \
   '[[ "$(state_field "$D0F/state.json" error)" == *"not have this app"* ]]'
 

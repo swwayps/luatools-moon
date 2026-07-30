@@ -14,6 +14,8 @@ local smart_merge = require("smart_merge")
 local downloads = {}
 local DOWNLOAD_STATE = {}
 local FINALIZING = {}
+local DRAFT_STATE = {}
+local DRAFT_FINALIZING = {}
 local _start_smart_records
 
 local function _atomic_write(path, content)
@@ -38,6 +40,29 @@ local function _job_paths(appid)
         coverage = fs.join(root, stem .. "_coverage.tsv"),
         collection = fs.join(root, "extracted_" .. stem),
         stop = fs.join(root, stem .. "_stop"),
+    }
+end
+
+local function _draft_job_paths(appid, session)
+    local base = utils.ensure_temp_download_dir()
+    if type(session) ~= "string" or not session:match("^[a-f0-9]+$") then return nil end
+    local root = fs.join(base, "draft_" .. tostring(appid) .. "_" .. session)
+    return {
+        root = root,
+        state = fs.join(root, "state.json"),
+        candidates = fs.join(root, "candidates.bin"),
+        coverage = fs.join(root, "coverage.tsv"),
+        collection = fs.join(root, "extracted_" .. tostring(appid)),
+        stop = fs.join(root, "stop"),
+    }
+end
+
+local function _draft_cache_paths(appid)
+    local root = fs.join(utils.ensure_temp_download_dir(), "draft_cache_" .. tostring(appid))
+    return {
+        root = root,
+        collection = fs.join(root, "extracted_" .. tostring(appid)),
+        stamp = fs.join(root, "ready_at"),
     }
 end
 
@@ -79,6 +104,71 @@ local function _get_download_state(appid)
     local copy = {}
     for k, v in pairs(state) do copy[k] = v end
     return copy
+end
+
+local function _copy_table(value)
+    local copy = {}
+    for key, item in pairs(type(value) == "table" and value or {}) do copy[key] = item end
+    return copy
+end
+
+local function _copy_tree(source, target)
+    if not fs.exists(source) then return false end
+    pcall(fs.remove_all, target)
+    fs.create_directories(target)
+    for _, entry in ipairs(fs.list_recursive(source) or {}) do
+        local relative = entry.path:sub(#source + 2)
+        local destination = fs.join(target, relative)
+        if entry.is_directory then
+            fs.create_directories(destination)
+        else
+            local content = m_utils.read_file(entry.path)
+            if content == nil then pcall(fs.remove_all, target); return false end
+            local parent = destination:match("^(.*)/[^/]+$")
+            if parent then fs.create_directories(parent) end
+            if m_utils.write_file(destination, content) == false then
+                pcall(fs.remove_all, target); return false
+            end
+        end
+    end
+    return true
+end
+
+local function _positive_appid(value)
+    local number = tonumber(value)
+    if not number or number <= 0 or number ~= math.floor(number) then return nil end
+    return number
+end
+
+local function _merge_options(appid, sync_pins)
+    local base_path = steam_utils.detect_steam_install_path()
+    local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
+    local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
+        "picsbuffer_" .. tostring(appid) .. ".bin")
+    local appinfo_text = fs.exists(appinfo_path) and (m_utils.read_file(appinfo_path) or "") or ""
+    return {
+        home = home,
+        steam_root = base_path,
+        appinfo_text = appinfo_text,
+        read_file = m_utils.read_file,
+        write_file = function(path, content)
+            local ok, written = pcall(m_utils.write_file, path, content)
+            return ok and written ~= false
+        end,
+        exists = fs.exists,
+        list_recursive = fs.list_recursive,
+        mkdir = fs.create_directories,
+        rename = os.rename,
+        remove = function(path) local ok = pcall(fs.remove, path); return ok end,
+        protect_file = function(path)
+            local quoted = "'" .. tostring(path):gsub("'", "'\\''") .. "'"
+            local result = os.execute("chmod 600 -- " .. quoted)
+            return result == true or result == 0
+        end,
+        sync_pins = sync_pins == true,
+        config_path = fs.join(home, ".config", "SLSsteam", "config.yaml"),
+        imports_path = fs.join(home, ".config", "SLSsteam", "lumen_lua_imports.txt"),
+    }
 end
 
 function downloads.get_add_status(appid)
@@ -145,27 +235,7 @@ end
 
 function downloads._finalize_install_lua(appid, collection_dir, _, api_name)
     _set_download_state(appid, { status = "processing" })
-    local base_path = steam_utils.detect_steam_install_path()
-    local home = m_utils.getenv("HOME") or os.getenv("HOME") or ""
-    local appinfo_path = fs.join(home, ".config", "SLSsteam", "cache",
-        "picsbuffer_" .. tostring(appid) .. ".bin")
-    local appinfo_text = fs.exists(appinfo_path) and (m_utils.read_file(appinfo_path) or "") or ""
-
-    local result, err = smart_merge.install(appid, collection_dir, {
-        home = home,
-        steam_root = base_path,
-        appinfo_text = appinfo_text,
-        read_file = m_utils.read_file,
-        write_file = function(path, content)
-            local ok, written = pcall(m_utils.write_file, path, content)
-            return ok and written ~= false
-        end,
-        exists = fs.exists,
-        list_recursive = fs.list_recursive,
-        mkdir = fs.create_directories,
-        rename = os.rename,
-        remove = function(path) local ok = pcall(fs.remove, path); return ok end,
-    })
+    local result, err = smart_merge.install(appid, collection_dir, _merge_options(appid))
 
     pcall(fs.remove_all, collection_dir)
     if not result then
@@ -417,6 +487,33 @@ local function _write_coverage(appid, coverage_file)
         #coverage_lines > 0 and (table.concat(coverage_lines, "\n") .. "\n") or "") ~= false
 end
 
+local function _smart_records_for_app(appid)
+    local apis = api_manifest.load_api_manifest()
+    if not apis or #apis == 0 then return nil, "No APIs available" end
+    local hubcap_api_key = _get_hubcap_api_key()
+    local records = {}
+    for index, api in ipairs(apis) do
+        local name = tostring(api.name or "Unknown"):gsub("%z", "")
+        local template = tostring(api.url or ""):gsub("%z", "")
+        local credential_state = api_manifest.get_api_credential_state(api, hubcap_api_key)
+        local skip = template == "" or credential_state.locked
+        if not skip and string.find(template, "<moapikey>", 1, true) then
+            template = template:gsub("<moapikey>", hubcap_api_key)
+        end
+        if not skip and string.find(template, "<apikey>", 1, true) then
+            template = template:gsub("<apikey>", api.api_key)
+        end
+        if not skip then
+            records[#records + 1] = table.concat({
+                tostring(index - 1), name, template:gsub("<appid>", tostring(appid)),
+                tostring(tonumber(api.success_code) or 200), "",
+            }, "\0")
+        end
+    end
+    if #records == 0 then return nil, "No usable API sources" end
+    return records
+end
+
 _start_smart_records = function(appid, records, current_api)
     if _has_fresh_job(appid) then return { success = true } end
     local job = _job_paths(appid)
@@ -460,40 +557,8 @@ function downloads.start_add_via_luatools_smart(appid)
 
     logger.log("LuaTools: StartAddViaLuaToolsSmart appid=" .. tostring(appid))
 
-    local apis = api_manifest.load_api_manifest()
-    if not apis or #apis == 0 then
-        _set_download_state(appid, { status = "failed", error = "No APIs available" })
-        return { success = true }
-    end
-
-    local ok, records_or_error = pcall(function()
-        local hubcap_api_key = _get_hubcap_api_key()
-        local records = {}
-        for index, api in ipairs(apis) do
-            local name = tostring(api.name or "Unknown"):gsub("%z", "")
-            local template = tostring(api.url or ""):gsub("%z", "")
-            local credential_state = api_manifest.get_api_credential_state(
-                api, hubcap_api_key)
-            local skip = template == "" or credential_state.locked
-
-            if not skip and string.find(template, "<moapikey>", 1, true) then
-                template = template:gsub("<moapikey>", hubcap_api_key)
-            end
-            if not skip and string.find(template, "<apikey>", 1, true) then
-                template = template:gsub("<apikey>", api.api_key)
-            end
-
-            if not skip then
-                local url = template:gsub("<appid>", tostring(appid))
-                records[#records + 1] = table.concat({
-                    tostring(index - 1), name, url,
-                    tostring(tonumber(api.success_code) or 200), "",
-                }, "\0")
-            end
-        end
-        if #records == 0 then error("No usable API sources") end
-        return records
-    end)
+    local ok, records_or_error, records_error = pcall(_smart_records_for_app, appid)
+    if ok and not records_or_error then ok, records_or_error = false, records_error end
 
     if not ok then
         logger.warn("LuaTools: StartAddViaLuaToolsSmart crashed - " .. tostring(records_or_error))
@@ -501,6 +566,226 @@ function downloads.start_add_via_luatools_smart(appid)
         return { success = false, error = tostring(records_or_error) }
     end
     return _start_smart_records(appid, records_or_error, "")
+end
+
+local function _draft_public_model(preview)
+    local depots = {}
+    for _, row in ipairs(preview.depots or {}) do
+        depots[#depots + 1] = {
+            depot = row.depot, key = row.key, gid = row.gid,
+            hasManifest = row.has_manifest == true,
+            baseDepot = row.base_depot == true,
+            kind = row.kind,
+            dlcAppid = row.dlc_appid,
+            requiresKey = row.requires_key ~= false,
+            virtualDepot = row.kind == "virtual_dlc",
+            manifestSource = row.manifest_source,
+        }
+    end
+    return {
+        appid = preview.appid,
+        lua = preview.lua_text,
+        contributors = preview.contributors or {},
+        conflicts = preview.conflicts or {},
+        dlc_appids = preview.dlc_appids or {},
+        baseDepots = preview.base_depots or {},
+        depots = depots,
+        manifestCount = preview.manifest_count or 0,
+    }
+end
+
+local DRAFT_TTL_SECONDS = 2 * 60 * 60
+
+local function _valid_draft_cache(appid)
+    local cache = _draft_cache_paths(appid)
+    if not fs.exists(cache.collection) then return nil end
+    local ready_at = tonumber(m_utils.read_file(cache.stamp) or "")
+    if not ready_at or os.time() - ready_at > DRAFT_TTL_SECONDS then
+        pcall(fs.remove_all, cache.root)
+        return nil
+    end
+    return cache
+end
+
+local function _save_draft_cache(appid, collection)
+    local cache = _draft_cache_paths(appid)
+    pcall(fs.remove_all, cache.root)
+    fs.create_directories(cache.root)
+    local chmod_ok = os.execute("chmod 700 -- " .. _shell_quote(cache.root))
+    if chmod_ok ~= true and chmod_ok ~= 0 then pcall(fs.remove_all, cache.root); return false end
+    if not _copy_tree(collection, cache.collection)
+        or m_utils.write_file(cache.stamp, tostring(os.time()) .. "\n") == false then
+        pcall(fs.remove_all, cache.root)
+        return false
+    end
+    os.execute("chmod -R go-rwx -- " .. _shell_quote(cache.root))
+    return true
+end
+
+local function _cleanup_stale_drafts()
+    local now = os.time()
+    for session, state in pairs(DRAFT_STATE) do
+        if now - (tonumber(state.started_at) or now) > DRAFT_TTL_SECONDS then
+            local job = _draft_job_paths(state.appid, session)
+            if job then
+                pcall(m_utils.write_file, job.stop, "cancel\n")
+                pcall(fs.remove_all, job.root)
+            end
+            DRAFT_STATE[session] = nil
+            DRAFT_FINALIZING[session] = nil
+        end
+    end
+    local base = utils.ensure_temp_download_dir()
+    local command = "find " .. _shell_quote(base)
+        .. " -mindepth 1 -maxdepth 1 -type d -name 'draft_*' -mmin +120"
+        .. " -exec rm -rf -- {} + 2>/dev/null"
+    pcall(os.execute, command)
+end
+
+function downloads.start_game_draft(appid)
+    appid = _positive_appid(appid)
+    if not appid then return { success = false, error = "Invalid appid" } end
+    _cleanup_stale_drafts()
+    local records, records_error = _smart_records_for_app(appid)
+    if not records then return { success = false, error = records_error } end
+
+    local session = string.format("%x%x", os.time(), math.random(0x100000, 0xffffff))
+    local job = _draft_job_paths(appid, session)
+    local ok, launch_error = pcall(function()
+        fs.create_directories(job.root)
+        local chmod_ok = os.execute("chmod 700 -- " .. _shell_quote(job.root))
+        if chmod_ok ~= true and chmod_ok ~= 0 then
+            error("Could not protect draft directory")
+        end
+        if m_utils.write_file(job.candidates, table.concat(records)) == false then
+            error("Could not prepare source list")
+        end
+        os.execute("chmod 600 -- " .. _shell_quote(job.candidates))
+        if not _write_coverage(appid, job.coverage) then error("Could not prepare depot coverage") end
+        os.execute("chmod 600 -- " .. _shell_quote(job.coverage))
+        if not _atomic_write(job.state, '{"status":"downloading"}\n') then
+            error("Could not create draft state")
+        end
+        DRAFT_STATE[session] = {
+            appid = appid, status = "downloading", bytesRead = 0, totalBytes = 0,
+            started_at = os.time(),
+        }
+        local cache = _valid_draft_cache(appid)
+        if cache and _copy_tree(cache.collection, job.collection) then
+            DRAFT_STATE[session].status = "collected"
+            _atomic_write(job.state, '{"status":"collected","currentApi":"Cached sources"}\n')
+        else
+            _launch_smart_download(appid, job.candidates, job.coverage,
+                job.root, job.state, job.stop)
+        end
+    end)
+    if not ok then
+        pcall(fs.remove_all, job.root)
+        DRAFT_STATE[session] = nil
+        return { success = false, error = tostring(launch_error) }
+    end
+    logger.log("LuaTools: draft collection started appid=" .. tostring(appid)
+        .. " session=" .. session)
+    return { success = true, appid = appid, session = session }
+end
+
+function downloads.get_game_draft_status(appid, session)
+    appid = _positive_appid(appid)
+    local job = appid and _draft_job_paths(appid, session) or nil
+    local memory = type(session) == "string" and DRAFT_STATE[session] or nil
+    if not job or (memory and memory.appid ~= appid) then
+        return { success = false, error = "Invalid draft session" }
+    end
+    if fs.exists(job.state) then
+        local raw = m_utils.read_file(job.state)
+        local ok, data = pcall(cjson.decode, raw or "")
+        if ok and type(data) == "table" and data.status then
+            memory = memory or { appid = appid }
+            DRAFT_STATE[session] = memory
+            memory.status = data.status
+            memory.error = data.error
+            memory.errorCode = data.errorCode
+            memory.bytesRead = data.bytesRead
+            memory.totalBytes = data.totalBytes
+            memory.currentApi = data.currentApi
+            if (data.status == "collected" or data.status == "ready")
+                and not memory.draft and not DRAFT_FINALIZING[session] then
+                DRAFT_FINALIZING[session] = true
+                _atomic_write(job.state, '{"status":"processing"}\n')
+                memory.status = "processing"
+                local preview, preview_error = smart_merge.preview(
+                    appid, job.collection, _merge_options(appid))
+                DRAFT_FINALIZING[session] = nil
+                if preview then
+                    _save_draft_cache(appid, job.collection)
+                    memory.status = "ready"
+                    memory.draft = _draft_public_model(preview)
+                    _atomic_write(job.state, '{"status":"ready"}\n')
+                else
+                    memory.status = "failed"
+                    memory.error = tostring(preview_error)
+                    memory.errorCode = "invalid_game_data"
+                    _atomic_write(job.state, cjson.encode({
+                        status = "failed", error = memory.error,
+                        errorCode = memory.errorCode, errorPhase = "validate",
+                    }) .. "\n")
+                end
+            end
+        end
+    end
+    if not memory then return { success = false, error = "Unknown or expired draft" } end
+    return { success = true, state = _copy_table(memory) }
+end
+
+function downloads.commit_game_draft(appid, session, edits)
+    appid = _positive_appid(appid)
+    local job = appid and _draft_job_paths(appid, session) or nil
+    local memory = type(session) == "string" and DRAFT_STATE[session] or nil
+    if not job or not memory or memory.appid ~= appid then
+        return { success = false, error = "Draft is not ready" }
+    end
+    -- Publication may succeed before Lumen synchronizes ManifestPins. Keep the
+    -- final response available so a retry never republishes or loses the Lua.
+    if memory.status == "committed" and memory.result then
+        return _copy_table(memory.result)
+    end
+    if memory.status ~= "ready" then return { success = false, error = "Draft is not ready" } end
+    local result, commit_error = smart_merge.commit(
+        appid, job.collection, edits, _merge_options(appid, true))
+    if not result then return { success = false, error = tostring(commit_error) } end
+    local response = {
+        success = true, appid = appid, lua = result.lua_text,
+        contributors = result.contributors or {}, manifestCount = result.manifest_count or 0,
+        pinsSynced = result.pins_synced == true,
+    }
+    memory.status = "committed"
+    memory.result = response
+    -- The binary collection is no longer needed, but retain the tiny in-memory
+    -- result until CancelGameDraft finalizes the distributed frontend flow.
+    pcall(fs.remove_all, job.root)
+    logger.log("LuaTools: draft committed appid=" .. tostring(appid)
+        .. " manifests=" .. tostring(result.manifest_count or 0))
+    return response
+end
+
+function downloads.cancel_game_draft(appid, session)
+    appid = _positive_appid(appid)
+    local job = appid and _draft_job_paths(appid, session) or nil
+    local memory = type(session) == "string" and DRAFT_STATE[session] or nil
+    if not job or (memory and memory.appid ~= appid) then
+        return { success = false, error = "Invalid draft session" }
+    end
+    if memory and (memory.status == "ready" or memory.status == "failed"
+        or memory.status == "cancelled" or memory.status == "committed") then
+        DRAFT_STATE[session] = nil
+        pcall(fs.remove_all, job.root)
+    else
+        pcall(m_utils.write_file, job.stop, "cancel\n")
+        _atomic_write(job.state,
+            '{"status":"cancelled","errorCode":"cancelled","errorPhase":"download"}\n')
+        if memory then memory.status = "cancelled" end
+    end
+    return { success = true }
 end
 
 function downloads.cancel_add(appid)

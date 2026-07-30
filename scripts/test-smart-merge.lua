@@ -27,6 +27,18 @@ check("parser normalizes keyed addappid", parsed.keys[11] == K1)
 check("parser ignores commented declaration", parsed.keys[12] == nil)
 check("parser keeps manifest reference", parsed.manifests[11] == "9001")
 
+local long_blocks = merge.parse_lua('--[[\naddappid(20)\naddappid(21,1,"' .. K2
+  .. '")\n]]\n[=[\naddappid(22)\nsetManifestid(21,"9002")\n]=]\n')
+check("parser ignores declarations in multiline comments", long_blocks.bare[20] == nil
+  and long_blocks.keys[21] == nil)
+check("parser ignores declarations in multiline strings", long_blocks.bare[22] == nil
+  and long_blocks.manifests[21] == nil)
+local after_blocks = merge.parse_lua('--[=[ ignored\naddappid(99)\n]=] addappid(23)\n'
+  .. '[==[addappid(98)]==] addappid(24)\n')
+check("parser resumes after long-block terminators", after_blocks.bare[23] == true
+  and after_blocks.bare[24] == true and after_blocks.bare[99] == nil
+  and after_blocks.bare[98] == nil)
+
 local sources = {
   { index = 2, priority = 2, name = "Sushi", lua_text =
       'addappid(10)\naddappid(11,1,"' .. K2 .. '")\n' },
@@ -59,6 +71,37 @@ check("emission starts with base app grant", emitted:match("^addappid%(10%)\n") 
 check("emission contains merged depot key", emitted:find('addappid(12, 1, "' .. K3 .. '")', 1, true) ~= nil)
 check("emission drops arbitrary source Lua", emitted:find("print", 1, true) == nil)
 
+local edited, edited_error = merge.build_edited_lua(10, {
+  dlc_appids = { "1200", 1300, 1200 },
+  depots = {
+    { depot = "11", key = K1, gid = "9001" },
+    { depot = 12, key = K2, gid = "" },
+  },
+}, {})
+check("edited draft accepts masked-field values without replacing the key",
+  edited_error == nil and edited:find(K1, 1, true) ~= nil)
+check("edited draft emits DLC declarations", edited:find("addappid(1200)", 1, true) ~= nil
+  and edited:find("addappid(1300)", 1, true) ~= nil)
+check("blank manifest means latest", edited:find("setManifestid(12", 1, true) == nil)
+check("explicit manifest remains pinned",
+  edited:find('setManifestid(11, "9001")', 1, true) ~= nil)
+local invalid_edited = merge.build_edited_lua(10, {
+  depots = { { depot = 11, key = "******", gid = "9001" } },
+}, {})
+check("masked display placeholder is never persisted as a key", invalid_edited == nil)
+local overflow_edited = merge.build_edited_lua(10, {
+  depots = { { depot = 11, key = K1, gid = "18446744073709551616" } },
+}, {})
+check("edited draft rejects a manifest gid above uint64", overflow_edited == nil)
+local dlc_key_only_edited, dlc_key_only_error = merge.build_edited_lua(10, {
+  depots = {
+    { depot = 11, key = "", gid = "" },
+    { depot = 12, key = K2, gid = "" },
+  },
+}, { base_depots = { 11 } })
+check("edited draft still requires a usable base-depot key",
+  dlc_key_only_edited == nil and dlc_key_only_error == "no_usable_base_key")
+
 local appinfo = '"appinfo" { "depots" {'
   .. ' "11" { "config" { "oslist" "windows" }'
   .. ' "manifests" { "public" { "gid" "9001" } } }'
@@ -67,7 +110,7 @@ local appinfo = '"appinfo" { "depots" {'
   .. ' "1201" { "dlcappid" "1201" }'
   .. ' "13" { "config" { "oslist" "macos" }'
   .. ' "manifests" { "public" { "gid" "9003" } } }'
-  .. ' } }'
+  .. ' } "extended" { "listofdlc" "1200,1201,1300" } }'
 local depots = assert(merge.parse_appinfo_depots(appinfo))
 check("appinfo classifies relevant base depot", depots[11]
   and depots[11].kind == "base" and depots[11].relevant == true)
@@ -77,6 +120,9 @@ check("appinfo classifies virtual DLC without requiring a key", depots[1201]
   and depots[1201].kind == "virtual_dlc")
 check("appinfo excludes macOS-only depot from Linux viability", depots[13]
   and depots[13].relevant == false)
+local official_dlcs = merge.parse_appinfo_dlc_appids(appinfo)
+check("appinfo combines depot and declared DLC appids", official_dlcs[1200]
+  and official_dlcs[1201] and official_dlcs[1300])
 
 local base_only = assert(merge.evaluate_sources(10, {
   { index = 0, priority = 0, name = "Base", lua_text =
@@ -154,6 +200,9 @@ local bad, bad_error = merge.parse_manifest("broken", 11, BIG_GID)
 check("manifest parser rejects bad magic", bad == nil and bad_error ~= nil)
 local mismatch = merge.parse_manifest(valid_manifest(12, BIG_GID, 1700000000), 11, BIG_GID)
 check("manifest parser rejects filename metadata mismatch", mismatch == nil)
+local overflow_manifest = merge.parse_manifest(
+  valid_manifest(11, "18446744073709551616", 1700000000))
+check("manifest parser rejects a gid above uint64", overflow_manifest == nil)
 
 local preferred = merge.select_preferred({
   { depot = 11, gid = "100", creation_time = 200, priority = 0 },
@@ -165,6 +214,37 @@ local newest = merge.select_preferred({
   { depot = 11, gid = "2", creation_time = 200, priority = 2 },
 }, {})
 check("creation metadata outranks numeric gid", newest[11] == "2")
+
+local preview_files = {
+  ["/collection/source_0000/.source-name"] = "Ryuu",
+  ["/collection/source_0000/.source-priority"] = "0\n",
+  ["/collection/source_0000/10.lua"] = 'addappid(10)\naddappid(11,1,"' .. K1 .. '")\n',
+  ["/collection/source_0000/11_100.manifest"] = valid_manifest(11, "100", 200),
+}
+local preview_entries = {}
+for path in pairs(preview_files) do
+  preview_entries[#preview_entries + 1] = {
+    path = path, name = path:match("[^/]+$"), is_directory = false,
+  }
+end
+local preview = assert(merge.preview(10, "/collection", {
+  home = "/tmp/preview-home",
+  appinfo_text = appinfo,
+  list_recursive = function() return preview_entries end,
+  read_file = function(path) return preview_files[path] end,
+  exists = function() return false end,
+}))
+local preview_dlcs = {}
+for _, id in ipairs(preview.dlc_appids) do preview_dlcs[id] = true end
+check("preview includes official DLCs omitted by a source Lua", preview_dlcs[1200]
+  and preview_dlcs[1201] and preview_dlcs[1300])
+local preview_rows = {}
+for _, row in ipairs(preview.depots) do preview_rows[row.depot] = row end
+check("preview surfaces virtual DLC without a content key", preview_rows[1201]
+  and preview_rows[1201].kind == "virtual_dlc"
+  and preview_rows[1201].key == "" and preview_rows[1201].requires_key == false)
+check("preview reports the source that provided a ManifestID", preview_rows[11]
+  and preview_rows[11].manifest_source == "Ryuu")
 
 if fails == 0 then
   print("\nALL TESTS OK")
