@@ -23,6 +23,12 @@
 #    machine. Person-identifying data is masked (home/username, Steam account
 #    id, SteamID64, email, IPv4, Steam CM region); technically useful, non-PII
 #    fields (appids, depot ids, manifest gids, build ids, hashes) are kept.
+#    Exception: Steam crash minidumps (/tmp/dumps/*.dmp, staged under
+#    steam-dumps/, newest few, size-capped) are binary memory snapshots —
+#    byte-shifting sed substitutions would corrupt their internal offsets, so
+#    they are archived AS-IS and may hold arbitrary Steam process memory. The
+#    per-user *_stdout.txt companion IS scrubbed and renamed to stdout.txt
+#    (its original filename embeds the Linux username).
 #  - Secrets are NEVER collected: OAuth tokens in ~/.config/CloudRedirect, the
 #    Lumen per-boot RPC token (session.json), etc. Only explicit log files are
 #    read.
@@ -112,6 +118,15 @@ validate_paste_url() {
 # ----------------------------------------------------------------------------
 DIAG_CEF_CAP="${DIAG_CEF_CAP:-262144}"   # tail cap for cef_log (Chromium noise)
 DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-94371840}" # 90 MiB safety ceiling; catbox/uguu handle large files, so logs stay complete
+
+# Crash-dump bounds: stage at most the newest DIAG_DUMP_MAX minidumps, each at
+# most DIAG_DUMP_MAX_BYTES (12 MiB), so a bundle can't blow past the safety
+# ceiling on dumps alone (worst case ~48 MiB + capped logs < 90 MiB).
+DIAG_DUMP_MAX="${DIAG_DUMP_MAX:-4}"
+DIAG_DUMP_MAX_BYTES="${DIAG_DUMP_MAX_BYTES:-12582912}"
+# ':'-separated dump search dirs (Steam writes crash minidumps to /tmp/dumps;
+# overridable so the staging logic is unit-testable with fixtures).
+DIAG_DUMP_DIRS="${DIAG_DUMP_DIRS:-/tmp/dumps:/var/tmp/dumps}"
 
 # Resolve the Steam root (layout-independent): prefer the bootstrapped
 # ~/.steam/steam symlink, else known per-distro data dirs. Echoes "" if none.
@@ -254,6 +269,51 @@ collect() {
 			_stage_file "$stage" "steam-logs/$base" "$f" "$fcap"
 		done
 	fi
+
+	# Steam crash minidumps (/tmp/dumps — breakpad naming: crash_*.dmp for hard
+	# crashes, assert_*.dmp for assertion failures). Archived AS-IS (binary;
+	# scrubbing would corrupt them), newest DIAG_DUMP_MAX only, each truncated
+	# to DIAG_DUMP_MAX_BYTES. Any *.dmp.upload is an unsent crash report in a
+	# breakpad uploader envelope; stripping its header yields a plain .dmp.
+	local d u i f b
+	local IFS_SAVE="$IFS" IFS=':'
+	# shellcheck disable=SC2086
+	local dumps_found=0
+	for d in $DIAG_DUMP_DIRS; do
+		IFS="$IFS_SAVE"
+		[ -d "$d" ] || continue
+		u="$stage/steam-dumps/$(basename "$d")"
+		mkdir -p "$u" || continue
+		i=0
+		# Newest first by mtime (find -printf %T@, sorted descending).
+		while IFS= read -r f; do
+			[ -f "$f" ] || continue
+			b="$(basename "$f")"
+			case "$b" in
+				*.dmp)
+					# Oversized dumps: keep the tail — minidump data is end-weighted.
+					if [ "$(wc -c < "$f" 2>/dev/null || echo 0)" -gt "$DIAG_DUMP_MAX_BYTES" ]; then
+						tail -c "$DIAG_DUMP_MAX_BYTES" "$f" 2>/dev/null > "$u/$b"
+					else
+						cp -- "$f" "$u/$b" 2>/dev/null
+					fi
+					;;
+				*.dmp.upload)
+					# Drop the 8-byte breakpad upload header ('0' + little-endian size), cap the rest.
+					dd if="$f" of="$u/${b%.upload}" bs=1 skip=8 count="$DIAG_DUMP_MAX_BYTES" 2>/dev/null || true
+					;;
+				*_stdout.txt)
+					# Basename embeds the Linux username — stage as a constant name, scrubbed.
+					_stage_file "$u" "stdout.txt" "$f" "$cap"
+					;;
+			esac
+			dumps_found=$((dumps_found+1))
+			i=$((i+1))
+			[ "$i" -ge "$DIAG_DUMP_MAX" ] && break
+		done < <(find "$d" -maxdepth 1 -type f \( -name '*.dmp' -o -name '*.dmp.upload' -o -name '*_stdout.txt' \) -printf '%T@ %p\n' 2>/dev/null | sort -rn | cut -d' ' -f2-)
+	done
+	# Surface dump availability in the summary so it's visible without unpacking.
+	printf 'crash_dumps: %d file(s) staged under steam-dumps/\n' "$dumps_found" >> "$stage/summary.txt"
 
 	# Millennium line (fallback branch) — best-effort glob of its log dirs.
 	local g

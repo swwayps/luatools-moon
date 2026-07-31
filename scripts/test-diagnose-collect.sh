@@ -46,6 +46,24 @@ printf '[lumen] connected 76561198448416042 from 203.0.113.99\n' \
 printf '[2026-06-22 18:20:10] AppID 3525970 commit common/Horripilant\n' \
 	> "$FAKE/.local/share/Steam/logs/content_log.txt"
 printf '[CR] DoInit ok\n' > "$FAKE/.config/CloudRedirect/cr_debug.log"
+# fake breakpad dump dir: 6 .dmp files (must be capped to the newest 4), one
+# unsent *.dmp.upload (8-byte envelope stripped to a plain .dmp), and a
+# <user>_stdout.txt staged as stdout.txt with the username scrubbed.
+mkdir -p "$FAKE/dumps"
+for n in 1 2 3 4 5 6; do
+	printf 'MDMP-fake-%d\x00\x01\x02' "$n" > "$FAKE/dumps/crash_2025070${n}_120000_1000.dmp"
+done
+printf 'panic at /home/diaguser/steam diaguser 203.0.113.99\n' \
+	> "$FAKE/dumps/diaguser_stdout.txt"
+printf '0\x00\x00\x00\x00\x00\x00\x00MDMP-envelope-payload' \
+	> "$FAKE/dumps/crash_20250707_130000_1000.dmp.upload"
+# make mtimes strictly increasing so "newest 4" is deterministic (n=3..6 + upload)
+for n in 1 2 3 4 5 6; do
+	touch -d "2025-07-0$n 12:00:00" "$FAKE/dumps/crash_2025070${n}_120000_1000.dmp"
+done
+touch -d "2025-07-07 13:00:00" "$FAKE/dumps/diaguser_stdout.txt"
+touch -d "2025-07-07 12:00:00" "$FAKE/dumps/crash_20250707_130000_1000.dmp.upload"
+export DIAG_DUMP_DIRS="$FAKE/dumps"
 # a big, noisy cef_log that must be tail-capped (not archived whole)
 head -c 2000000 /dev/zero | tr '\0' 'x' > "$FAKE/.local/share/Steam/logs/cef_log.txt"
 # .desktop launchers (show the LD_AUDIT wrapper Exec line). Several *steam*
@@ -83,6 +101,23 @@ echo "$entries" | grep -q 'lumen\.log'                ; check "contains lumen.lo
 echo "$entries" | grep -q 'steam-logs/content_log\.txt'; check "contains steam content_log" $?
 echo "$entries" | grep -q 'cloudredirect-cr_debug\.log'; check "contains cloudredirect log" $?
 echo "$entries" | grep -q 'steam-desktops\.txt'; check "contains steam-desktops.txt" $?
+echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250706_120000_1000\.dmp'; check "contains newest crash dump" $?
+echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250705_120000_1000\.dmp'; check "contains 4th-newest dump (slot 4 of 4)" $?
+if echo "$entries" | grep -q 'steam-dumps/dumps/crash_2025070[1-4]_120000_1000\.dmp'; then check "dump cap: 5th+ newest excluded" 1
+else check "dump cap: 5th+ newest excluded" 0; fi
+echo "$entries" | grep -q 'steam-dumps/dumps/stdout\.txt';    check "contains renamed dump stdout.txt" $?
+# envelope-stripped .dmp.upload lands as its plain .dmp name; the original
+# .upload name must not appear.
+echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250707_130000_1000\.dmp$'; check "envelope-stripped .dmp.upload -> .dmp" $?
+if echo "$entries" | grep -q '\.dmp\.upload'; then check "no raw .dmp.upload in bundle" 1
+else check "no raw .dmp.upload in bundle" 0; fi
+# oldest two .dmp files must be excluded (cap = 4, but upload+stdout consume
+# slots first since they're newer — assert the cap actually dropped files).
+if echo "$entries" | grep -q 'crash_20250701_120000_1000\.dmp'; then check "dump count cap drops oldest" 1
+else check "dump count cap drops oldest" 0; fi
+# the username-bearing filename must not survive
+if echo "$entries" | grep -q 'diaguser_stdout'; then check "no username in dump stdout filename" 1
+else check "no username in dump stdout filename" 0; fi
 
 # secrets must be absent from the listing
 if echo "$entries" | grep -qiE 'token|session\.json'; then check "no credential files in bundle" 1
@@ -90,7 +125,10 @@ else check "no credential files in bundle" 0; fi
 
 # ── extract and inspect content ─────────────────────────────────────────────
 mkdir -p "$EXTRACT"; tar -xzf "$TAR" -C "$EXTRACT" 2>/dev/null
-blob="$(cat "$EXTRACT"/* "$EXTRACT"/steam-logs/* 2>/dev/null)"
+blob="$(cat "$EXTRACT"/* "$EXTRACT"/steam-logs/* "$EXTRACT"/steam-dumps/dumps/*_stdout.txt 2>/dev/null)"
+# NB: the .dmp minidumps are binary and archived AS-IS by design — they are
+# deliberately excluded from the scrub-leak sweep above (byte-shifting sed
+# edits would corrupt them; see the header note in diagnose.sh).
 
 # NB: use a here-string, not `printf | grep -q`. Sourcing diagnose.sh turns on
 # `pipefail`; with -q grep short-circuits on an early match and SIGPIPEs the
@@ -106,6 +144,18 @@ no_leak "no CM region leak"    'atl3.steamserver'
 no_leak "no OAuth token leak"  'SUPER_SECRET_OAUTH'
 no_leak "no RPC token leak"    'LUMEN_RPC_SECRET'
 no_leak "no .desktop home leak" 'diaguser'
+# dump stdout specifically: username, home and IP scrubbed, content kept
+dumpout="$(cat "$EXTRACT/steam-dumps/dumps/stdout.txt" 2>/dev/null)"
+in_dumpout()  { if grep -qF "$2" <<<"$dumpout"; then check "$1" 0; else check "$1" 1; fi; }
+out_dumpout() { if grep -qF "$2" <<<"$dumpout"; then check "$1" 1; else check "$1" 0; fi; }
+in_dumpout  "dump stdout keeps message"  'panic at'
+in_dumpout  "dump stdout home scrubbed"  '/home/USER/steam'
+out_dumpout "dump stdout no raw username in body" 'weeb/steam diaguser'
+out_dumpout "dump stdout no raw IP"      '203.0.113.99'
+# envelope strip actually removed the 8-byte header
+grep -qF 'MDMP-envelope-payload' "$EXTRACT/steam-dumps/dumps/crash_20250707_130000_1000.dmp" 2>/dev/null; check "stripped dump keeps payload" $?
+if head -c 4 "$EXTRACT/steam-dumps/dumps/crash_20250707_130000_1000.dmp" 2>/dev/null | grep -q '^MDMP'; then check "stripped dump starts at payload" 0
+else check "stripped dump starts at payload" 1; fi
 keeps   "keeps .desktop exec"  'SLSsteam/path/steam'
 keeps   "keeps appid"          '2830030'
 keeps   "keeps game name"      'Horripilant'
