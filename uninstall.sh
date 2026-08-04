@@ -359,10 +359,21 @@ heal_steam_launcher() {
 		_heal_depatch "$sys_app" "$sudo_cmd"
 	fi
 
-	# (b) Nothing left anywhere -> recreate a minimal, vanilla user entry.
-	if [ ! -f "$user_app" ] && [ ! -f "$sys_app" ]; then
-		log_step "$(L "No Steam launcher survived restoration; recreating a minimal one" \
-		             "Nenhum lançador da Steam sobreviveu à restauração; recriando um mínimo")"
+	# (b) No working launcher survived: the user entry is missing AND the
+	# system entry is either absent or still references our (deleted) wrapper
+	# (e.g. sudo was unavailable to heal it). Seed a minimal vanilla user entry
+	# so the menu/taskbar always launches the system Steam binary. A same-ID
+	# user entry shadows a broken system one, so this fixes KDE even when we
+	# could not de-patch /usr/share/applications/steam.desktop.
+	local need_seed=0
+	if [ ! -f "$user_app" ]; then
+		if [ ! -f "$sys_app" ] || grep -q "SLSsteam" "$sys_app" 2>/dev/null; then
+			need_seed=1
+		fi
+	fi
+	if [ "$need_seed" = 1 ]; then
+		log_step "$(L "No working Steam launcher survived; recreating a minimal one" \
+		             "Nenhum lançador da Steam utilizável sobreviveu; recriando um mínimo")"
 		mkdir -p "$(dirname "$user_app")" 2>/dev/null || return 0
 		cat > "$user_app" <<'EOF'
 [Desktop Entry]
@@ -378,6 +389,65 @@ PrefersNonDefaultGPU=true
 EOF
 		chmod 0644 "$user_app" 2>/dev/null || true
 	fi
+}
+
+# ============================================================================
+# Restore wrapped system launchers (/usr/bin/steam, /usr/games/steam, …)
+# ============================================================================
+# setup.sh replaces these package-manager-owned launcher scripts with a thin
+# shim that delegates to our wrapper, backing the originals up inside
+# ~/.local/share/SLSsteam/system-launcher-backup/. We MUST put them back
+# BEFORE deleting that directory — otherwise the shim's fallback
+# `exec "$backup"` aims at a file that no longer exists and every Steam launch
+# (menu, taskbar, and `/usr/bin/steam` itself) fails. Mirrors
+# setup.sh::restore_system_launchers.
+SLSM_LAUNCHER_TAG="# slsteam-moon system launcher shim"
+
+is_our_launcher_shim() {
+	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -q "$SLSM_LAUNCHER_TAG"
+}
+
+restore_system_launchers() {
+	if is_immutable_distro; then
+		return 0
+	fi
+
+	local backup_dir="$HOME/.local/share/SLSsteam/system-launcher-backup"
+	[ -d "$backup_dir" ] || return 0
+
+	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+
+	local backup
+	for backup in "$backup_dir"/*.orig; do
+		[ -f "$backup" ] || continue
+		local base orig_path="" p
+		base="$(basename -- "$backup" .orig)"
+		for p in "/usr/bin/$base" "/usr/games/$base" "/usr/local/bin/$base"; do
+			[ -f "$p" ] && { orig_path="$p"; break; }
+		done
+		[ -n "$orig_path" ] || continue
+
+		if is_our_launcher_shim "$orig_path"; then
+			if [ -n "$sudo_cmd" ]; then
+				log_step "$(L "Restoring system launcher $orig_path" \
+				             "Restaurando lançador de sistema $orig_path")"
+				if $sudo_cmd cp -- "$backup" "$orig_path" 2>/dev/null \
+				   && $sudo_cmd chmod 0755 "$orig_path" 2>/dev/null; then
+					log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+				else
+					log_warn "$(L "Could not restore $orig_path (sudo failed); restore manually from $backup" \
+					           "Não foi possível restaurar $orig_path (sudo falhou); restaure manualmente a partir de $backup")"
+				fi
+			elif [ -w "$orig_path" ]; then
+				cp -- "$backup" "$orig_path" 2>/dev/null || true
+				chmod 0755 "$orig_path" 2>/dev/null || true
+				log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+			else
+				log_warn "$(L "Cannot restore $orig_path (no sudo); manual restore needed from $backup" \
+				           "Não foi possível restaurar $orig_path (sem sudo); restaure manualmente a partir de $backup")"
+			fi
+		fi
+	done
 }
 
 # ============================================================================
@@ -429,13 +499,19 @@ uninstall_slsteam_moon() {
 		coverage_restored=1
 	fi
 
-	# Compatibility fallback for an incomplete/old SLSsteam installation whose
-	# helper is missing. These still consume the same central backup paths.
-	if [ "$coverage_restored" = 0 ]; then
-		restore_or_remove_desktop "$USER_DESKTOP"
-		local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
-		restore_or_remove_desktop "$autostart"
-	fi
+	# Backstop: restore the user-owned desktop entries from their central backup
+	# REGARDLESS of whether the coverage helper ran. dc_restore_all restores the
+	# SYSTEM layer first and bails (return 2) on any system-side failure (e.g.
+	# sudo unavailable for /usr/share/applications/steam.desktop) BEFORE it ever
+	# touches the user layer — which needs no sudo at all. When that happens the
+	# user backups at ~/.local/share/SLSsteam/backup would otherwise sit unused
+	# until `rm -rf` deletes them, exactly the "saved a backup it never uses"
+	# failure. This pass closes that gap. It is a harmless no-op when
+	# dc_restore_all already restored the user entries (the backup is gone and
+	# the file no longer carries our tag), so running it unconditionally is safe.
+	restore_or_remove_desktop "$USER_DESKTOP"
+	local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
+	restore_or_remove_desktop "$autostart"
 	if command -v update-desktop-database >/dev/null 2>&1; then
 		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 	fi
@@ -487,6 +563,13 @@ uninstall_slsteam_moon() {
 	elif command -v kbuildsycoca5 >/dev/null 2>&1; then
 		kbuildsycoca5 --noincremental >/dev/null 2>&1 || true
 	fi
+
+	# Restore any wrapped system launchers (/usr/bin/steam, /usr/games/steam,
+	# /usr/local/bin/steam) from their backups BEFORE removing the SLSsteam dir.
+	# setup.sh installs a shim that falls back to `exec "$backup"`, and that
+	# backup lives inside the directory we are about to delete — so restoring
+	# first is what keeps `/usr/bin/steam` working afterwards.
+	restore_system_launchers
 
 	# Binaries + wrapper.
 	if [ -d "$HOME/.local/share/SLSsteam" ]; then
