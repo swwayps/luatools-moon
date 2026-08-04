@@ -1161,7 +1161,7 @@ cleanup_previous_install() {
 		# setup.sh owns the desktop backup lifecycle. Preserve only that directory
 		# while replacing old binaries/wrapper; no .desktop is read or changed here.
 		find "$HOME/.local/share/SLSsteam" -mindepth 1 -maxdepth 1 \
-			! -name backup -exec rm -rf -- {} + 2>/dev/null || true
+			! -name backup ! -name system-launcher-backup -exec rm -rf -- {} + 2>/dev/null || true
 	fi
 
 	# --- Arch: system slssteam package conflicts with the local install ---
