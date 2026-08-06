@@ -8,6 +8,9 @@
 # must guarantee a working steam.desktop survives.
 set -u
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
+# The uninstaller resolves the XDG layers itself. Pin every test to $HOME so a
+# developer's own XDG_* settings cannot steer these assertions.
+unset XDG_DATA_HOME XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_DIRS XDG_CONFIG_DIRS
 SLSPLUGIN_LIB_ONLY=1 . "$HERE/uninstall.sh"
 fail=0
 ck(){ if [ "$2" = "$3" ]; then echo "ok   - $1"; else echo "FAIL - $1 (want [$2] got [$3])"; fail=1; fi; }

@@ -269,6 +269,298 @@ restore_steam_sh() {
 }
 
 # ============================================================================
+# Effective XDG locations, resolved WITHOUT the coverage library.
+# ============================================================================
+# The library's dc_config_home/dc_desktop_dir are only reachable while
+# ~/.local/share/SLSsteam still holds desktop-coverage.lib.sh. This uninstaller
+# needs the very same paths on its own, because the desktop shortcut is the one
+# patched entry the user actually clicks, and on a localized session it is NOT
+# ~/Desktop (pt_BR: "Área de trabalho"). Keep these in sync with the library.
+uninstall_config_home() {
+	case "${XDG_CONFIG_HOME:-}" in
+		/*) printf '%s\n' "$XDG_CONFIG_HOME" ;;
+		*) printf '%s\n' "$HOME/.config" ;;
+	esac
+}
+
+uninstall_data_home() {
+	case "${XDG_DATA_HOME:-}" in
+		/*) printf '%s\n' "$XDG_DATA_HOME" ;;
+		*) printf '%s\n' "$HOME/.local/share" ;;
+	esac
+}
+
+uninstall_state_home() {
+	case "${XDG_STATE_HOME:-}" in
+		/*) printf '%s\n' "$XDG_STATE_HOME" ;;
+		*) printf '%s\n' "$HOME/.local/state" ;;
+	esac
+}
+
+# Mirrors dc_desktop_dir: honour XDG_DESKTOP_DIR from user-dirs.dirs without
+# sourcing that file. Only literal absolute paths and the standard $HOME
+# prefixes are accepted; anything else keeps the ~/Desktop default.
+uninstall_desktop_dir() {
+	local d="$HOME/Desktop" file line value
+	file="$(uninstall_config_home)/user-dirs.dirs"
+	[ -f "$file" ] || { printf '%s\n' "$d"; return; }
+	while IFS= read -r line || [ -n "$line" ]; do
+		case "$line" in
+			XDG_DESKTOP_DIR=\"*\") value="${line#XDG_DESKTOP_DIR=\"}"; value="${value%\"}" ;;
+			*) continue ;;
+		esac
+		case "$value" in
+			'$HOME') d="$HOME" ;;
+			'$HOME/'*) d="$HOME/${value#\$HOME/}" ;;
+			'${HOME}') d="$HOME" ;;
+			'${HOME}/'*) d="$HOME/${value#\$\{HOME\}/}" ;;
+			/*) d="$value" ;;
+		esac
+		break
+	done < "$file"
+	printf '%s\n' "$d"
+}
+
+# A desktop file by extension, matched case-insensitively (an entry may be
+# Steam.desktop / STEAM.DESKTOP).
+#
+# Deliberately NOT a *steam*.desktop name filter. setup.sh and the guardian
+# classify by Exec CONTENT, so they also patch Steam's per-game shortcuts —
+# "Gang Beasts.desktop", "Mina the Hollower.desktop" — whose Exec is
+# `steam steam://rungameid/<id>`. A name-based sweep skipped exactly those and
+# left them pointing at the deleted wrapper. Selection is left to
+# restore_or_remove_desktop, which acts only on an entry that references our
+# tree or that we hold a backup for.
+is_desktop_file_name() {
+	local name
+	name="$(basename -- "$1" | tr '[:upper:]' '[:lower:]')"
+	case "$name" in *.desktop) return 0 ;; *) return 1 ;; esac
+}
+
+# ============================================================================
+# Ask for sudo ONCE, visibly, and only when something outside $HOME really
+# needs restoring.
+# ============================================================================
+# Every privileged call below silences stderr, so an unprimed or denied sudo
+# used to degrade the restoration invisibly: no prompt, no warning, and a
+# system entry left pointing at the deleted wrapper. Priming up front turns
+# that into either a real prompt or an explicit warning.
+SLSM_SUDO_PRIMED=0
+# Latched once a prime attempt is refused, so "ask once" really means once. Every
+# later caller then degrades immediately instead of raising another prompt.
+SLSM_SUDO_DENIED=0
+
+: "${SLSM_SYS_APPS:=/usr/share/applications}"
+: "${SLSM_SYS_AUTOSTART:=/etc/xdg/autostart}"
+
+# Print every system-layer entry that still references our tree. Selection is by
+# CONTENT, matching how they were patched — a *steam*.desktop glob would both
+# miss Steam's per-game shortcuts and, being case-sensitive, miss Steam.desktop.
+system_patched_desktop_entries() {
+	local dir f
+	for dir in "$SLSM_SYS_APPS" "$SLSM_SYS_AUTOSTART"; do
+		[ -d "$dir" ] || continue
+		for f in "$dir"/*; do
+			[ -f "$f" ] || continue
+			is_desktop_file_name "$f" || continue
+			grep -q "SLSsteam" "$f" 2>/dev/null || continue
+			printf '%s\n' "$f"
+		done
+	done
+}
+
+system_restore_pending() {
+	local f
+	[ -n "$(system_patched_desktop_entries)" ] && return 0
+	for f in "$HOME/.local/share/SLSsteam/system-launcher-backup"/*.orig; do
+		[ -f "$f" ] && return 0
+	done
+	if [ -f /usr/games/steam ] && grep -q "SLSsteam" /usr/games/steam 2>/dev/null; then
+		return 0
+	fi
+	[ -d /usr/lib/millennium ] && return 0
+	[ -d /usr/share/millennium ] && return 0
+	return 1
+}
+
+prime_sudo() {
+	[ "$SLSM_SUDO_PRIMED" = 1 ] && return 0
+	[ "$SLSM_SUDO_DENIED" = 1 ] && return 1
+	# Nothing outside $HOME to restore: never ask, never warn.
+	system_restore_pending || return 1
+	if is_immutable_distro; then
+		log_info "$(L "Immutable system: files outside your home directory are left untouched" \
+		             "Sistema imutável: arquivos fora da sua pasta pessoal serão mantidos")"
+		return 1
+	fi
+	if [ "$(id -u)" -eq 0 ]; then
+		SLSM_SUDO_PRIMED=1
+		return 0
+	fi
+	if ! command -v sudo >/dev/null 2>&1; then
+		log_warn "$(L "sudo is not available: files outside your home directory are left in place" \
+		             "sudo indisponível: arquivos fora da sua pasta pessoal serão mantidos")"
+		return 1
+	fi
+	if sudo -n true 2>/dev/null; then
+		SLSM_SUDO_PRIMED=1
+		return 0
+	fi
+	log_info "$(L "Files outside your home directory need to be restored — administrator password required" \
+	             "Arquivos fora da sua pasta pessoal precisam ser restaurados — senha de administrador necessária")"
+	if sudo -v; then
+		SLSM_SUDO_PRIMED=1
+		log_success "$(L "Administrator access granted" "Acesso de administrador concedido")"
+		return 0
+	fi
+	SLSM_SUDO_DENIED=1
+	log_warn "$(L "No administrator access: system-wide files are left in place. Everything in your home directory is still restored." \
+	             "Sem acesso de administrador: arquivos do sistema serão mantidos. Tudo na sua pasta pessoal continua sendo restaurado.")"
+	return 1
+}
+
+# ============================================================================
+# Disarm the desktop guardian BEFORE anything is restored.
+# ============================================================================
+# setup.sh installs three systemd --user units, and the .path unit watches
+# exactly the directories a restore writes to:
+#
+#   PathChanged=<user applications> /usr/share/applications
+#               <user autostart> /etc/xdg/autostart <XDG desktop dir>
+#
+# So restoring an entry TRIGGERS the guardian, whose entire job is to patch
+# every Steam entry back to the wrapper. On the way out it also re-creates the
+# central backups and re-installs plus re-enables its own units
+# (ensure-desktop-coverage.sh --guardian ends in dgu_install_units). Tearing
+# the units down AFTER the restore therefore loses a race it cannot win: the
+# observed end state was every entry patched again, a resurrected backup tree,
+# and both triggers back in default.target.wants/timers.target.wants.
+#
+# This runs FIRST, and is deliberately self-contained — hardcoded unit names and
+# ownership sentinels, no library. The guardian must also be removable when
+# ~/.local/share/SLSsteam is already gone or predates the library, otherwise the
+# units linger and fail 203/EXEC on every boot forever.
+SLSM_GUARDIAN_UNITS="slsteam-desktop-guardian.path
+slsteam-desktop-guardian.timer
+slsteam-desktop-guardian.service"
+SLSM_GUARDIAN_SENTINEL='# X-SLSteamMoon-GuardianUnit=true'
+SLSM_AUTOSTART_DROPIN='slsteam-guardian.conf'
+SLSM_AUTOSTART_DROPIN_SENTINEL='# X-SLSteamMoon-AutostartDropIn=true'
+# Seconds to wait for an in-flight reconciliation pass. Overridable for tests.
+: "${SLSM_GUARDIAN_WAIT:=15}"
+
+# Stopping the .path/.timer triggers does not stop the oneshot they already
+# started, and that pass may be mid-write. Wait for it to leave the active
+# state before we touch a single desktop entry.
+wait_guardian_idle() {
+	local i state
+	command -v systemctl >/dev/null 2>&1 || return 0
+	i=0
+	while [ "$i" -lt "$SLSM_GUARDIAN_WAIT" ]; do
+		state="$(systemctl --user is-active slsteam-desktop-guardian.service 2>/dev/null || true)"
+		case "$state" in
+			active|activating|reloading|deactivating) ;;
+			*) return 0 ;;
+		esac
+		[ "$i" = 0 ] && log_info "$(L "Waiting for the desktop reconciliation service to finish" \
+		                             "Aguardando o serviço de reconciliação de atalhos terminar")"
+		sleep 1
+		i=$((i + 1))
+	done
+	log_warn "$(L "The desktop reconciliation service is still running; continuing anyway" \
+	             "O serviço de reconciliação de atalhos ainda está rodando; seguindo mesmo assim")"
+	return 1
+}
+
+disarm_desktop_guardian() {
+	local slsdir="$HOME/.local/share/SLSsteam"
+	local unit_dir have_systemctl=0 unit path dropin removed=0
+	unit_dir="$(uninstall_config_home)/systemd/user"
+	command -v systemctl >/dev/null 2>&1 && have_systemctl=1
+
+	# 1. Stop the triggers, then the service, and let an in-flight pass drain.
+	if [ "$have_systemctl" = 1 ]; then
+		systemctl --user disable --now \
+			slsteam-desktop-guardian.path slsteam-desktop-guardian.timer \
+			>/dev/null 2>&1 || true
+		systemctl --user stop slsteam-desktop-guardian.service >/dev/null 2>&1 || true
+		wait_guardian_idle || true
+	fi
+
+	# 2. Neutralize the reconciliation entry point. This is the belt to systemd's
+	#    braces: with the CLI gone, any trigger we could not reach (a stale unit,
+	#    a leftover wrapper invocation) can no longer re-patch a single file.
+	#    The coverage LIBRARY stays — dc_restore_all still needs it.
+	if [ -e "$slsdir/ensure-desktop-coverage.sh" ]; then
+		log_step "$(L "Disabling desktop reconciliation before restoring" \
+		             "Desativando a reconciliação de atalhos antes de restaurar")"
+		rm -f "$slsdir/ensure-desktop-coverage.sh" 2>/dev/null || true
+		removed=1
+	fi
+
+	# 3. Drop the generated XDG-autostart drop-ins, then the unit files. Both are
+	#    sentinel-guarded, so a same-named foreign unit is always preserved.
+	for dropin in "$unit_dir"/app-*@autostart.service.d/"$SLSM_AUTOSTART_DROPIN"; do
+		[ -f "$dropin" ] || continue
+		grep -qxF "$SLSM_AUTOSTART_DROPIN_SENTINEL" "$dropin" 2>/dev/null || continue
+		rm -f -- "$dropin" 2>/dev/null || continue
+		rmdir -- "$(dirname -- "$dropin")" 2>/dev/null || true
+		removed=1
+	done
+	while IFS= read -r unit; do
+		[ -n "$unit" ] || continue
+		path="$unit_dir/$unit"
+		# Enablement symlinks: `disable` normally drops them, but it is a no-op
+		# when systemd --user is unreachable and it has nothing left to clean up
+		# once the unit file is gone. Remove ours explicitly so the next boot does
+		# not try to start a unit that no longer exists.
+		rm -f -- "$unit_dir/default.target.wants/$unit" \
+		         "$unit_dir/timers.target.wants/$unit" 2>/dev/null || true
+		[ -f "$path" ] || continue
+		if ! grep -qxF "$SLSM_GUARDIAN_SENTINEL" "$path" 2>/dev/null; then
+			log_warn "$(L "Preserving a foreign unit that shares our name: $path" \
+			             "Preservando unit de terceiros com o nosso nome: $path")"
+			continue
+		fi
+		log_step "$(L "Removing desktop reconciliation unit: $unit" \
+		             "Removendo unit de reconciliação de atalhos: $unit")"
+		if rm -f -- "$path" 2>/dev/null; then
+			removed=1
+		else
+			log_warn "$(L "Could not remove $path; remove it manually" \
+			             "Não foi possível remover $path; remova manualmente")"
+		fi
+	done <<EOF
+$SLSM_GUARDIAN_UNITS
+EOF
+	if [ "$have_systemctl" = 1 ] && [ "$removed" = 1 ]; then
+		systemctl --user daemon-reload >/dev/null 2>&1 || true
+		systemctl --user reset-failed slsteam-desktop-guardian.service >/dev/null 2>&1 || true
+	fi
+
+	# 4. Hand over to the shipped helpers when they are present, so any guardian
+	#    artifact a newer release adds is cleaned up even if this script predates
+	#    it. Purely additive: the removals above already stand on their own.
+	if [ -f "$slsdir/desktop-guardian-units.lib.sh" ] \
+	   && [ -f "$slsdir/desktop-coverage.lib.sh" ]; then
+		DC_HOME="$HOME"
+		WRAPPER="$slsdir/path/steam"
+		# shellcheck source=/dev/null
+		. "$slsdir/desktop-guardian-units.lib.sh" >/dev/null 2>&1 || true
+		if command -v dgu_remove_autostart_dropins >/dev/null 2>&1; then
+			dgu_remove_autostart_dropins >/dev/null 2>&1 || true
+		fi
+		if command -v dgu_remove_units >/dev/null 2>&1; then
+			dgu_remove_units >/dev/null 2>&1 || true
+		fi
+	fi
+
+	[ "$removed" = 1 ] && log_success "$(L "Desktop reconciliation disarmed" \
+	                                      "Reconciliação de atalhos desarmada")"
+	return 0
+}
+
+# ============================================================================
 # Restore a Steam .desktop entry that slsteam-moon's setup.sh patched. Current
 # installs mirror originals below ~/.local/share/SLSsteam/backup; the adjacent
 # suffixes are migration-only compatibility with older releases.
@@ -278,14 +570,83 @@ desktop_backup_path() {
 	printf '%s/%s\n' "$HOME/.local/share/SLSsteam/backup" "${f#/}"
 }
 
+SLSM_DESKTOP_TAG='X-SLSteamMoon-Patched=true'
+SLSM_DESKTOP_SEED_TAG='X-SLSteamMoon-Seeded=true'
+
+# depatch_desktop_file <file> [sudo] [shortcut]
+# Rewrite our wrapper back to the plain `steam` launcher, drop a managed
+# LD_AUDIT assignment left by older installs, and strip our tags — in place.
+#
+# This is what we do when NO backup survives. The user did have this file (we
+# patched it where it stood), so keeping it working beats deleting it: deleting
+# is what used to make the menu icon vanish, and on the desktop it silently
+# threw away a shortcut the user had placed themselves. Returns 1 when the
+# result would still reference our tree, so the caller can fall back to
+# removing a launcher that cannot be made to work.
+depatch_desktop_file() {
+	local f="$1" s="${2:-}" kind="${3:-}" wrapper tmp mode=0644
+	wrapper="$HOME/.local/share/SLSsteam/path/steam"
+	[ -f "$f" ] || return 1
+	grep -q "SLSsteam" "$f" 2>/dev/null || return 1
+	tmp="$(mktemp)" || return 1
+	# Delimiters matter here. The wrapper substitution uses `|` because the path
+	# contains `/` but never `|`. The LD_AUDIT strip must NOT use `|`, or its
+	# `\|` alternation would be read as an escaped delimiter — a literal pipe —
+	# and the expression would silently never match.
+	if ! sed -e "s|${wrapper}|steam|g" \
+	         -e 's#LD_AUDIT=[^[:space:]]*\(SLSsteam\|library-inject\|libSLS\)[^[:space:]]*[[:space:]]*##g' \
+	         -e '/^X-SLSteamMoon-/d' "$f" > "$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		return 1
+	fi
+	# Anything still pointing into our tree means this entry would stay broken
+	# once the tree is gone.
+	if grep -q "SLSsteam" "$tmp" 2>/dev/null; then
+		rm -f "$tmp"
+		return 1
+	fi
+	if [ "$kind" = shortcut ] || [ -x "$f" ]; then
+		mode=0755
+	fi
+	if ! $s cp -- "$tmp" "$f" 2>/dev/null; then
+		rm -f "$tmp"
+		return 1
+	fi
+	rm -f "$tmp"
+	$s chmod "$mode" "$f" 2>/dev/null || true
+	if [ "$mode" = 0755 ] && command -v gio >/dev/null 2>&1; then
+		gio set "$f" metadata::trusted true >/dev/null 2>&1 || true
+	fi
+	return 0
+}
+
+# restore_or_remove_desktop <file> [sudo] [shortcut]
+# "shortcut" marks an entry in the XDG desktop directory: those must stay
+# executable and trusted, or the DE renders the raw filename instead of "Steam".
 restore_or_remove_desktop() {
-	local f="$1" use_sudo="${2:-}"
-	local backup legacy
+	local f="$1" use_sudo="${2:-}" kind="${3:-}"
+	local backup legacy mode=0644
 	backup="$(desktop_backup_path "$f")"
 	local sudo_cmd=""
 	[ "$use_sudo" = "sudo" ] && sudo_cmd="sudo"
 
-	[ -f "$f" ] || return 0
+	# A symlinked entry is something only a legacy install created. Drop it and
+	# put the central original back as an ordinary file (mirrors dc_restore_one).
+	# Ownership must be established FIRST: this sweep visits every *.desktop, so
+	# an unrelated symlinked entry the user set up themselves must survive.
+	if [ -L "$f" ]; then
+		local target
+		target="$(readlink -f -- "$f" 2>/dev/null || true)"
+		case "$target" in
+			"$HOME/.local/share/SLSsteam"/*) ;;
+			*) [ -f "$backup" ] || return 0 ;;
+		esac
+		$sudo_cmd rm -f -- "$f" 2>/dev/null || true
+	fi
+	# A backup with no live file is still work to do: an interrupted earlier run
+	# may have removed the entry without ever consuming its backup.
+	[ -f "$f" ] || [ -f "$backup" ] || return 0
+
 	# Centralize an old adjacent backup before doing anything to the active file.
 	if [ ! -f "$backup" ]; then
 		for legacy in "${f}.slssteam-backup" "${f}.slsteam-bak"; do
@@ -300,22 +661,203 @@ restore_or_remove_desktop() {
 			break
 		done
 	fi
-	# Only act if the file shows our patch (Exec= mentions SLSsteam) or
-	# a central backup exists.
-	if ! grep -q "SLSsteam" "$f" 2>/dev/null && [ ! -f "$backup" ]; then
+
+	# An entry WE created (a seeded same-ID shadow or autostart override) must be
+	# deleted, not "restored": the user never had such a file, so putting a
+	# vanilla copy there would leave an entry behind that was never theirs.
+	# Mirrors dc_restore_one.
+	if [ -f "$f" ] && grep -qxF "$SLSM_DESKTOP_SEED_TAG" "$f" 2>/dev/null; then
+		log_step "$(L "Removing entry created by the installer: $f" \
+		             "Removendo entrada criada pelo instalador: $f")"
+		$sudo_cmd rm -f -- "$f" 2>/dev/null || true
+		rm -f -- "$backup" 2>/dev/null || true
+		return 0
+	fi
+
+	# Only act on an entry that shows our patch, or one we hold a backup for.
+	if [ -f "$f" ] && ! grep -q "SLSsteam" "$f" 2>/dev/null && [ ! -f "$backup" ]; then
 		return 0
 	fi
 
 	if [ -f "$backup" ]; then
-		log_step "$(L "Restoring $f from backup" "Restaurando $f a partir do backup")"
-		if $sudo_cmd cp -- "$backup" "$f" 2>/dev/null; then
-			rm -f -- "$backup" 2>/dev/null || true
+		# Preserve the original file mode class. A shortcut is executable by
+		# definition; anything already executable stays executable.
+		if [ "$kind" = shortcut ] || [ -x "$f" ]; then
+			mode=0755
 		fi
-	else
-		log_step "$(L "Removing patched $f (no backup found)" \
-		             "Removendo $f modificado (sem backup)")"
-		$sudo_cmd rm -- "$f" 2>/dev/null || true
+		log_step "$(L "Restoring $f from backup" "Restaurando $f a partir do backup")"
+		if $sudo_cmd cp --remove-destination -- "$backup" "$f" 2>/dev/null; then
+			$sudo_cmd chmod "$mode" "$f" 2>/dev/null || true
+			if [ "$mode" = 0755 ] && command -v gio >/dev/null 2>&1; then
+				gio set "$f" metadata::trusted true >/dev/null 2>&1 || true
+			fi
+			rm -f -- "$backup" 2>/dev/null || true
+		else
+			log_warn "$(L "Could not restore $f from $backup" \
+			             "Não foi possível restaurar $f a partir de $backup")"
+		fi
+	elif [ -f "$f" ]; then
+		# No backup: repair the entry in place instead of deleting the user's
+		# launcher. Removal is the last resort and requires our ownership tag —
+		# the sweep is content-based, so a foreign file that merely mentions
+		# SLSsteam must never be deleted on our way out.
+		if depatch_desktop_file "$f" "$sudo_cmd" "$kind"; then
+			log_step "$(L "Restored $f in place (no backup found)" \
+			             "$f restaurado no lugar (sem backup)")"
+		elif grep -qxF "$SLSM_DESKTOP_TAG" "$f" 2>/dev/null; then
+			log_step "$(L "Removing patched $f (no backup found)" \
+			             "Removendo $f modificado (sem backup)")"
+			$sudo_cmd rm -- "$f" 2>/dev/null || true
+		else
+			log_warn "$(L "Not ours and still references our tree; left untouched: $f" \
+			             "Não é nosso e ainda referencia nossa pasta; mantido: $f")"
+		fi
 	fi
+}
+
+# ============================================================================
+# Restore EVERY user-owned Steam launcher entry, without the coverage library.
+# ============================================================================
+# Two fixed filenames were never enough. A host can carry steam-native.desktop,
+# bazzite-steam.desktop or a capitalized Steam.desktop, and the desktop
+# SHORTCUT — the one entry the user actually clicks — was not covered here at
+# all. Since dc_restore_all returns early on any system-side failure BEFORE it
+# reaches the user layer, that shortcut kept pointing at the deleted wrapper.
+# None of this needs privileges: every path is inside $HOME.
+restore_user_desktop_entries() {
+	local dir f desktop_dir
+	desktop_dir="$(uninstall_desktop_dir)"
+	for dir in "$(uninstall_data_home)/applications" \
+	           "$(uninstall_config_home)/autostart"; do
+		[ -d "$dir" ] || continue
+		for f in "$dir"/*; do
+			[ -f "$f" ] || [ -L "$f" ] || continue
+			is_desktop_file_name "$f" || continue
+			restore_or_remove_desktop "$f"
+		done
+	done
+	if [ -d "$desktop_dir" ]; then
+		for f in "$desktop_dir"/*; do
+			[ -f "$f" ] || [ -L "$f" ] || continue
+			is_desktop_file_name "$f" || continue
+			restore_or_remove_desktop "$f" "" shortcut
+		done
+	fi
+	# Whatever is still in the mirror describes a file we patched but never put
+	# back. Consume it now, before the tree is deleted.
+	restore_orphaned_desktop_backups
+}
+
+# A backup can outlive the file it belongs to (an interrupted run, or a restore
+# that never reached that layer). The live-directory sweep above cannot see
+# those, because the entry itself is gone — so walk the mirror directly. Only
+# paths inside $HOME are handled here; system paths need the privileged pass.
+#
+# The AUTOSTART layer is deliberately excluded. There, a missing file is a
+# meaningful user preference: Steam deletes ~/.config/autostart/steam.desktop
+# when "run at startup" is turned off, and recreating it from our backup would
+# silently re-enable an autostart the user switched off. Elsewhere a missing
+# entry is far more likely to be collateral damage from an interrupted run.
+restore_orphaned_desktop_backups() {
+	local root="$HOME/.local/share/SLSsteam/backup"
+	local bak target desktop_dir autostart_dir mode
+	[ -d "$root" ] || return 0
+	desktop_dir="$(uninstall_desktop_dir)"
+	autostart_dir="$(uninstall_config_home)/autostart"
+	while IFS= read -r bak; do
+		[ -n "$bak" ] || continue
+		target="/${bak#"$root"/}"
+		case "$target" in
+			"$autostart_dir"/*) continue ;;
+			"$HOME"/*) ;;
+			*) continue ;;
+		esac
+		[ -e "$target" ] && continue
+		log_step "$(L "Restoring $target from backup" "Restaurando $target a partir do backup")"
+		mkdir -p "$(dirname -- "$target")" 2>/dev/null || continue
+		cp -- "$bak" "$target" 2>/dev/null || continue
+		case "$target" in
+			"$desktop_dir"/*) mode=0755 ;;
+			*) mode=0644 ;;
+		esac
+		chmod "$mode" "$target" 2>/dev/null || true
+		rm -f -- "$bak" 2>/dev/null || true
+	done < <(find "$root" -type f -name '*.desktop' 2>/dev/null)
+	return 0
+}
+
+# ============================================================================
+# Preserve the file mode of the XDG desktop-directory entries.
+# ============================================================================
+# dc_restore_one restores every entry as 0644, which strips the executable bit a
+# desktop shortcut needs: KDE and GNOME render a non-executable .desktop on the
+# desktop as its raw filename (and refuse to trust it) instead of as "Steam".
+# setup.sh knows this — dc_patch_shortcut chmods 0755 — but the restore path does
+# not. Recording the modes BEFORE any restore lets us put them back afterwards,
+# and only for files we actually saw, so nothing else is ever touched.
+SLSM_SHORTCUT_MODES=""
+
+record_shortcut_modes() {
+	local dir f mode
+	dir="$(uninstall_desktop_dir)"
+	[ -d "$dir" ] || return 0
+	for f in "$dir"/*; do
+		[ -f "$f" ] || continue
+		is_desktop_file_name "$f" || continue
+		mode="$(stat -c '%a' "$f" 2>/dev/null)" || continue
+		[ -n "$mode" ] || continue
+		SLSM_SHORTCUT_MODES="${SLSM_SHORTCUT_MODES}${mode}	${f}
+"
+	done
+}
+
+restore_shortcut_modes() {
+	local mode f
+	[ -n "$SLSM_SHORTCUT_MODES" ] || return 0
+	while IFS="$(printf '\t')" read -r mode f; do
+		[ -n "$mode" ] && [ -n "$f" ] || continue
+		[ -f "$f" ] || continue
+		[ "$(stat -c '%a' "$f" 2>/dev/null)" = "$mode" ] && continue
+		log_step "$(L "Restoring the original permissions of $f" \
+		             "Restaurando as permissões originais de $f")"
+		chmod "$mode" "$f" 2>/dev/null || true
+		if [ "$mode" = 755 ] && command -v gio >/dev/null 2>&1; then
+			gio set "$f" metadata::trusted true >/dev/null 2>&1 || true
+		fi
+	done <<EOF
+$SLSM_SHORTCUT_MODES
+EOF
+	return 0
+}
+
+# ============================================================================
+# Restore the system layer (needs sudo). Attempted regardless of whether the
+# coverage helper ran, because dc_restore_all bails on the first system-side
+# failure and may have left this untouched.
+# ============================================================================
+restore_system_desktop_entries() {
+	local f
+	local -a pending=()
+	if is_immutable_distro; then
+		return 0
+	fi
+	# Collect first, so privileges are requested only when there is real work.
+	while IFS= read -r f; do
+		[ -n "$f" ] && pending+=("$f")
+	done < <(system_patched_desktop_entries)
+	[ "${#pending[@]}" -gt 0 ] || return 0
+	if ! prime_sudo; then
+		log_warn "$(L "System-wide Steam entries are still patched and could not be restored" \
+		             "Entradas da Steam no sistema seguem modificadas e não puderam ser restauradas")"
+		return 1
+	fi
+	for f in "${pending[@]}"; do
+		restore_or_remove_desktop "$f" sudo
+	done
+	if command -v update-desktop-database >/dev/null 2>&1; then
+		sudo update-desktop-database "$SLSM_SYS_APPS" >/dev/null 2>&1 || true
+	fi
+	return 0
 }
 
 # ============================================================================
@@ -334,29 +876,34 @@ restore_or_remove_desktop() {
 : "${HEAL_SYS_DESKTOP:=/usr/share/applications/steam.desktop}"
 
 heal_steam_launcher() {
-	local wrapper="$HOME/.local/share/SLSsteam/path/steam"
-	local user_app="$HOME/.local/share/applications/steam.desktop"
+	local user_app; user_app="$(uninstall_data_home)/applications/steam.desktop"
 	local sys_app="$HEAL_SYS_DESKTOP"
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
+	local dir f desktop_dir
 
-	# (a) De-patch any surviving entry that still references the wrapper.
-	_heal_depatch() {
-		local f="$1" s="${2:-}" tmp
-		[ -f "$f" ] || return 0
-		grep -q "SLSsteam" "$f" 2>/dev/null || return 0
-		tmp="$(mktemp)" || return 0
-		# `|` delimiter: the wrapper path contains `/` but never `|`.
-		sed -e "s|${wrapper}|steam|g" -e "/^X-SLSteamMoon-/d" "$f" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 0; }
-		if [ -n "$s" ]; then
-			$s cp -- "$tmp" "$f" 2>/dev/null && $s chmod 0644 "$f" 2>/dev/null
-		else
-			cp -- "$tmp" "$f" 2>/dev/null && chmod 0644 "$f" 2>/dev/null
-		fi
-		rm -f "$tmp"
-	}
-	_heal_depatch "$user_app"
+	# (a) De-patch any surviving entry that still references the wrapper, across
+	# every user-owned layer — not just the canonical steam.desktop. A host may
+	# carry steam-native.desktop or bazzite-steam.desktop, and the desktop
+	# shortcut is the entry the user actually clicks.
+	for dir in "$(uninstall_data_home)/applications" \
+	           "$(uninstall_config_home)/autostart"; do
+		[ -d "$dir" ] || continue
+		for f in "$dir"/*; do
+			[ -f "$f" ] || continue
+			is_desktop_file_name "$f" || continue
+			depatch_desktop_file "$f" || true
+		done
+	done
+	desktop_dir="$(uninstall_desktop_dir)"
+	if [ -d "$desktop_dir" ]; then
+		for f in "$desktop_dir"/*; do
+			[ -f "$f" ] || continue
+			is_desktop_file_name "$f" || continue
+			depatch_desktop_file "$f" "" shortcut || true
+		done
+	fi
 	if ! is_immutable_distro && [ -n "$sudo_cmd" ]; then
-		_heal_depatch "$sys_app" "$sudo_cmd"
+		depatch_desktop_file "$sys_app" "$sudo_cmd" || true
 	fi
 
 	# (b) No working launcher survived: the user entry is missing AND the
@@ -403,9 +950,25 @@ EOF
 # setup.sh::restore_system_launchers.
 SLSM_LAUNCHER_TAG="# slsteam-moon system launcher shim"
 
+# Set when one of our launcher shims had to be left in place (no sudo). The shim
+# falls back to `exec "$SLSDIR/system-launcher-backup/<name>.orig"` when the
+# wrapper is gone, so that ONE directory has to outlive the uninstall — deleting
+# it turns a still-working /usr/bin/steam into a permanently broken one, and the
+# minimal entry heal_steam_launcher seeds (Exec=steam %U) resolves straight into
+# that same shim.
+SLSM_KEEP_LAUNCHER_BACKUP=0
+
 is_our_launcher_shim() {
 	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -q "$SLSM_LAUNCHER_TAG"
 }
+
+# Directories setup.sh may have wrapped a launcher in. An array, so no path is
+# ever exposed to word splitting or globbing. Overridable for tests.
+# `declare -p` probes the name without expanding it, so this stays safe under
+# `set -u` (${#arr[@]} on an unset array aborts the script).
+if ! declare -p SLSM_LAUNCHER_DIRS >/dev/null 2>&1; then
+	SLSM_LAUNCHER_DIRS=(/usr/bin /usr/games /usr/local/bin)
+fi
 
 restore_system_launchers() {
 	if is_immutable_distro; then
@@ -420,32 +983,42 @@ restore_system_launchers() {
 	local backup
 	for backup in "$backup_dir"/*.orig; do
 		[ -f "$backup" ] || continue
-		local base orig_path="" p
+		local base orig_path="" p d
 		base="$(basename -- "$backup" .orig)"
-		for p in "/usr/bin/$base" "/usr/games/$base" "/usr/local/bin/$base"; do
+		for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+			p="$d/$base"
 			[ -f "$p" ] && { orig_path="$p"; break; }
 		done
 		[ -n "$orig_path" ] || continue
 
 		if is_our_launcher_shim "$orig_path"; then
-			if [ -n "$sudo_cmd" ]; then
+			if [ -n "$sudo_cmd" ] && prime_sudo; then
 				log_step "$(L "Restoring system launcher $orig_path" \
 				             "Restaurando lançador de sistema $orig_path")"
 				if $sudo_cmd cp -- "$backup" "$orig_path" 2>/dev/null \
 				   && $sudo_cmd chmod 0755 "$orig_path" 2>/dev/null; then
 					log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
-				else
-					log_warn "$(L "Could not restore $orig_path (sudo failed); restore manually from $backup" \
-					           "Não foi possível restaurar $orig_path (sudo falhou); restaure manualmente a partir de $backup")"
+					continue
 				fi
+				log_warn "$(L "Could not restore $orig_path (sudo failed)" \
+				           "Não foi possível restaurar $orig_path (sudo falhou)")"
 			elif [ -w "$orig_path" ]; then
-				cp -- "$backup" "$orig_path" 2>/dev/null || true
-				chmod 0755 "$orig_path" 2>/dev/null || true
-				log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+				if cp -- "$backup" "$orig_path" 2>/dev/null \
+				   && chmod 0755 "$orig_path" 2>/dev/null; then
+					log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+					continue
+				fi
+				log_warn "$(L "Could not restore $orig_path" \
+				           "Não foi possível restaurar $orig_path")"
 			else
-				log_warn "$(L "Cannot restore $orig_path (no sudo); manual restore needed from $backup" \
-				           "Não foi possível restaurar $orig_path (sem sudo); restaure manualmente a partir de $backup")"
+				log_warn "$(L "Cannot restore $orig_path without administrator access" \
+				           "Não é possível restaurar $orig_path sem acesso de administrador")"
 			fi
+			# The shim survives. Keep its fallback alive so Steam still launches,
+			# and hand the user the exact command that finishes the job.
+			SLSM_KEEP_LAUNCHER_BACKUP=1
+			log_info "$(L "$orig_path keeps working through the retained backup. To finish: sudo cp '$backup' '$orig_path'" \
+			             "$orig_path continua funcionando pelo backup mantido. Para concluir: sudo cp '$backup' '$orig_path'")"
 		fi
 	done
 }
@@ -454,10 +1027,16 @@ restore_system_launchers() {
 # Step: slsteam-moon
 # ============================================================================
 uninstall_slsteam_moon() {
-	local USER_APPS="$HOME/.local/share/applications"
-	local USER_DESKTOP="$USER_APPS/steam.desktop"
-	local SYS_DESKTOP="/usr/share/applications/steam.desktop"
-	local coverage_restored=0
+	local USER_APPS; USER_APPS="$(uninstall_data_home)/applications"
+
+	# FIRST, before a single entry is restored: take the desktop guardian out of
+	# the picture. Its .path unit watches the very directories we are about to
+	# write to, so restoring while it is armed makes it re-patch everything and
+	# re-install its own units. See disarm_desktop_guardian.
+	disarm_desktop_guardian
+
+	# Snapshot the desktop-directory modes before any restore touches them.
+	record_shortcut_modes
 
 	# Wrapper PATH entry in shell rc files.
 	local rc
@@ -471,8 +1050,9 @@ uninstall_slsteam_moon() {
 		fi
 	done
 
-	# Prefer the installed coverage helper: it restores every patched launcher,
-	# shortcut and autostart entry from the central mirrored backup tree.
+	# Prefer the installed coverage helper: it knows every historical layout and
+	# restores each patched launcher, shortcut and autostart entry from the
+	# central mirrored backup tree.
 	local coverage_lib="$HOME/.local/share/SLSsteam/desktop-coverage.lib.sh"
 	if [ -f "$coverage_lib" ]; then
 		DC_HOME="$HOME"
@@ -484,55 +1064,26 @@ uninstall_slsteam_moon() {
 		DC_SUDO=""
 		! is_immutable_distro && command -v sudo >/dev/null 2>&1 && DC_SUDO="sudo"
 		dc_restore_all
-
-		# Remove the systemd user guardian (path/timer/service) and the generated
-		# autostart drop-ins. Without this they linger after the wrapper is gone,
-		# pointing the autostart unit at a deleted binary. Sentinel-guarded in the
-		# lib, so foreign units are never touched.
-		local guardian_lib="$HOME/.local/share/SLSsteam/desktop-guardian-units.lib.sh"
-		if [ -f "$guardian_lib" ]; then
-			# shellcheck source=/dev/null
-			. "$guardian_lib" 2>/dev/null || true
-			command -v dgu_remove_autostart_dropins >/dev/null 2>&1 && dgu_remove_autostart_dropins || true
-			command -v dgu_remove_units >/dev/null 2>&1 && dgu_remove_units || true
-		fi
-		coverage_restored=1
 	fi
 
-	# Backstop: restore the user-owned desktop entries from their central backup
-	# REGARDLESS of whether the coverage helper ran. dc_restore_all restores the
-	# SYSTEM layer first and bails (return 2) on any system-side failure (e.g.
-	# sudo unavailable for /usr/share/applications/steam.desktop) BEFORE it ever
-	# touches the user layer — which needs no sudo at all. When that happens the
-	# user backups at ~/.local/share/SLSsteam/backup would otherwise sit unused
-	# until `rm -rf` deletes them, exactly the "saved a backup it never uses"
-	# failure. This pass closes that gap. It is a harmless no-op when
-	# dc_restore_all already restored the user entries (the backup is gone and
-	# the file no longer carries our tag), so running it unconditionally is safe.
-	restore_or_remove_desktop "$USER_DESKTOP"
-	local autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/steam.desktop"
-	restore_or_remove_desktop "$autostart"
+	# Backstop, ALWAYS: restore every user-owned entry from its central backup,
+	# whether or not the coverage helper ran. dc_restore_all restores the SYSTEM
+	# layer first and bails (return 2) on any system-side failure — e.g. sudo
+	# unavailable for /usr/share/applications/steam.desktop — BEFORE it ever
+	# touches the user layer, which needs no privileges at all. When that happens
+	# the backups under ~/.local/share/SLSsteam/backup sit unused until `rm -rf`
+	# deletes them: a backup saved and never used, and a desktop shortcut left
+	# pointing at the wrapper we are about to delete. This pass closes that gap
+	# and is a harmless no-op once an entry is already restored (its backup is
+	# gone and the file no longer carries our tag).
+	restore_user_desktop_entries
 	if command -v update-desktop-database >/dev/null 2>&1; then
 		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 	fi
 
-	# System-wide .desktop (only if we actually patched it).
-	if [ "$coverage_restored" = 0 ] && [ -f "$SYS_DESKTOP" ] && grep -q "SLSsteam" "$SYS_DESKTOP" 2>/dev/null; then
-		if is_immutable_distro; then
-			log_warn "$(L "Immutable system; read-only system .desktop left untouched" \
-			             "Sistema imutável; .desktop de sistema somente-leitura mantido")"
-		elif command -v sudo >/dev/null 2>&1; then
-			log_info "$(L "Restoring system .desktop (requires sudo)" \
-			             "Restaurando .desktop do sistema (requer sudo)")"
-			restore_or_remove_desktop "$SYS_DESKTOP" sudo
-			if command -v update-desktop-database >/dev/null 2>&1; then
-				sudo update-desktop-database "/usr/share/applications" >/dev/null 2>&1 || true
-			fi
-		else
-			log_warn "$(L "sudo not available; cannot restore $SYS_DESKTOP automatically" \
-			             "sudo indisponível; não foi possível restaurar $SYS_DESKTOP automaticamente")"
-		fi
-	fi
+	# System-wide entries. Attempted independently of the coverage helper for the
+	# same reason: dc_restore_all may have bailed here and skipped everything.
+	restore_system_desktop_entries
 
 	# Legacy /usr/games/steam patch from older installs.
 	if ! is_immutable_distro && [ -f "/usr/games/steam" ] && grep -q "SLSsteam" "/usr/games/steam" 2>/dev/null; then
@@ -553,6 +1104,8 @@ uninstall_slsteam_moon() {
 	# Guarantee a working Steam launcher survives before we delete the wrapper the
 	# patched entries reference. Runs whether or not the coverage helper was used.
 	heal_steam_launcher
+	# Last: put back the file modes the shared restore flattened to 0644.
+	restore_shortcut_modes
 	if command -v update-desktop-database >/dev/null 2>&1; then
 		update-desktop-database "$USER_APPS" >/dev/null 2>&1 || true
 	fi
@@ -568,13 +1121,46 @@ uninstall_slsteam_moon() {
 	# /usr/local/bin/steam) from their backups BEFORE removing the SLSsteam dir.
 	# setup.sh installs a shim that falls back to `exec "$backup"`, and that
 	# backup lives inside the directory we are about to delete — so restoring
-	# first is what keeps `/usr/bin/steam` working afterwards.
+	# first is what keeps `/usr/bin/steam` working afterwards. When restoration
+	# is impossible it raises SLSM_KEEP_LAUNCHER_BACKUP, and the removal below
+	# spares exactly that directory.
 	restore_system_launchers
 
-	# Binaries + wrapper.
-	if [ -d "$HOME/.local/share/SLSsteam" ]; then
+	# Binaries + wrapper. When a launcher shim had to be left behind, everything
+	# goes EXCEPT system-launcher-backup: that is the path the surviving shim
+	# execs, so removing it would break `steam` on the command line, in the menu
+	# and in the taskbar.
+	if [ "$SLSM_KEEP_LAUNCHER_BACKUP" = 1 ] && [ -d "$HOME/.local/share/SLSsteam" ]; then
+		log_step "$(L "Removing ~/.local/share/SLSsteam (keeping the system launcher backup)" \
+		             "Removendo ~/.local/share/SLSsteam (mantendo o backup do lançador de sistema)")"
+		find "$HOME/.local/share/SLSsteam" -mindepth 1 -maxdepth 1 \
+			! -name system-launcher-backup -exec rm -rf -- {} + 2>/dev/null || true
+		log_warn "$(L "Kept ~/.local/share/SLSsteam/system-launcher-backup so the system Steam launcher keeps working. Remove it after restoring the launcher with the command above." \
+		             "~/.local/share/SLSsteam/system-launcher-backup foi mantido para o lançador da Steam continuar funcionando. Remova-o após restaurar o lançador com o comando acima.")"
+	elif [ -d "$HOME/.local/share/SLSsteam" ]; then
 		log_step "$(L "Removing ~/.local/share/SLSsteam" "Removendo ~/.local/share/SLSsteam")"
 		rm -rf "$HOME/.local/share/SLSsteam" 2>/dev/null || true
+		# A concurrent writer can recreate a subtree while `rm` is still walking
+		# it, which is exactly how a backup/ tree used to survive the uninstall.
+		# Retry once, then report the real path instead of claiming success.
+		if [ -d "$HOME/.local/share/SLSsteam" ]; then
+			sleep 1
+			rm -rf "$HOME/.local/share/SLSsteam" 2>/dev/null || true
+		fi
+		if [ -d "$HOME/.local/share/SLSsteam" ]; then
+			log_warn "$(L "Could not fully remove $HOME/.local/share/SLSsteam; remove it manually" \
+			             "Não foi possível remover $HOME/.local/share/SLSsteam por completo; remova manualmente")"
+		else
+			log_success "$(L "Removed ~/.local/share/SLSsteam" "~/.local/share/SLSsteam removido")"
+		fi
+	fi
+
+	# Guardian bookkeeping: the reconciliation log, the recorded input
+	# fingerprints and the boot-health counters written by the wrapper.
+	local state_dir; state_dir="$(uninstall_state_home)/slsteam-moon"
+	if [ -d "$state_dir" ]; then
+		log_step "$(L "Removing $state_dir" "Removendo $state_dir")"
+		rm -rf "$state_dir" 2>/dev/null || true
 	fi
 
 	# User config (depot keys, additional apps, scan caches).
@@ -633,7 +1219,38 @@ uninstall_luatools_plugin() {
 # ============================================================================
 # Step: Lumen (millennium-less bridge) + its install dir
 # ============================================================================
+# The sidecar outlives Steam by ~45s and, until it exits, re-runs
+# ensure-desktop-coverage.sh --user every 3s (lumen/lua/deskcover.lua). Deleting
+# its directory does not stop it, so it has to be killed BEFORE we restore
+# anything — otherwise a tick can re-patch the entries we just put back, the same
+# way the systemd guardian did. Mirrors install.sh::stop_lumen.
+stop_lumen() {
+	local lumen_bin="$HOME/.local/share/Lumen/lumen"
+
+	if ! pgrep -f "$lumen_bin" >/dev/null 2>&1; then
+		log_success "$(L "No running Lumen process detected" "Nenhum processo do Lumen em execução")"
+		return 0
+	fi
+
+	log_info "$(L "Stopping running Lumen" "Parando o Lumen em execução")"
+	pkill -TERM -f "$lumen_bin" 2>/dev/null || true
+
+	local i
+	for i in 1 2 3 4 5; do
+		if ! pgrep -f "$lumen_bin" >/dev/null 2>&1; then
+			log_success "$(L "Lumen stopped" "Lumen parado")"
+			return 0
+		fi
+		sleep 1
+	done
+
+	pkill -KILL -f "$lumen_bin" 2>/dev/null || true
+	sleep 1
+	log_success "$(L "Lumen stopped" "Lumen parado")"
+}
+
 uninstall_lumen() {
+	stop_lumen
 	if [ -d "$HOME/.local/share/Lumen" ]; then
 		log_step "$(L "Removing ~/.local/share/Lumen" "Removendo ~/.local/share/Lumen")"
 		rm -rf "$HOME/.local/share/Lumen" 2>/dev/null || true
@@ -828,9 +1445,16 @@ main() {
 	print_section "$(L "Pre-flight" "Verificações iniciais")"
 	check_not_root
 	log_success "$(L "Running as user $(whoami)" "Rodando como usuário $(whoami)")"
+	# Ask once, up front, and only when something outside $HOME really needs
+	# restoring. Every privileged call below silences stderr, so without this an
+	# unavailable sudo degraded the restoration with no prompt and no warning.
+	prime_sudo || true
 
 	print_section "$(L "Stopping Steam" "Parando a Steam")"
 	stop_steam
+	# The Lumen sidecar re-runs the desktop reconciliation CLI every few seconds
+	# and outlives Steam, so it has to go before anything is restored.
+	stop_lumen
 
 	print_section "$(L "Removing LuaTools plugin" "Removendo plugin LuaTools")"
 	uninstall_luatools_plugin
