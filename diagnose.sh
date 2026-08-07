@@ -212,6 +212,101 @@ _collect_desktops() {
 	rm -f "$raw"
 }
 
+# Resolve the persisted launch-coverage policy without sourcing installer code.
+# Relative XDG_STATE_HOME values intentionally fall back to the conventional
+# per-user state directory, matching install.sh's reporting behavior.
+_diag_state_home() {
+	case "${XDG_STATE_HOME:-}" in
+		/*) printf '%s\n' "$XDG_STATE_HOME" ;;
+		*)  printf '%s/.local/state\n' "$HOME" ;;
+	esac
+}
+
+_diag_effective_policy() {
+	local policy="${SLSM_COVERAGE_POLICY-}" policy_file status_file
+	# Match dc_read_policy/install_coverage_policy: an explicit non-empty
+	# override is authoritative, including an invalid value falling back to
+	# desktop rather than consulting stale persisted state.
+	if [ -n "$policy" ]; then
+		case "$policy" in
+			launcher|desktop) printf '%s\n' "$policy" ;;
+			*)                 printf 'desktop\n' ;;
+		esac
+		return 0
+	fi
+
+	# setup.sh writes this marker when policy persistence fails. Its presence
+	# means the effective runtime fallback is desktop, even if an older state
+	# file still says launcher.
+	status_file="${DIAG_POLICY_STATUS_FILE:-$HOME/.local/share/SLSsteam/coverage-policy.effective}"
+	if [ -e "$status_file" ] || [ -L "$status_file" ]; then
+		printf 'desktop\n'
+		return 0
+	fi
+
+	policy_file="${DIAG_POLICY_FILE:-$(_diag_state_home)/slsteam-moon/coverage.policy}"
+	if cmp -s "$policy_file" <(printf 'launcher\n'); then
+		printf 'launcher\n'
+	elif cmp -s "$policy_file" <(printf 'desktop\n'); then
+		printf 'desktop\n'
+	else
+		printf 'desktop\n'
+	fi
+}
+
+_diag_launcher_dirs() {
+	local value="${DIAG_LAUNCHER_DIRS:-/usr/bin:/usr/games:/usr/local/bin}" d
+	while [ -n "$value" ]; do
+		case "$value" in
+			*:*) d="${value%%:*}"; value="${value#*:}" ;;
+			*)   d="$value"; value= ;;
+		esac
+		[ -n "$d" ] && printf '%s\n' "$d"
+	d=''
+	done
+}
+
+# Inventory system launchers and backup paths only. The collector never reads a
+# launcher or backup body, so package scripts and any accidental tokens in those
+# files cannot enter the diagnostic archive.
+_collect_launch_coverage() {
+	local stage="$1" dest="$stage/launch-coverage.txt" raw
+	local dir launcher status found=0 backup_root backup found_backup=0
+	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-coverage.XXXXXX" 2>/dev/null || true)"
+	[ -n "$raw" ] || return 0
+	{
+		printf 'effective policy: %s\n' "$(_diag_effective_policy)"
+		while IFS= read -r dir; do
+			[ -n "$dir" ] || continue
+			launcher="${dir%/}/steam"
+			[ -f "$launcher" ] || continue
+			found=1
+			if head -3 "$launcher" 2>/dev/null | grep -qF '# slsteam-moon system launcher shim'; then
+				status=shim
+			else
+				status=vanilla
+			fi
+			printf 'system launcher: %s status=%s\n' "$launcher" "$status"
+		done < <(_diag_launcher_dirs)
+		[ "$found" -eq 1 ] || printf 'system launcher: none detected\n'
+
+		backup_root="${DIAG_LAUNCHER_BACKUP_ROOT:-$HOME/.local/share/SLSsteam/system-launcher-backup}"
+		if [ -d "$backup_root" ]; then
+			while IFS= read -r -d '' backup; do
+				found_backup=1
+				if [ "$(dirname -- "$backup")" = "${backup_root%/}" ]; then
+					printf 'backup: legacy %s\n' "$backup"
+				else
+					printf 'backup: mirrored %s\n' "$backup"
+				fi
+			done < <(find "$backup_root" -type f -name '*.orig' -print0 2>/dev/null | sort -z)
+		fi
+		[ "$found_backup" -eq 1 ] || printf 'backup: none detected\n'
+	} > "$raw"
+	scrub < "$raw" > "$dest"
+	rm -f "$raw"
+}
+
 # Build the diagnostics tarball at $1. $2 = global tail cap in bytes (0 = full
 # logs, cef_log still capped). Only explicit log files are read — never whole
 # config dirs (CloudRedirect holds OAuth tokens; Lumen holds a session token).
@@ -250,6 +345,7 @@ collect() {
 	# app/autostart dirs (shows the LD_AUDIT wrapper Exec line, key for launch
 	# issues), bundled into one scrubbed file with per-file BEGIN/END separators.
 	_collect_desktops "$stage" "$cap"
+	_collect_launch_coverage "$stage"
 	_stage_file "$stage" "cloudredirect-cr_debug.log"     "$HOME/.config/CloudRedirect/cr_debug.log"     "$cap"
 	_stage_file "$stage" "cloudredirect-cloud_redirect.log" "$HOME/.config/CloudRedirect/cloud_redirect.log" "$cap"
 

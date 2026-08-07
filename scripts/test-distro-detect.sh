@@ -110,7 +110,13 @@ ln -sf "$FAKESTORE/steam" "$FAKEBIN/steam"
 # readlink -f resolves through the symlink to $TESTDIR/nix-store-pkg/bin/steam,
 # which isn't under /nix/store on a dev host — so fake `readlink` to prove the
 # branch's logic (real /nix/store/* prefix) without needing an actual store.
-readlink() { case "$*" in "-f "*) printf '/nix/store/abc123-steam-1.0/bin/steam\n' ;; esac; }
+readlink() {
+	if [ "${1:-}" = "-f" ] && [ "${2:-}" = "$FAKEBIN/steam" ]; then
+		printf '/nix/store/abc123-steam-1.0/bin/steam\n'
+	else
+		command readlink "$@"
+	fi
+}
 detect_steam_type_result="$(
 	STEAM_FIXED_CANDIDATES="" STEAM_SEARCH_PATH="$FAKEBIN" detect_steam_type
 )"

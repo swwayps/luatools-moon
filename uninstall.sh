@@ -370,11 +370,13 @@ system_patched_desktop_entries() {
 }
 
 system_restore_pending() {
-	local f
+	local f backup_root
 	[ -n "$(system_patched_desktop_entries)" ] && return 0
-	for f in "$HOME/.local/share/SLSsteam/system-launcher-backup"/*.orig; do
-		[ -f "$f" ] && return 0
-	done
+	backup_root="$HOME/.local/share/SLSsteam/system-launcher-backup"
+	if [ -d "$backup_root" ]; then
+		f="$(find "$backup_root" -type f -name '*.orig' -print -quit 2>/dev/null || true)"
+		[ -n "$f" ] && return 0
+	fi
 	if [ -f /usr/games/steam ] && grep -q "SLSsteam" /usr/games/steam 2>/dev/null; then
 		return 0
 	fi
@@ -952,14 +954,53 @@ SLSM_LAUNCHER_TAG="# slsteam-moon system launcher shim"
 
 # Set when one of our launcher shims had to be left in place (no sudo). The shim
 # falls back to `exec "$SLSDIR/system-launcher-backup/<name>.orig"` when the
-# wrapper is gone, so that ONE directory has to outlive the uninstall — deleting
-# it turns a still-working /usr/bin/steam into a permanently broken one, and the
-# minimal entry heal_steam_launcher seeds (Exec=steam %U) resolves straight into
-# that same shim.
+# wrapper is gone, so that ONE directory has to outlive the uninstall.
 SLSM_KEEP_LAUNCHER_BACKUP=0
+# Set when a surviving shim has no recoverable original at all. In that case the
+# wrapper and helper tree must remain intact; keeping only the backup directory
+# would leave the shim pointing at deleted state.
+SLSM_KEEP_LAUNCHER_TREE=0
+
+load_launcher_shim_library() {
+	local lib="$HOME/.local/share/SLSsteam/launcher-shim.lib.sh"
+	[ -f "$lib" ] || return 1
+	LS_SLSDIR="$HOME/.local/share/SLSsteam"
+	LS_BACKUP_ROOT="$LS_SLSDIR/system-launcher-backup"
+	if declare -p SLSM_LAUNCHER_DIRS >/dev/null 2>&1; then
+		LS_LAUNCHER_DIRS=("${SLSM_LAUNCHER_DIRS[@]}")
+	fi
+	# shellcheck source=/dev/null
+	. "$lib" >/dev/null 2>&1 || return 1
+	return 0
+}
 
 is_our_launcher_shim() {
 	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -q "$SLSM_LAUNCHER_TAG"
+}
+
+# Validate a flat backup against the exact reference embedded by both current
+# and historical launcher shims. A basename match alone is unsafe because
+# /usr/bin/steam and /usr/games/steam share the same name.
+uninstall_shim_references_backup() {
+	local launcher="$1" backup="$2"
+	[ -f "$launcher" ] || return 1
+	grep -Fqx -- "SLSM_ORIG=\"$backup\"" "$launcher" 2>/dev/null && return 0
+	grep -Fqx -- "exec \"$backup\" \"\$@\"" "$launcher" 2>/dev/null
+}
+
+uninstall_flat_backup_is_unambiguous() {
+	local backup="$1" references=0 d launcher
+	for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+		launcher="$d/steam"
+		is_our_launcher_shim "$launcher" || continue
+		uninstall_shim_references_backup "$launcher" "$backup" || continue
+		references=$((references + 1))
+	done
+	[ "$references" -eq 1 ]
+}
+
+uninstall_launcher_backup_is_usable() {
+	[ -f "$1" ] && [ -x "$1" ] && ! is_our_launcher_shim "$1"
 }
 
 # Directories setup.sh may have wrapped a launcher in. An array, so no path is
@@ -971,55 +1012,221 @@ if ! declare -p SLSM_LAUNCHER_DIRS >/dev/null 2>&1; then
 fi
 
 restore_system_launchers() {
+	SLSM_KEEP_LAUNCHER_BACKUP=0
+	SLSM_KEEP_LAUNCHER_TREE=0
 	if is_immutable_distro; then
+		local launcher d wrapped=0
+		for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+			launcher="$d/steam"
+			if is_our_launcher_shim "$launcher"; then
+				wrapped=1
+				log_warn "Immutable distro has a surviving system launcher shim at $launcher; retaining the complete helper tree"
+			fi
+		done
+		if [ "$wrapped" -eq 1 ]; then
+			SLSM_KEEP_LAUNCHER_BACKUP=1
+			SLSM_KEEP_LAUNCHER_TREE=1
+			return 1
+		fi
 		return 0
 	fi
 
 	local backup_dir="$HOME/.local/share/SLSsteam/system-launcher-backup"
-	[ -d "$backup_dir" ] || return 0
+	local backup failed=0 wrapped_count=0 launcher d
+	local sudo_cmd=""
+	for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+		launcher="$d/steam"
+		is_our_launcher_shim "$launcher" && wrapped_count=$((wrapped_count + 1))
+	done
+	# A missing backup directory is normally a harmless no-op, but it is not
+	# harmless when a managed shim is still installed: deleting the wrapper then
+	# leaves that package launcher with no recoverable fallback. Detect this state
+	# before returning and keep the uninstall retryable.
+	if [ ! -d "$backup_dir" ]; then
+		if [ "$wrapped_count" -gt 0 ]; then
+			SLSM_KEEP_LAUNCHER_BACKUP=1
+			SLSM_KEEP_LAUNCHER_TREE=1
+			log_warn "System launcher shim remains but its backup directory is missing; retaining the complete uninstall tree"
+			return 1
+		fi
+		return 0
+	fi
+	if [ "$(id -u)" -eq 0 ]; then
+		:
+	elif [ "${SLSM_SUDO_PRIMED:-0}" = 1 ]; then
+		sudo_cmd="$(sudo_prefix)"
+	elif [ "${SLSM_SUDO_DENIED:-0}" != 1 ] && prime_sudo; then
+		sudo_cmd="$(sudo_prefix)"
+	fi
+	# New installations ship the sourceable launcher library. It owns the
+	# mirrored backup mapping and keeps /usr/bin/steam and /usr/games/steam
+	# independent. The fallback below remains for older installations that did
+	# not copy the library into SLSDIR.
+	if load_launcher_shim_library; then
+		LS_SLSDIR="$HOME/.local/share/SLSsteam"
+		LS_BACKUP_ROOT="$backup_dir"
+		LS_SUDO="$sudo_cmd"
+		if ls_restore_shims; then
+			return 0
+		fi
+		while IFS= read -r launcher; do
+			[ -n "$launcher" ] || continue
+			backup="$(ls_backup_path "$launcher")"
+			if ! uninstall_launcher_backup_is_usable "$backup" || \
+			   ! uninstall_shim_references_backup "$launcher" "$backup"; then
+				backup="$(ls_legacy_backup_path "$launcher")"
+				if ! ls_legacy_backup_is_unambiguous_restore "$backup" || \
+				   ! uninstall_shim_references_backup "$launcher" "$backup"; then
+					SLSM_KEEP_LAUNCHER_TREE=1
+				fi
+			fi
+			if ! uninstall_launcher_backup_is_usable "$backup" || \
+			   ! uninstall_shim_references_backup "$launcher" "$backup"; then
+				SLSM_KEEP_LAUNCHER_TREE=1
+			fi
+			SLSM_KEEP_LAUNCHER_BACKUP=1
+			log_info "$(L "$launcher keeps its launcher backup. To finish: sudo cp '$backup' '$launcher'" \
+			             "$launcher mantém seu backup. Para concluir: sudo cp '$backup' '$launcher'")"
+		done < <(ls_wrapped_paths)
+		return 1
+	fi
 
-	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
-
-	local backup
-	for backup in "$backup_dir"/*.orig; do
-		[ -f "$backup" ] || continue
-		local base orig_path="" p d
-		base="$(basename -- "$backup" .orig)"
+	# Legacy fallback: support both the historical flat steam.orig and the
+	# path-mirrored layout even when the shared library is unavailable. A
+	# mirrored restore can make a flat backup unambiguous, so retry after every
+	# pass that makes progress.
+	local pass_progress remaining relative base parent orig_path p candidate_backup
+	while :; do
+		failed=0
+		pass_progress=0
+		remaining=0
+		wrapped_count=0
+		SLSM_KEEP_LAUNCHER_BACKUP=0
 		for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
-			p="$d/$base"
-			[ -f "$p" ] && { orig_path="$p"; break; }
+			launcher="$d/steam"
+			is_our_launcher_shim "$launcher" && wrapped_count=$((wrapped_count + 1))
 		done
-		[ -n "$orig_path" ] || continue
 
-		if is_our_launcher_shim "$orig_path"; then
-			if [ -n "$sudo_cmd" ] && prime_sudo; then
-				log_step "$(L "Restoring system launcher $orig_path" \
-				             "Restaurando lançador de sistema $orig_path")"
+		while IFS= read -r -d '' backup; do
+			relative="${backup#"$backup_dir"/}"
+			base="${relative##*/}"
+			base="${base%.orig}"
+			parent="${relative%/*}"
+			orig_path=""
+
+			# A mirrored backup such as usr/games/steam.orig maps only to a launcher
+			# directory ending in usr/games; never let it collide with usr/bin/steam.
+			# A flat candidate is accepted only when exactly one surviving shim
+			# explicitly references that candidate path.
+			if [ "$parent" = "$relative" ] && \
+			   ! uninstall_flat_backup_is_unambiguous "$backup"; then
+				failed=1
+				SLSM_KEEP_LAUNCHER_BACKUP=1
+				log_warn "Ambiguous or unassociated flat launcher backup: retaining shims and backup"
+				continue
+			fi
+
+			if [ "$parent" != "$relative" ]; then
+				for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+					case "$d" in
+						"$parent"|*/"$parent")
+							p="$d/$base"
+							is_our_launcher_shim "$p" || continue
+							uninstall_launcher_backup_is_usable "$backup" || continue
+							uninstall_shim_references_backup "$p" "$backup" || continue
+							[ -f "$p" ] && { orig_path="$p"; break; }
+							;;
+					esac
+				done
+			else
+				# Only the historical flat layout uses basename matching, and the
+				# ambiguity guard above allows it only for one surviving shim.
+				for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+					p="$d/$base"
+					[ -f "$p" ] || continue
+					is_our_launcher_shim "$p" || continue
+					uninstall_launcher_backup_is_usable "$backup" || continue
+					uninstall_shim_references_backup "$p" "$backup" || continue
+					orig_path="$p"
+					break
+				done
+			fi
+			[ -n "$orig_path" ] || continue
+			is_our_launcher_shim "$orig_path" || continue
+			# A captured shim is not an original and must never be installed as
+			# one, otherwise the wrapper can recurse after uninstall.
+			if ! uninstall_launcher_backup_is_usable "$backup"; then
+				failed=1
+				SLSM_KEEP_LAUNCHER_BACKUP=1
+				SLSM_KEEP_LAUNCHER_TREE=1
+				log_warn "$(L "Refusing unusable launcher backup $backup" "Recusando backup de lançador inutilizável $backup")"
+				continue
+			fi
+
+			if [ -n "$sudo_cmd" ]; then
 				if $sudo_cmd cp -- "$backup" "$orig_path" 2>/dev/null \
-				   && $sudo_cmd chmod 0755 "$orig_path" 2>/dev/null; then
+				   && $sudo_cmd chmod 0755 "$orig_path" 2>/dev/null \
+				   && ! is_our_launcher_shim "$orig_path"; then
 					log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+					pass_progress=1
 					continue
 				fi
 				log_warn "$(L "Could not restore $orig_path (sudo failed)" \
 				           "Não foi possível restaurar $orig_path (sudo falhou)")"
-			elif [ -w "$orig_path" ]; then
-				if cp -- "$backup" "$orig_path" 2>/dev/null \
-				   && chmod 0755 "$orig_path" 2>/dev/null; then
-					log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
-					continue
-				fi
-				log_warn "$(L "Could not restore $orig_path" \
-				           "Não foi possível restaurar $orig_path")"
+			elif [ -w "$orig_path" ] \
+			     && cp -- "$backup" "$orig_path" 2>/dev/null \
+			     && chmod 0755 "$orig_path" 2>/dev/null \
+			     && ! is_our_launcher_shim "$orig_path"; then
+				log_success "$(L "Restored $orig_path" "$orig_path restaurado")"
+				pass_progress=1
+				continue
 			else
 				log_warn "$(L "Cannot restore $orig_path without administrator access" \
 				           "Não é possível restaurar $orig_path sem acesso de administrador")"
 			fi
+
+			failed=1
 			# The shim survives. Keep its fallback alive so Steam still launches,
 			# and hand the user the exact command that finishes the job.
 			SLSM_KEEP_LAUNCHER_BACKUP=1
 			log_info "$(L "$orig_path keeps working through the retained backup. To finish: sudo cp '$backup' '$orig_path'" \
 			             "$orig_path continua funcionando pelo backup mantido. Para concluir: sudo cp '$backup' '$orig_path'")"
+		# Enumerate path-mirrored backups first. Flat legacy backups are handled
+		# only after their exact surviving shim association is verified, so find
+		# order cannot restore one into the wrong launcher.
+		done < <(
+			find "$backup_dir" -mindepth 2 -type f -name '*.orig' -print0 2>/dev/null
+			find "$backup_dir" -maxdepth 1 -type f -name '*.orig' -print0 2>/dev/null
+		)
+
+		# Do not declare success merely because every discovered backup was consumed:
+		# a launcher shim with no matching backup would otherwise survive while its
+		# fallback directory is deleted below.
+		for d in "${SLSM_LAUNCHER_DIRS[@]}"; do
+			launcher="$d/steam"
+			if is_our_launcher_shim "$launcher"; then
+				remaining=1
+				failed=1
+				candidate_backup="$backup_dir/${launcher#/}.orig"
+				if ! uninstall_launcher_backup_is_usable "$candidate_backup" || \
+				   ! uninstall_shim_references_backup "$launcher" "$candidate_backup"; then
+					candidate_backup="$backup_dir/$(basename -- "$launcher").orig"
+					if ! uninstall_launcher_backup_is_usable "$candidate_backup" || \
+					   ! uninstall_shim_references_backup "$launcher" "$candidate_backup"; then
+						SLSM_KEEP_LAUNCHER_TREE=1
+					fi
+				fi
+				SLSM_KEEP_LAUNCHER_BACKUP=1
+				log_warn "$(L "System launcher shim remains at $launcher; retaining backups" \
+				           "O shim do lançador de sistema continua em $launcher; mantendo backups")"
+			fi
+		done
+
+		if [ "$remaining" -eq 0 ]; then
+			SLSM_KEEP_LAUNCHER_BACKUP=0
+			return 0
 		fi
+		[ "$pass_progress" -eq 1 ] || return 1
 	done
 }
 
@@ -1028,6 +1235,7 @@ restore_system_launchers() {
 # ============================================================================
 uninstall_slsteam_moon() {
 	local USER_APPS; USER_APPS="$(uninstall_data_home)/applications"
+	local launcher_restore_complete=1
 
 	# FIRST, before a single entry is restored: take the desktop guardian out of
 	# the picture. Its .path unit watches the very directories we are about to
@@ -1104,6 +1312,7 @@ uninstall_slsteam_moon() {
 	# Guarantee a working Steam launcher survives before we delete the wrapper the
 	# patched entries reference. Runs whether or not the coverage helper was used.
 	heal_steam_launcher
+
 	# Last: put back the file modes the shared restore flattened to 0644.
 	restore_shortcut_modes
 	if command -v update-desktop-database >/dev/null 2>&1; then
@@ -1124,13 +1333,33 @@ uninstall_slsteam_moon() {
 	# first is what keeps `/usr/bin/steam` working afterwards. When restoration
 	# is impossible it raises SLSM_KEEP_LAUNCHER_BACKUP, and the removal below
 	# spares exactly that directory.
-	restore_system_launchers
+	if restore_system_launchers; then
+		launcher_restore_complete=1
+	else
+		launcher_restore_complete=0
+	fi
+
+	# coverage.policy is outside SLSDIR. Forget it only after every system
+	# launcher shim has been restored; if a shim survives, retain the policy and
+	# backup together so a later retry still describes the live coverage path.
+	if [ "$launcher_restore_complete" = 1 ]; then
+		if command -v dc_forget_policy >/dev/null 2>&1; then
+			dc_forget_policy || true
+		else
+			rm -f -- "$(uninstall_state_home)/slsteam-moon/coverage.policy" 2>/dev/null || true
+		fi
+	else
+		log_warn "Keeping coverage.policy while a system launcher shim still needs restoration"
+	fi
 
 	# Binaries + wrapper. When a launcher shim had to be left behind, everything
 	# goes EXCEPT system-launcher-backup: that is the path the surviving shim
 	# execs, so removing it would break `steam` on the command line, in the menu
 	# and in the taskbar.
-	if [ "$SLSM_KEEP_LAUNCHER_BACKUP" = 1 ] && [ -d "$HOME/.local/share/SLSsteam" ]; then
+	if [ "${SLSM_KEEP_LAUNCHER_TREE:-0}" = 1 ] && [ -d "$HOME/.local/share/SLSsteam" ]; then
+		log_warn "$(L "A system launcher has no recoverable backup; retaining the complete ~/.local/share/SLSsteam tree so its shim and fallback remain usable." \
+		             "Um lançador do sistema não tem backup recuperável; mantendo toda a árvore ~/.local/share/SLSsteam para preservar o shim e o fallback.")"
+	elif [ "$SLSM_KEEP_LAUNCHER_BACKUP" = 1 ] && [ -d "$HOME/.local/share/SLSsteam" ]; then
 		log_step "$(L "Removing ~/.local/share/SLSsteam (keeping the system launcher backup)" \
 		             "Removendo ~/.local/share/SLSsteam (mantendo o backup do lançador de sistema)")"
 		find "$HOME/.local/share/SLSsteam" -mindepth 1 -maxdepth 1 \
@@ -1159,8 +1388,15 @@ uninstall_slsteam_moon() {
 	# fingerprints and the boot-health counters written by the wrapper.
 	local state_dir; state_dir="$(uninstall_state_home)/slsteam-moon"
 	if [ -d "$state_dir" ]; then
-		log_step "$(L "Removing $state_dir" "Removendo $state_dir")"
-		rm -rf "$state_dir" 2>/dev/null || true
+		if [ "$launcher_restore_complete" = 1 ] || [ ! -f "$state_dir/coverage.policy" ]; then
+			log_step "$(L "Removing $state_dir" "Removendo $state_dir")"
+			rm -rf "$state_dir" 2>/dev/null || true
+		else
+			find "$state_dir" -mindepth 1 -maxdepth 1 \
+				! -name coverage.policy -exec rm -rf -- {} + 2>/dev/null || true
+			log_warn "$(L "Kept $state_dir/coverage.policy for the launcher restoration retry" \
+			           "$state_dir/coverage.policy foi mantido para a nova tentativa de restauração")"
+		fi
 	fi
 
 	# User config (depot keys, additional apps, scan caches).

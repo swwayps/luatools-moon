@@ -82,12 +82,54 @@ printf '[Desktop Entry]\nExec=steam -silent %%U\nX-SLSteamMoon-Patched=true\n' \
 printf '[Desktop Entry]\nExec=flatpak run com.valvesoftware.Steam\nName=Steam (Flatpak)\n' \
 	> "$FAKE/flatpak-applications/com.valvesoftware.Steam.desktop"
 export DIAG_DESKTOP_DIRS="$FAKE/.local/share/applications:$FAKE/usr-share-applications:$FAKE/.config/autostart:$FAKE/flatpak-applications"
+# launch coverage fixtures: one managed shim, one untouched package launcher,
+# mirrored backups for both paths, and a legacy flat backup. Backup contents
+# include a canary secret to prove the report inventories paths only.
+mkdir -p "$FAKE/system/bin" "$FAKE/system/games" \
+         "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/bin" \
+         "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/games"
+printf '#!/bin/sh\n# slsteam-moon system launcher shim\n' > "$FAKE/system/bin/steam"
+printf '#!/bin/sh\nexec /usr/lib/steam/steam\n' > "$FAKE/system/games/steam"
+chmod 0755 "$FAKE/system/bin/steam" "$FAKE/system/games/steam"
+for backup in \
+    "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/bin/steam.orig" \
+    "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/games/steam.orig" \
+    "$FAKE/.local/share/SLSsteam/system-launcher-backup/steam.orig"; do
+    printf 'captured launcher; TOP_SECRET_BACKUP_CANARY\n' > "$backup"
+    chmod 0755 "$backup"
+done
+export DIAG_LAUNCHER_DIRS="$FAKE/system/bin:$FAKE/system/games"
+export DIAG_LAUNCHER_BACKUP_ROOT="$FAKE/.local/share/SLSsteam/system-launcher-backup"
+export SLSM_COVERAGE_POLICY=launcher
 # secrets that must NEVER be collected
 printf 'ya29.SUPER_SECRET_OAUTH\n' > "$FAKE/.config/CloudRedirect/tokens_gdrive.json"
 printf '{"token":"LUMEN_RPC_SECRET"}\n' > "$FAKE/.local/share/Lumen/session.json"
 
-# ── build the bundle ────────────────────────────────────────────────────────
+# Policy state must follow the installer precedence exactly: the legacy
+# desktop-fallback marker wins over a launcher state, and state files are
+# accepted only when their bytes are exactly one canonical value plus newline.
 export HOME="$FAKE"
+POLICY_STATE="$FAKE/.local/state/slsteam-moon/coverage.policy"
+mkdir -p "$(dirname "$POLICY_STATE")"
+printf 'launcher\n' > "$POLICY_STATE"
+printf 'desktop\n' > "$FAKE/.local/share/SLSsteam/coverage-policy.effective"
+check "policy marker forces desktop fallback" "$([ "$(SLSM_COVERAGE_POLICY= DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+check "valid launcher override beats desktop marker" "$([ "$(SLSM_COVERAGE_POLICY=launcher DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = launcher ] && echo 0 || echo 1)"
+check "valid desktop override remains desktop" "$([ "$(SLSM_COVERAGE_POLICY=desktop DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+check "invalid override defaults to desktop" "$([ "$(SLSM_COVERAGE_POLICY=invalid DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+rm -f "$FAKE/.local/share/SLSsteam/coverage-policy.effective"
+printf 'launcher\n\n' > "$POLICY_STATE"
+check "policy trailing blank defaults to desktop" "$([ "$(SLSM_COVERAGE_POLICY= DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+printf 'launcher\n' > "$POLICY_STATE"
+check "invalid override beats stale launcher state" "$([ "$(SLSM_COVERAGE_POLICY=invalid DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+rm -f "$POLICY_STATE"
+check "missing policy defaults to desktop" "$([ "$(SLSM_COVERAGE_POLICY= DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+printf 'desktop\n' > "$POLICY_STATE"
+check "policy exact desktop state is accepted" "$([ "$(SLSM_COVERAGE_POLICY= DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = desktop ] && echo 0 || echo 1)"
+printf 'launcher\n' > "$POLICY_STATE"
+check "policy exact launcher state is accepted" "$([ "$(SLSM_COVERAGE_POLICY= DIAG_POLICY_FILE="$POLICY_STATE" _diag_effective_policy)" = launcher ] && echo 0 || echo 1)"
+
+# ── build the bundle ────────────────────────────────────────────────────────
 DIAG_CEF_CAP=65536
 collect "$TAR" 0 2>/dev/null
 
@@ -101,6 +143,7 @@ echo "$entries" | grep -q 'lumen\.log'                ; check "contains lumen.lo
 echo "$entries" | grep -q 'steam-logs/content_log\.txt'; check "contains steam content_log" $?
 echo "$entries" | grep -q 'cloudredirect-cr_debug\.log'; check "contains cloudredirect log" $?
 echo "$entries" | grep -q 'steam-desktops\.txt'; check "contains steam-desktops.txt" $?
+echo "$entries" | grep -q 'launch-coverage\.txt'; check "contains launch-coverage.txt" $?
 echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250706_120000_1000\.dmp'; check "contains newest crash dump" $?
 echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250705_120000_1000\.dmp'; check "contains 4th-newest dump (slot 4 of 4)" $?
 if echo "$entries" | grep -q 'steam-dumps/dumps/crash_2025070[1-4]_120000_1000\.dmp'; then check "dump cap: 5th+ newest excluded" 1
@@ -126,6 +169,15 @@ else check "no credential files in bundle" 0; fi
 # ── extract and inspect content ─────────────────────────────────────────────
 mkdir -p "$EXTRACT"; tar -xzf "$TAR" -C "$EXTRACT" 2>/dev/null
 blob="$(cat "$EXTRACT"/* "$EXTRACT"/steam-logs/* "$EXTRACT"/steam-dumps/dumps/*_stdout.txt 2>/dev/null)"
+coverage="$(cat "$EXTRACT/launch-coverage.txt" 2>/dev/null)"
+in_coverage() { if grep -qF "$2" <<<"$coverage"; then check "$1" 0; else check "$1" 1; fi; }
+# The report is inventory-only: it must classify live launchers and enumerate
+# backup paths without reading backup contents.
+in_coverage "coverage: effective policy" 'effective policy: launcher'
+in_coverage "coverage: shim classification" 'status=shim'
+in_coverage "coverage: vanilla classification" 'status=vanilla'
+in_coverage "coverage: mirrored backup paths" 'backup: mirrored '
+in_coverage "coverage: legacy backup paths" 'backup: legacy '
 # NB: the .dmp minidumps are binary and archived AS-IS by design — they are
 # deliberately excluded from the scrub-leak sweep above (byte-shifting sed
 # edits would corrupt them; see the header note in diagnose.sh).
@@ -144,6 +196,7 @@ no_leak "no CM region leak"    'atl3.steamserver'
 no_leak "no OAuth token leak"  'SUPER_SECRET_OAUTH'
 no_leak "no RPC token leak"    'LUMEN_RPC_SECRET'
 no_leak "no .desktop home leak" 'diaguser'
+no_leak "no launcher backup contents" 'TOP_SECRET_BACKUP_CANARY'
 # dump stdout specifically: username, home and IP scrubbed, content kept
 dumpout="$(cat "$EXTRACT/steam-dumps/dumps/stdout.txt" 2>/dev/null)"
 in_dumpout()  { if grep -qF "$2" <<<"$dumpout"; then check "$1" 0; else check "$1" 1; fi; }

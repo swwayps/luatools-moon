@@ -234,17 +234,51 @@ preask_prompts() {
 	resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n" || true
 }
 
-# Mutable-system compatibility helper. Immutable systems return before probing
-# sudo; their desktop integration and dependency flow are entirely user-scoped.
-# Kept as a callable helper for old/internal callers, although preask_prompts no
-# longer invokes it.
-preask_sudo() {
+# Mutable-system launcher privilege preflight. This is deliberately best-effort:
+# user-local desktop coverage remains usable when sudo is unavailable or denied.
+export SLSM_SUDO_PRIMED="${SLSM_SUDO_PRIMED:-0}"
+export SLSM_SUDO_DENIED="${SLSM_SUDO_DENIED:-0}"
+preask_launcher_sudo() {
 	is_immutable_distro && return 0
 	[ "$(id -u)" -ne 0 ] || return 0
-	command -v sudo >/dev/null 2>&1 || return 0
-	sudo -n true 2>/dev/null && return 0   # already cached / passwordless
+	command -v sudo >/dev/null 2>&1 || {
+		log_info "$(L "No sudo available; user-local .desktop coverage remains the fallback." \
+		             "Sudo não disponível; a cobertura .desktop local do usuário continua como fallback.")"
+		return 0
+	}
+
+	local tty="${SLSM_SUDO_TTY:-/dev/tty}"
+	if ! [ -e "$tty" ] || ! { : > "$tty"; } 2>/dev/null; then
+		log_info "$(L "No controlling terminal; user-local .desktop coverage remains the fallback." \
+		             "Sem terminal de controle; a cobertura .desktop local do usuário continua como fallback.")"
+		return 0
+	fi
+
+	if sudo -n true >/dev/null 2>&1; then
+		SLSM_SUDO_PRIMED=1
+		return 0
+	fi
+
+	# Only this credential-requesting function emits the password hint. The
+	# package/dependency path retains its own ensure_sudo behavior later.
 	sudo_hint
-	sudo -v </dev/tty >/dev/tty 2>&1 || true
+	if sudo -v <"$tty" >"$tty" 2>&1; then
+		SLSM_SUDO_PRIMED=1
+		SLSM_SUDO_DENIED=0
+		log_info "$(L "Administrator access primed for launcher coverage." \
+		             "Acesso de administrador preparado para a cobertura do launcher.")"
+	else
+		SLSM_SUDO_DENIED=1
+		log_warn "$(L "Administrator access was not granted; user-local .desktop coverage remains the fallback." \
+		             "O acesso de administrador não foi concedido; a cobertura .desktop local do usuário continua como fallback.")"
+	fi
+	return 0
+}
+
+# Compatibility entry point for older/internal callers. The installer itself
+# uses the explicit launcher-policy name above.
+preask_sudo() {
+	preask_launcher_sudo "$@"
 }
 
 # ============================================================================
@@ -419,16 +453,14 @@ sudo_hint() {
 	fi
 }
 
-# Privilege-escalation prefix for system package operations. Emits the password
-# hint (to the tty) the first time it hands back a real "sudo", so every sudo
-# site gets the instruction without duplicating it.
+# Privilege-escalation prefix for system package operations. Credential prompts
+# belong to ensure_sudo or another function that actually requests access.
 sudo_prefix() {
 	if is_immutable_distro; then
 		echo ""
 	elif [ "$(id -u)" -eq 0 ]; then
 		echo ""
 	elif command -v sudo >/dev/null 2>&1; then
-		sudo_hint
 		echo "sudo"
 	else
 		echo ""
@@ -504,6 +536,70 @@ path_without_slsteam_wrapper() {
 	printf '%s\n' "$output"
 }
 
+# Compare launcher paths after resolving symlinks and spelling aliases. This
+# keeps PATH entries such as `dir/../path` or a symlink to the injected wrapper
+# from being mistaken for a vanilla Steam launcher.
+is_slsteam_injected_wrapper() {
+	local launcher="$1" wrapper resolved_launcher resolved_wrapper
+	wrapper="$HOME/.local/share/SLSsteam/path/steam"
+	resolved_launcher="$(readlink -f "$launcher" 2>/dev/null || true)"
+	resolved_wrapper="$(readlink -f "$wrapper" 2>/dev/null || true)"
+	[ -n "$resolved_launcher" ] && [ -n "$resolved_wrapper" ] && \
+		[ "$resolved_launcher" = "$resolved_wrapper" ]
+}
+
+# Managed distro launchers are safe to use for shutdown only when their
+# captured original is still present and is not another managed shim.
+is_slsteam_system_launcher_shim() {
+	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -qF '# slsteam-moon system launcher shim'
+}
+
+slsteam_shim_original() {
+	local launcher="$1" original
+	original="$(sed -n 's/^SLSM_ORIG="\([^"]*\)"$/\1/p' "$launcher" 2>/dev/null | head -n 1)"
+	if [ -z "$original" ]; then
+		original="$(sed -n 's/^exec "\([^"]*\)" "\$@".*$/\1/p' "$launcher" 2>/dev/null | head -n 1)"
+	fi
+	[ -n "$original" ] || return 1
+	printf '%s\n' "$original"
+}
+
+is_safe_native_launcher() {
+	local launcher="$1" original
+	[ -f "$launcher" ] && [ -x "$launcher" ] || return 1
+	is_slsteam_injected_wrapper "$launcher" && return 1
+	if ! is_slsteam_system_launcher_shim "$launcher"; then
+		return 0
+	fi
+	original="$(slsteam_shim_original "$launcher" 2>/dev/null || true)"
+	[ -f "$original" ] && [ -x "$original" ] && \
+		! is_slsteam_system_launcher_shim "$original" && \
+		! is_slsteam_injected_wrapper "$original"
+}
+
+# Resolve a launcher for `-shutdown` without routing through the injected
+# wrapper or a managed system shim. A missing/unsafe candidate deliberately
+# returns failure so stop_steam can use its bounded signal escalation.
+resolve_shutdown_launcher() {
+	local search_path dir candidate original
+	search_path="$(path_without_slsteam_wrapper "${PATH:-}")"
+	while IFS= read -r dir; do
+		[ -n "$dir" ] || dir="."
+		candidate="${dir%/}/steam"
+		[ -x "$candidate" ] || continue
+		if is_slsteam_system_launcher_shim "$candidate"; then
+			original="$(slsteam_shim_original "$candidate" 2>/dev/null || true)"
+			is_safe_native_launcher "$original" || continue
+			printf '%s\n' "$original"
+			return 0
+		fi
+		is_safe_native_launcher "$candidate" || continue
+		printf '%s\n' "$candidate"
+		return 0
+	done < <(printf '%s\n' "$search_path" | tr ':' '\n')
+	return 1
+}
+
 # How is Steam installed? native / flatpak / snap / none.
 detect_steam_type() {
 	# A native package-manager install puts the launcher in a system bin dir.
@@ -513,7 +609,7 @@ detect_steam_type() {
 	local search_path="${STEAM_SEARCH_PATH-${PATH:-}}"
 	local c dir resolved wrapper_dir
 	for c in $fixed_candidates; do
-		if [ -x "$c" ]; then
+		if is_safe_native_launcher "$c"; then
 			echo "native"
 			return
 		fi
@@ -529,7 +625,7 @@ detect_steam_type() {
 		while IFS= read -r dir; do
 			[ -n "$dir" ] || dir="."
 			c="${dir%/}/steam"
-			[ -x "$c" ] || continue
+			[ -x "$c" ] && is_safe_native_launcher "$c" || continue
 			case "$c" in
 				"$wrapper_dir"/*) continue ;;
 			esac
@@ -1001,11 +1097,13 @@ stop_steam() {
 	# request, which can block for a long time (or stall) while that runtime
 	# bootstraps, hanging the installer at this step. Cap it with `timeout`;
 	# the SIGTERM/SIGKILL escalation below stops Steam regardless.
-	if command -v steam >/dev/null 2>&1; then
+	local shutdown_launcher
+	shutdown_launcher="$(resolve_shutdown_launcher 2>/dev/null || true)"
+	if [ -n "$shutdown_launcher" ]; then
 		if command -v timeout >/dev/null 2>&1; then
-			timeout -k 5 20 steam -shutdown >/dev/null 2>&1 || true
+			timeout -k 5 20 "$shutdown_launcher" -shutdown >/dev/null 2>&1 || true
 		else
-			steam -shutdown >/dev/null 2>&1 || true
+			"$shutdown_launcher" -shutdown >/dev/null 2>&1 || true
 		fi
 	fi
 
@@ -2157,6 +2255,42 @@ install_cloudredirect() {
 	repair_cas_save_layout
 }
 
+# Read the coverage policy persisted by slsteam-moon. Older installs may not
+# have a state file, and malformed values must retain the user-local desktop
+# fallback rather than changing launch behavior unexpectedly.
+installed_coverage_policy() {
+	local policy="${SLSM_COVERAGE_POLICY-}" policy_file policy_state_home
+	if [ -n "$policy" ]; then
+		case "$policy" in
+			launcher|desktop) printf '%s\n' "$policy" ;;
+			*)                printf 'desktop\n' ;;
+		esac
+		return 0
+	fi
+
+	if [ -e "$HOME/.local/share/SLSsteam/coverage-policy.effective" ] || \
+	   [ -L "$HOME/.local/share/SLSsteam/coverage-policy.effective" ]; then
+		printf 'desktop\n'
+		return 0
+	fi
+
+	policy=""
+	case "${XDG_STATE_HOME:-}" in
+		/*) policy_state_home="$XDG_STATE_HOME" ;;
+		*)  policy_state_home="$HOME/.local/state" ;;
+	esac
+	policy_file="$policy_state_home/slsteam-moon/coverage.policy"
+	if cmp -s "$policy_file" <(printf 'launcher\n'); then
+		policy=launcher
+	elif cmp -s "$policy_file" <(printf 'desktop\n'); then
+		policy=desktop
+	fi
+	case "$policy" in
+		launcher|desktop) printf '%s\n' "$policy" ;;
+		*)                printf 'desktop\n' ;;
+	esac
+}
+
 # ============================================================================
 # Completion notice
 # ============================================================================
@@ -2177,6 +2311,10 @@ print_complete() {
 	if [ -f "$CR_SO_PATH" ]; then
 		echo -e "    ${GREEN}•${NC} CloudRedirect ($(L "cloud saves" "cloud saves"))"
 	fi
+	local coverage_policy
+	coverage_policy="$(installed_coverage_policy)"
+	echo -e "  $(L "Launch coverage policy: ${coverage_policy}" \
+	               "Política de cobertura do launcher: ${coverage_policy}")"
 	echo ""
 
 	# Cloud-save guidance: the .so is installed; the user picks a provider and
@@ -2334,6 +2472,7 @@ main() {
 	# running, so ask the optional yes/no questions NOW, before we stop Steam.
 	# No privilege prompt is made on immutable systems.
 	preask_prompts
+	preask_launcher_sudo
 
 	print_section "$(L "Stopping Steam" "Parando a Steam")"
 	stop_steam
