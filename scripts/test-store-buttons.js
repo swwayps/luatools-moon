@@ -3,6 +3,17 @@
 const fs = require("fs");
 
 const source = fs.readFileSync("plugin/public/luatools.js", "utf8");
+if (!/normalizeStoreRows:\s*normalizeBigPictureStoreRows/.test(source)) {
+  throw new Error("GamepadNav does not expose store-row normalization");
+}
+if (!/reconcileStoreRows:\s*reconcileBigPictureStoreRows/.test(source)) {
+  throw new Error("GamepadNav does not expose store-row reconciliation");
+}
+if (
+  !/getMutationProcessingDelay:\s*getMutationProcessingDelay/.test(source)
+) {
+  throw new Error("GamepadNav does not expose mutation delay calculation");
+}
 if (
   !/\.luatools-gamepad-proton-button\s*>\s*span\s*>\s*span\s*\{[^}]*display:\s*flex\s*!important/s.test(
     source,
@@ -196,7 +207,9 @@ function makeInterestFixture() {
   wishlistPanel.appendChild(wishlist);
   column.appendChild(followRow);
   followRow.appendChild(followCell);
-  followCell.appendChild(makeNativeButton("Follow"));
+  const followButton = makeNativeButton("Follow");
+  followButton.id = "native-reference-id";
+  followCell.appendChild(followButton);
   followRow.appendChild(ignoreCell);
   ignoreCell.appendChild(makeNativeButton("Ignore"));
 
@@ -225,9 +238,10 @@ const document = {
   createElement: (tagName) => new FakeElement(tagName),
   getElementById: (id) => (fixture.root.id === id ? fixture.root : fixture.root.querySelector(`#${id}`)),
 };
+const gamepadWindow = { GamepadNav: {} };
 const api = factory(
   document,
-  {},
+  gamepadWindow,
   { callServerMethod: () => Promise.resolve({ success: true }) },
   (text) => text,
   (_key, fallback) => fallback,
@@ -248,7 +262,7 @@ if (!layout || layout.column !== fixture.column) throw new Error("interest layou
 
 api.renderBigPictureStoreButtons(638510, false, layout);
 let order = fixture.column.children.map((node) => node.id || node.className);
-if (order.join("|") !== "|luatools-gamepad-actions|NativeRow|luatools-gamepad-protondb") {
+if (order.join("|") !== "|NativeRow|luatools-gamepad-actions|luatools-gamepad-protondb") {
   throw new Error(`unexpected row order: ${order.join("|")}`);
 }
 
@@ -279,6 +293,15 @@ if (actionGrowth.join("|") !== "179|172") {
   throw new Error(`two-button row does not mirror Follow/Ignore: ${actionGrowth.join("|")}`);
 }
 
+const lateNativeRow = new FakeElement("div");
+lateNativeRow.className = "NativeRow";
+fixture.column.appendChild(lateNativeRow);
+api.renderBigPictureStoreButtons(638510, false, layout);
+order = fixture.column.children.map((node) => node.id || node.className);
+if (order.join("|") !== "|NativeRow|NativeRow|luatools-gamepad-actions|luatools-gamepad-protondb") {
+  throw new Error(`rerender did not keep LuaTools rows after native rows: ${order.join("|")}`);
+}
+
 api.renderBigPictureStoreButtons(638510, true, layout);
 actionLabels = document
   .getElementById("luatools-gamepad-actions")
@@ -302,6 +325,15 @@ const customButtons = [
 ];
 if (!customButtons.every((button) => button.classList.contains(nativeClass))) {
   throw new Error("custom controls did not inherit the native button visual");
+}
+const focusKeys = customButtons.map(
+  (button) => button.attributes["data-luatools-focus-key"],
+);
+if (
+  focusKeys.some((key) => !key) ||
+  new Set(focusKeys).size !== customButtons.length
+) {
+  throw new Error("custom controls did not receive unique stable focus keys");
 }
 
 console.log("ok - Gamescope store controls follow the new native interest layout");

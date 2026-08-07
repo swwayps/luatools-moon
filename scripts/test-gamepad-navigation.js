@@ -17,6 +17,7 @@ class FakeElement {
     this.parentElement = null;
     this.children = [];
     this.listeners = new Map();
+    this.attributes = {};
     this.clickCount = 0;
     this.isConnected = true;
     this.classes = new Set();
@@ -30,10 +31,24 @@ class FakeElement {
   }
 
   appendChild(child) {
+    if (child.parentElement) {
+      const previousIndex = child.parentElement.children.indexOf(child);
+      if (previousIndex >= 0) child.parentElement.children.splice(previousIndex, 1);
+    }
     child.parentElement = this;
     child.isConnected = this.isConnected;
     this.children.push(child);
     return child;
+  }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  getAttribute(name) {
+    return Object.prototype.hasOwnProperty.call(this.attributes, name)
+      ? this.attributes[name]
+      : null;
   }
 
   contains(candidate) {
@@ -237,6 +252,12 @@ const addAction = new FakeElement("add-via-luatools", "BUTTON");
 const followAction = new FakeElement("follow", "BUTTON");
 const ignoreAction = new FakeElement("ignore", "BUTTON");
 const protonAction = new FakeElement("protondb", "BUTTON");
+restartAction.id = "native-reference-id";
+addAction.id = "native-reference-id";
+protonAction.id = "native-reference-id";
+restartAction.setAttribute("data-luatools-focus-key", "restart");
+addAction.setAttribute("data-luatools-focus-key", "add");
+protonAction.setAttribute("data-luatools-focus-key", "proton");
 
 restartAction.rect = { left: 100, right: 250, top: 100, bottom: 140, width: 150, height: 40 };
 addAction.rect = { left: 260, right: 410, top: 100, bottom: 140, width: 150, height: 40 };
@@ -245,15 +266,17 @@ ignoreAction.rect = { left: 260, right: 410, top: 160, bottom: 200, width: 150, 
 protonAction.rect = { left: 100, right: 410, top: 220, bottom: 260, width: 310, height: 40 };
 
 interestRoot.appendChild(interestColumn);
-interestColumn.appendChild(actionRow);
+// Steam's native row already exists; option A appends both LuaTools rows after it.
 interestColumn.appendChild(nativeFollowRowElement);
+interestColumn.appendChild(actionRow);
 interestColumn.appendChild(protonRow);
 actionRow.appendChild(restartAction);
 actionRow.appendChild(addAction);
 nativeFollowRowElement.appendChild(followAction);
 nativeFollowRowElement.appendChild(ignoreAction);
 protonRow.appendChild(protonAction);
-actionRow.querySelectorAll = () => [restartAction, addAction];
+let actionButtons = [restartAction, addAction];
+actionRow.querySelectorAll = () => actionButtons;
 protonRow.querySelectorAll = () => [protonAction];
 
 const interestTree = new FakeTree("FeatureTarget_interest-buttons", null, {});
@@ -325,16 +348,170 @@ const factory = new Function(
   "window",
   "document",
   "MutationObserver",
-  `${block}\nreturn { registerNativeHeaderNavigation, cleanupNativeHeaderNavigation, registerNativeStoreNavigation, cleanupNativeStoreNavigation, registerNativeOverlayNavigation, cleanupNativeOverlayNavigation, hasNativeOverlayNavigation };`,
+  `${block}\nreturn { registerNativeHeaderNavigation, cleanupNativeHeaderNavigation, registerNativeStoreNavigation, cleanupNativeStoreNavigation, registerNativeOverlayNavigation, cleanupNativeOverlayNavigation, hasNativeOverlayNavigation, normalizeBigPictureStoreRows, reconcileBigPictureStoreRows, getMutationProcessingDelay, getMutationProcessingDeadline, hasPendingStoreRegistration: hasPendingNativeStoreRegistration, captureStoreFocus: captureNativeStoreFocus };`,
 );
-const api = factory(
-  {
-    FocusNavController: controller,
-    getComputedStyle: (element) => element.style,
+const scheduledRetries = [];
+const canceledTimers = new Set();
+let nextTimerId = 1;
+const gamepadWindow = {
+  FocusNavController: controller,
+  getComputedStyle: (element) => element.style,
+  setTimeout: (callback, delay) => {
+    const id = nextTimerId++;
+    scheduledRetries.push({ id, callback, delay });
+    return id;
   },
+  clearTimeout: (id) => canceledTimers.add(id),
+};
+const runNextScheduledRetry = () => {
+  while (scheduledRetries.length > 0) {
+    const retry = scheduledRetries.shift();
+    if (!canceledTimers.has(retry.id)) {
+      retry.callback();
+      return retry;
+    }
+  }
+  return null;
+};
+const api = factory(
+  gamepadWindow,
   { documentElement: new FakeElement("document") },
   FakeMutationObserver,
 );
+
+if (typeof api.normalizeBigPictureStoreRows !== "function") {
+  throw new Error("store row normalization helper is missing");
+}
+if (typeof api.getMutationProcessingDelay !== "function") {
+  throw new Error("mutation processing delay helper is missing");
+}
+if (typeof api.captureStoreFocus !== "function") {
+  throw new Error("store focus capture helper is missing");
+}
+if (api.getMutationProcessingDelay(1000, 900, 1000) !== 1200) {
+  throw new Error("throttled mutation did not schedule a trailing pass");
+}
+if (api.getMutationProcessingDelay(2000, 0, 1000) !== 300) {
+  throw new Error("unthrottled mutation did not retain debounce delay");
+}
+if (typeof api.getMutationProcessingDeadline !== "function") {
+  throw new Error("mutation processing deadline helper is missing");
+}
+if (api.getMutationProcessingDeadline(1000, 0, 300) !== 1300) {
+  throw new Error("mutation processing deadline was not initialized");
+}
+if (api.getMutationProcessingDeadline(1100, 1300, 300) !== 1300) {
+  throw new Error("mutation processing deadline was extended by a burst");
+}
+interestColumn.appendChild(actionRow);
+if (
+  interestColumn.children[0] !== nativeFollowRowElement ||
+  interestColumn.children[1] !== protonRow ||
+  interestColumn.children[2] !== actionRow
+) {
+  throw new Error("fake appendChild does not model moving an existing row");
+}
+if (!api.normalizeBigPictureStoreRows(interestColumn, actionRow, protonRow)) {
+  throw new Error("store row normalization did not detect reordered rows");
+}
+if (
+  interestColumn.children[0] !== nativeFollowRowElement ||
+  interestColumn.children[1] !== actionRow ||
+  interestColumn.children[2] !== protonRow
+) {
+  throw new Error("store row normalization did not restore native order");
+}
+if (api.normalizeBigPictureStoreRows(interestColumn, actionRow, protonRow)) {
+  throw new Error("already normalized store rows were moved unnecessarily");
+}
+const lateNativeRowElement = new FakeElement("late-native-row");
+interestColumn.appendChild(lateNativeRowElement);
+if (!api.normalizeBigPictureStoreRows(interestColumn, actionRow, protonRow)) {
+  throw new Error("store row normalization ignored a later native row");
+}
+if (
+  interestColumn.children[interestColumn.children.length - 3] !==
+    lateNativeRowElement ||
+  interestColumn.children[interestColumn.children.length - 2] !== actionRow ||
+  interestColumn.children[interestColumn.children.length - 1] !== protonRow
+) {
+  throw new Error("store rows were not restored after a later native row");
+}
+const registrationEvents = [];
+const fakeGamepadNav = {
+  cleanupStoreRows: () => registrationEvents.push("cleanup"),
+  registerStoreRows: (rows) => registrationEvents.push(["register", rows]),
+};
+interestColumn.appendChild(lateNativeRowElement);
+if (
+  !api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    fakeGamepadNav,
+  )
+) {
+  throw new Error("store row reconciliation did not detect a moved native row");
+}
+if (
+  registrationEvents.length !== 2 ||
+  registrationEvents[0] !== "cleanup" ||
+  registrationEvents[1][0] !== "register"
+) {
+  throw new Error("store row reconciliation did not rebuild native focus registration");
+}
+if (
+  api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    fakeGamepadNav,
+  )
+) {
+  throw new Error("normalized store rows triggered unnecessary focus rebuilding");
+}
+if (registrationEvents.length !== 2) {
+  throw new Error("normalized store rows changed focus registration");
+}
+if (api.hasPendingStoreRegistration()) {
+  throw new Error("successful store registration remained pending");
+}
+
+let retryAttempts = 0;
+const retryGamepadNav = {
+  cleanupStoreRows: () => {},
+  registerStoreRows: () => {
+    retryAttempts += 1;
+    return retryAttempts > 1;
+  },
+};
+interestColumn.appendChild(lateNativeRowElement);
+if (
+  api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    retryGamepadNav,
+  )
+) {
+  throw new Error("failed store registration was reported as successful");
+}
+if (!api.hasPendingStoreRegistration()) {
+  throw new Error("failed store registration did not remain pending");
+}
+if (
+  !api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    retryGamepadNav,
+  )
+) {
+  throw new Error("pending store registration was not retried successfully");
+}
+if (retryAttempts !== 2 || api.hasPendingStoreRegistration()) {
+  throw new Error("successful store registration did not clear pending state");
+}
 
 if (!api.registerNativeHeaderNavigation(headerButton)) {
   throw new Error("header button was not registered");
@@ -392,26 +569,155 @@ for (const action of [restartAction, addAction, protonAction]) {
 if (actionRowEntry.node.properties.navEntryPreferPosition !== 2) {
   throw new Error("LuaTools action row does not preserve the horizontal focus position");
 }
-if (typeof actionRowEntry.node.properties.onMoveDown !== "function") {
-  throw new Error("LuaTools action row has no deterministic down-navigation handler");
+for (const rowEntry of [actionRowEntry, protonRowEntry]) {
+  if (
+    typeof rowEntry.node.properties.onMoveUp === "function" ||
+    typeof rowEntry.node.properties.onMoveDown === "function"
+  ) {
+    throw new Error("LuaTools store rows still override Steam vertical navigation");
+  }
+}
+const storeRowOrder = interestColumnNode.m_rgChildren;
+if (
+  storeRowOrder[0] !== nativeFollowRowNode ||
+  storeRowOrder[1] !== actionRowEntry.node ||
+  storeRowOrder[2] !== protonRowEntry.node
+) {
+  throw new Error("LuaTools rows are not ordered after native store rows");
 }
 
-// Model the DOM order Steam uses after the injected action row is mounted.
-interestColumnNode.m_rgChildren = [
-  actionRowEntry.node,
-  nativeFollowRowNode,
-  protonRowEntry.node,
-];
 const addEntry = interestTree.registered.find(
   (entry) => entry.element === addAction,
 );
 addEntry.node.BTakeFocus(0, 10);
-const movedDown = actionRowEntry.node.properties.onMoveDown(
-  { button: 10, source: 1 },
-  actionRowEntry.node,
+if (!addEntry.node.focused || interestColumnNode.m_ActiveChild !== actionRowEntry.node) {
+  throw new Error("Add via LuaTools did not receive native focus in its row");
+}
+const nativeGamepadNav = {
+  cleanupStoreRows: api.cleanupNativeStoreNavigation,
+  registerStoreRows: api.registerNativeStoreNavigation,
+};
+interestColumn.appendChild(nativeFollowRowElement);
+if (
+  !api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    nativeGamepadNav,
+  )
+) {
+  throw new Error("native row reorder was not reconciled");
+}
+const restoredAddEntry = interestTree.registered
+  .filter((entry) => entry.element === addAction)
+  .at(-1);
+if (!restoredAddEntry || !restoredAddEntry.node.focused) {
+  throw new Error("store row reconciliation lost the focused LuaTools action");
+}
+if (api.captureStoreFocus() !== addAction) {
+  throw new Error("store focus capture did not identify the focused action");
+}
+restoredAddEntry.node.focused = false;
+
+const rerenderedAddAction = new FakeElement("add-via-luatools-rerender", "BUTTON");
+rerenderedAddAction.id = addAction.id;
+rerenderedAddAction.setAttribute(
+  "data-luatools-focus-key",
+  addAction.getAttribute("data-luatools-focus-key"),
 );
-if (!movedDown || !nativeIgnoreNode.focused) {
-  throw new Error("down from Add via LuaTools did not preserve the right-hand column");
+rerenderedAddAction.rect = addAction.rect;
+rerenderedAddAction.parentElement = actionRow;
+addAction.isConnected = false;
+addAction.parentElement = null;
+actionRow.children[1] = rerenderedAddAction;
+actionButtons = [restartAction, rerenderedAddAction];
+if (!api.registerNativeStoreNavigation([actionRow, protonRow])) {
+  throw new Error("store navigation did not register after a button rerender");
+}
+const rerenderedAddEntry = interestTree.registered
+  .filter((entry) => entry.element === rerenderedAddAction)
+  .at(-1);
+if (!rerenderedAddEntry || !rerenderedAddEntry.node.focused) {
+  throw new Error("store button rerender lost the focused LuaTools action");
+}
+
+api.cleanupNativeStoreNavigation();
+context.m_rgGamepadNavigationTrees.delete(interestTree);
+if (api.registerNativeStoreNavigation([actionRow, protonRow])) {
+  throw new Error("store registration succeeded without an owner tree");
+}
+if (!api.hasPendingStoreRegistration()) {
+  throw new Error("direct store registration failure did not remain pending");
+}
+context.m_rgGamepadNavigationTrees.add(interestTree);
+const directRetry = runNextScheduledRetry();
+if (!directRetry || directRetry.delay !== 300) {
+  throw new Error("direct store registration failure did not schedule a retry");
+}
+if (api.hasPendingStoreRegistration()) {
+  throw new Error("successful direct store retry remained pending");
+}
+
+protonRow.isConnected = false;
+if (api.registerNativeStoreNavigation([actionRow, protonRow])) {
+  throw new Error("partial store rows were registered as complete");
+}
+if (!api.hasPendingStoreRegistration()) {
+  throw new Error("partial store registration did not remain pending");
+}
+protonRow.isConnected = true;
+const partialRetry = runNextScheduledRetry();
+if (!partialRetry || api.hasPendingStoreRegistration()) {
+  throw new Error("partial store registration was not retried after reinsertion");
+}
+
+api.cleanupNativeStoreNavigation();
+context.m_rgGamepadNavigationTrees.delete(interestTree);
+if (api.registerNativeStoreNavigation([actionRow, protonRow])) {
+  throw new Error("persistent store registration failure succeeded");
+}
+let persistentRetryCount = 0;
+while (scheduledRetries.length > 0) {
+  const retry = runNextScheduledRetry();
+  if (!retry) break;
+  persistentRetryCount += 1;
+  if (persistentRetryCount > 8) {
+    throw new Error("store registration retry limit was not enforced");
+  }
+}
+if (persistentRetryCount !== 8 || !api.hasPendingStoreRegistration()) {
+  throw new Error("store registration did not exhaust the bounded retry window");
+}
+context.m_rgGamepadNavigationTrees.add(interestTree);
+if (
+  !api.reconcileBigPictureStoreRows(
+    interestColumn,
+    actionRow,
+    protonRow,
+    nativeGamepadNav,
+  )
+) {
+  throw new Error("bounded store retry state was not recoverable");
+}
+
+const storeRemovalObserver = FakeMutationObserver.instances
+  .filter((observer) => observer.target === interestColumn)
+  .at(-1);
+if (!storeRemovalObserver) {
+  throw new Error("store navigation did not install its removal observer");
+}
+actionRow.isConnected = false;
+storeRemovalObserver.trigger();
+if (!api.hasPendingStoreRegistration()) {
+  throw new Error("store removal did not schedule registration retry");
+}
+actionRow.isConnected = true;
+const removalRetry = runNextScheduledRetry();
+if (!removalRetry || removalRetry.delay !== 300) {
+  throw new Error("store removal did not schedule a retry callback");
+}
+if (api.hasPendingStoreRegistration()) {
+  throw new Error("store reinsertion retry remained pending");
 }
 
 const restartEntry = interestTree.registered.find(

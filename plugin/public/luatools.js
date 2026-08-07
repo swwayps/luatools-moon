@@ -150,6 +150,14 @@
   // NATIVE STEAM FOCUS NAVIGATION START
   let nativeHeaderNavigation = null;
   let nativeStoreNavigation = null;
+  let nativeStoreFocusRestoreElement = null;
+  let nativeStoreFocusRestoreKey = null;
+  let nativeStoreRegistrationPending = false;
+  let nativeStoreRetryTimer = null;
+  let nativeStoreRetryRows = null;
+  let nativeStoreRetryAttempts = 0;
+  const NATIVE_STORE_RETRY_DELAY = 300;
+  const NATIVE_STORE_RETRY_LIMIT = 8;
   let nativeOverlayNavigation = null;
   let nativeOverlaySequence = 0;
 
@@ -541,127 +549,255 @@
     return null;
   }
 
-  function collectFocusableStoreNodes(node, result) {
-    if (!node) return result;
-    const children = node.m_rgChildren || [];
-    const properties = node.m_Properties || node.properties || {};
-    if (node.m_element && properties.focusable === true && children.length === 0) {
-      result.push(node);
-      return result;
+  function normalizeBigPictureStoreRows(column, actionRow, protonRow) {
+    if (!column || !actionRow || !protonRow) return false;
+
+    const children = Array.from(column.children || []);
+    const alreadyNormalized =
+      actionRow.parentElement === column &&
+      protonRow.parentElement === column &&
+      children[children.length - 2] === actionRow &&
+      children[children.length - 1] === protonRow;
+    if (alreadyNormalized) return false;
+
+    column.appendChild(actionRow);
+    column.appendChild(protonRow);
+    return true;
+  }
+
+  function getMutationProcessingDelay(now, lastProcessedAt, throttle) {
+    return Math.max(0, throttle - (now - lastProcessedAt)) + 300;
+  }
+
+  function getMutationProcessingDeadline(now, lastDeadline, processingDelay) {
+    const requestedDeadline = now + processingDelay;
+    return lastDeadline === 0
+      ? requestedDeadline
+      : Math.min(lastDeadline, requestedDeadline);
+  }
+
+  function getNativeStoreFocusedElement() {
+    if (!nativeStoreNavigation || !nativeStoreNavigation.items) return null;
+
+    let focusedElement = null;
+    nativeStoreNavigation.items.forEach(function (node, element) {
+      if (!focusedElement && nativeNodeHasFocus(node)) {
+        focusedElement = element;
+      }
+    });
+    return focusedElement;
+  }
+
+  function captureNativeStoreFocus() {
+    const focusedElement = getNativeStoreFocusedElement();
+    if (!focusedElement) {
+      if (!nativeStoreRegistrationPending) {
+        nativeStoreFocusRestoreElement = null;
+        nativeStoreFocusRestoreKey = null;
+      }
+      return null;
     }
-    children.forEach(function (child) {
-      collectFocusableStoreNodes(child, result);
-    });
-    return result;
+
+    nativeStoreFocusRestoreElement = focusedElement;
+    nativeStoreFocusRestoreKey = getNativeStoreFocusKey(focusedElement);
+    return focusedElement;
   }
 
-  function getFocusedStoreNode(rowNode) {
-    if (!rowNode) return null;
+  function getNativeStoreFocusKey(element) {
+    if (!element) return null;
     try {
-      const descendant =
-        typeof rowNode.GetActiveDescendant === "function"
-          ? rowNode.GetActiveDescendant()
-          : null;
-      if (descendant && descendant !== rowNode && descendant.m_element) {
-        return descendant;
+      if (typeof element.getAttribute === "function") {
+        const dataKey = element.getAttribute("data-luatools-focus-key");
+        if (dataKey) return "data:" + dataKey;
+      }
+      if (element.id) return "id:" + element.id;
+      if (typeof element.className === "string") {
+        const marker = element.className
+          .split(/\s+/)
+          .find(function (name) {
+            return (
+              name.indexOf("luatools-") === 0 &&
+              name !== "luatools-gamepad-button"
+            );
+          });
+        if (marker) return "class:" + marker;
       }
     } catch (_) {}
-
-    let focused = null;
-    (function walk(node) {
-      if (focused || !node) return;
-      try {
-        if (
-          node.m_element &&
-          typeof node.BHasFocus === "function" &&
-          node.BHasFocus()
-        ) {
-          focused = node;
-          return;
-        }
-      } catch (_) {}
-      (node.m_rgChildren || []).forEach(walk);
-    })(rowNode);
-    return focused;
+    return null;
   }
 
-  function findClosestStoreNode(rowNode, currentRect) {
-    const candidates = collectFocusableStoreNodes(rowNode, []);
-    if (candidates.length === 0) return null;
-    if (!currentRect) return candidates[0];
+  function findNativeStoreFocusNode(items, focusElement, focusKey) {
+    if (!items) return null;
+    const exactNode = focusElement && items.get(focusElement);
+    if (exactNode) return exactNode;
+    if (!focusKey) return null;
 
-    const currentX = (currentRect.left + currentRect.right) / 2;
-    let bestNode = null;
-    let bestScore = Infinity;
-    candidates.forEach(function (candidate) {
-      let rect = null;
-      try {
-        rect = candidate.GetBoundingRect();
-      } catch (_) {}
-      if (!rect) return;
-      const candidateX = (rect.left + rect.right) / 2;
-      const overlap =
-        Math.min(currentRect.right, rect.right) -
-        Math.max(currentRect.left, rect.left);
-      const distance = Math.abs(currentX - candidateX);
-      const score = distance * (overlap > 0 ? 0.25 : 3);
-      if (score < bestScore) {
-        bestScore = score;
-        bestNode = candidate;
+    let matchingNode = null;
+    items.forEach(function (node, element) {
+      if (!matchingNode && getNativeStoreFocusKey(element) === focusKey) {
+        matchingNode = node;
       }
     });
-    return bestNode || candidates[0];
+    return matchingNode;
   }
 
-  function moveBetweenNativeStoreRows(rowNode, detail, direction) {
-    const parent = rowNode && rowNode.m_Parent;
-    if (!parent) return false;
+  function hasPendingNativeStoreRegistration() {
+    return nativeStoreRegistrationPending;
+  }
 
-    const siblings = parent.m_rgChildren || [];
-    const currentIndex = siblings.indexOf(rowNode);
-    if (currentIndex < 0) return false;
+  function reconcileBigPictureStoreRows(
+    column,
+    actionRow,
+    protonRow,
+    gamepadNav,
+  ) {
+    const moved = normalizeBigPictureStoreRows(column, actionRow, protonRow);
+    if (!moved && !nativeStoreRegistrationPending) return false;
 
-    const focusedNode = getFocusedStoreNode(rowNode);
-    let currentRect = null;
-    try {
-      currentRect = focusedNode && focusedNode.GetBoundingRect();
-    } catch (_) {}
-
-    const step = direction === NATIVE_DIRECTION.UP ? -1 : 1;
-    for (
-      let index = currentIndex + step;
-      index >= 0 && index < siblings.length;
-      index += step
+    const canRebuildNavigation = !!(
+      gamepadNav &&
+      typeof gamepadNav.cleanupStoreRows === "function" &&
+      typeof gamepadNav.registerStoreRows === "function"
+    );
+    if (canRebuildNavigation) {
+      if (!nativeStoreRegistrationPending) {
+        nativeStoreFocusRestoreElement = getNativeStoreFocusedElement();
+        nativeStoreFocusRestoreKey = getNativeStoreFocusKey(
+          nativeStoreFocusRestoreElement,
+        );
+      }
+      nativeStoreRegistrationPending = true;
+      let registered = false;
+      try {
+        gamepadNav.cleanupStoreRows();
+        registered = gamepadNav.registerStoreRows([actionRow, protonRow]) !== false;
+      } catch (_) {}
+      if (registered) {
+        nativeStoreRegistrationPending = false;
+        nativeStoreFocusRestoreElement = null;
+        nativeStoreFocusRestoreKey = null;
+      }
+      return registered;
+    }
+    if (
+      gamepadNav &&
+      typeof gamepadNav.registerStoreRows === "function"
     ) {
-      const target = findClosestStoreNode(siblings[index], currentRect);
-      if (
-        target &&
-        typeof target.BTakeFocus === "function" &&
-        target.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE, direction)
-      ) {
-        return true;
-      }
+      return gamepadNav.registerStoreRows([actionRow, protonRow]) !== false;
     }
-    return false;
+    return moved;
+  }
+
+  function clearNativeStoreRegistrationRetry() {
+    if (nativeStoreRetryTimer !== null) {
+      if (typeof window.clearTimeout === "function") {
+        try {
+          window.clearTimeout(nativeStoreRetryTimer);
+        } catch (_) {}
+      }
+      nativeStoreRetryTimer = null;
+    }
+    nativeStoreRetryRows = null;
+    nativeStoreRetryAttempts = 0;
+  }
+
+  function scheduleNativeStoreRegistrationRetry(rows) {
+    if (!nativeStoreRegistrationPending) return;
+    const retryRows = Array.from(rows || []).filter(Boolean);
+    if (retryRows.length === 0) return;
+    nativeStoreRetryRows = retryRows;
+    if (
+      nativeStoreRetryTimer !== null ||
+      nativeStoreRetryAttempts >= NATIVE_STORE_RETRY_LIMIT ||
+      typeof window.setTimeout !== "function"
+    ) {
+      return;
+    }
+
+    nativeStoreRetryTimer = window.setTimeout(function () {
+      nativeStoreRetryTimer = null;
+      if (!nativeStoreRegistrationPending) {
+        clearNativeStoreRegistrationRetry();
+        return;
+      }
+
+      const pendingRows = nativeStoreRetryRows;
+      nativeStoreRetryAttempts += 1;
+      if (
+        !pendingRows ||
+        !pendingRows.every(function (row) {
+          return !!(row && row.isConnected);
+        })
+      ) {
+        if (nativeStoreRetryAttempts < NATIVE_STORE_RETRY_LIMIT) {
+          scheduleNativeStoreRegistrationRetry(pendingRows);
+        }
+        return;
+      }
+
+      const registered = registerNativeStoreNavigation(pendingRows);
+      if (
+        !registered &&
+        nativeStoreRegistrationPending &&
+        nativeStoreRetryAttempts < NATIVE_STORE_RETRY_LIMIT
+      ) {
+        scheduleNativeStoreRegistrationRetry(pendingRows);
+      }
+    }, NATIVE_STORE_RETRY_DELAY);
   }
 
   function registerNativeStoreNavigation(rows) {
-    rows = Array.from(rows || []).filter(function (row) {
-      return !!(row && row.isConnected);
-    });
-    const elements = rows.reduce(function (actions, row) {
-      return actions.concat(
-        Array.from(
-          row.querySelectorAll(
-            "button:not([disabled]), a[href]:not([disabled])",
-          ),
-        ),
-      );
-    }, []);
-    if (rows.length === 0 || elements.length === 0) {
+    const hadPendingRegistration = nativeStoreRegistrationPending;
+    if (!hadPendingRegistration && !nativeStoreFocusRestoreElement) {
+      captureNativeStoreFocus();
+    }
+    nativeStoreRegistrationPending = true;
+
+    const requestedRows = Array.from(rows || []).filter(Boolean);
+    if (requestedRows.length === 0) {
       cleanupNativeStoreNavigation();
+      nativeStoreRegistrationPending = false;
+      clearNativeStoreRegistrationRetry();
       return false;
     }
+
+    const connectedRows = requestedRows.filter(function (row) {
+      return !!row.isConnected;
+    });
+    const rowElements = connectedRows.map(function (row) {
+      return Array.from(
+        row.querySelectorAll(
+          "button:not([disabled]), a[href]:not([disabled])",
+        ),
+      );
+    });
+    const elements = rowElements.reduce(function (actions, rowActions) {
+      return actions.concat(rowActions);
+    }, []);
+    if (
+      connectedRows.length !== requestedRows.length ||
+      rowElements.some(function (rowActions) {
+        return rowActions.length === 0;
+      })
+    ) {
+      cleanupNativeStoreNavigation();
+      scheduleNativeStoreRegistrationRetry(requestedRows);
+      return false;
+    }
+    rows = connectedRows;
+    if (elements.length === 0) {
+      cleanupNativeStoreNavigation();
+      scheduleNativeStoreRegistrationRetry(requestedRows);
+      return false;
+    }
+    if (!nativeStoreFocusRestoreElement && nativeStoreNavigation) {
+      nativeStoreFocusRestoreElement = getNativeStoreFocusedElement();
+      nativeStoreFocusRestoreKey = getNativeStoreFocusKey(
+        nativeStoreFocusRestoreElement,
+      );
+    }
+    const focusToRestore = nativeStoreFocusRestoreElement;
+    const focusKeyToRestore = nativeStoreFocusRestoreKey;
     if (
       nativeStoreNavigation &&
       nativeStoreNavigation.rows.length === rows.length &&
@@ -673,15 +809,31 @@
         return element === elements[index] && element.isConnected;
       })
     ) {
+      const focusedNode = findNativeStoreFocusNode(
+        nativeStoreNavigation.items,
+        focusToRestore,
+        focusKeyToRestore,
+      );
+      if (focusedNode && typeof focusedNode.BTakeFocus === "function") {
+        focusedNode.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE);
+      }
+      nativeStoreRegistrationPending = false;
+      nativeStoreFocusRestoreElement = null;
+      nativeStoreFocusRestoreKey = null;
+      clearNativeStoreRegistrationRetry();
       return true;
     }
 
     cleanupNativeStoreNavigation();
     const controller = getNativeFocusController();
     const context = getNativeFocusContext(controller);
-    if (!controller || !context) return false;
+    if (!controller || !context) {
+      scheduleNativeStoreRegistrationRetry(rows);
+      return false;
+    }
 
     const disposers = [];
+    const registeredItems = new Map();
     let removalObserver = null;
     let disposed = false;
 
@@ -702,6 +854,7 @@
       ]);
       if (!owner) {
         dispose();
+        scheduleNativeStoreRegistrationRetry(rows);
         return false;
       }
       const tree = owner.tree;
@@ -714,20 +867,6 @@
           focusable: false,
           layout: NATIVE_LAYOUT.ROW,
           navEntryPreferPosition: NATIVE_NAV_ENTRY.MAINTAIN_X,
-          onMoveUp: function (detail) {
-            return moveBetweenNativeStoreRows(
-              rowNode,
-              detail,
-              NATIVE_DIRECTION.UP,
-            );
-          },
-          onMoveDown: function (detail) {
-            return moveBetweenNativeStoreRows(
-              rowNode,
-              detail,
-              NATIVE_DIRECTION.DOWN,
-            );
-          },
           actionDescriptionMap: {},
         });
         disposers.push(tree.RegisterNavigationItem(rowNode, row));
@@ -743,6 +882,7 @@
             actionDescriptionMap: {},
           });
           disposers.push(tree.RegisterNavigationItem(node, element));
+          registeredItems.set(element, node);
           disposers.push(bindNativeConfirm(element));
         });
       });
@@ -753,7 +893,10 @@
             return !row.isConnected;
           })
         ) {
+          if (!nativeStoreRegistrationPending) captureNativeStoreFocus();
+          nativeStoreRegistrationPending = true;
           cleanupNativeStoreNavigation();
+          scheduleNativeStoreRegistrationRetry(rows);
         }
       });
       removalObserver.observe(
@@ -764,13 +907,27 @@
       nativeStoreNavigation = {
         rows: rows,
         elements: elements,
+        items: registeredItems,
         tree: tree,
         cleanup: dispose,
       };
+      const focusedNode = findNativeStoreFocusNode(
+        registeredItems,
+        focusToRestore,
+        focusKeyToRestore,
+      );
+      if (focusedNode && typeof focusedNode.BTakeFocus === "function") {
+        focusedNode.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE);
+      }
+      nativeStoreRegistrationPending = false;
+      nativeStoreFocusRestoreElement = null;
+      nativeStoreFocusRestoreKey = null;
+      clearNativeStoreRegistrationRetry();
       return true;
     } catch (error) {
       console.warn("[Gamepad] Could not register LuaTools store focus:", error);
       dispose();
+      scheduleNativeStoreRegistrationRetry(rows);
       return false;
     }
   }
@@ -1435,6 +1592,12 @@
     cleanupHeaderElement: cleanupNativeHeaderNavigation,
     registerStoreRows: registerNativeStoreNavigation,
     cleanupStoreRows: cleanupNativeStoreNavigation,
+    normalizeStoreRows: normalizeBigPictureStoreRows,
+    reconcileStoreRows: reconcileBigPictureStoreRows,
+    getMutationProcessingDelay: getMutationProcessingDelay,
+    getMutationProcessingDeadline: getMutationProcessingDeadline,
+    hasPendingStoreRegistration: hasPendingNativeStoreRegistration,
+    captureStoreFocus: captureNativeStoreFocus,
     setBackHandler: function (fn) {
       if (typeof fn === "function") {
         onBackHandler = fn;
@@ -8261,6 +8424,7 @@
       .replace(/luatools-[\w-]+/g, "")
       .trim();
     button.classList.add("luatools-gamepad-button", markerClass);
+    button.setAttribute("data-luatools-focus-key", markerClass);
     button.type = "button";
     button.setAttribute("role", "button");
     button.setAttribute("tabindex", "0");
@@ -8434,9 +8598,103 @@
     }
   }
 
+  function normalizeBigPictureStoreRows(column, actionRow, protonRow) {
+    const gamepadNav = window.GamepadNav;
+    if (
+      gamepadNav &&
+      typeof gamepadNav.normalizeStoreRows === "function"
+    ) {
+      return gamepadNav.normalizeStoreRows(column, actionRow, protonRow);
+    }
+    if (!column || !actionRow || !protonRow) return false;
+
+    const children = Array.from(column.children || []);
+    const alreadyNormalized =
+      actionRow.parentElement === column &&
+      protonRow.parentElement === column &&
+      children[children.length - 2] === actionRow &&
+      children[children.length - 1] === protonRow;
+    if (alreadyNormalized) return false;
+
+    column.appendChild(actionRow);
+    column.appendChild(protonRow);
+    return true;
+  }
+
+  function reconcileBigPictureStoreRows(
+    column,
+    actionRow,
+    protonRow,
+    gamepadNav,
+  ) {
+    gamepadNav = gamepadNav || window.GamepadNav;
+    if (
+      gamepadNav &&
+      typeof gamepadNav.reconcileStoreRows === "function"
+    ) {
+      return gamepadNav.reconcileStoreRows(
+        column,
+        actionRow,
+        protonRow,
+        gamepadNav,
+      );
+    }
+
+    const moved = normalizeBigPictureStoreRows(column, actionRow, protonRow);
+    if (!moved) return false;
+    if (gamepadNav && typeof gamepadNav.cleanupStoreRows === "function") {
+      gamepadNav.cleanupStoreRows();
+    }
+    if (gamepadNav && typeof gamepadNav.registerStoreRows === "function") {
+      return gamepadNav.registerStoreRows([actionRow, protonRow]) !== false;
+    }
+    return true;
+  }
+
+  function getMutationProcessingDelay(now, lastProcessedAt, throttle) {
+    const gamepadNav = window.GamepadNav;
+    if (
+      gamepadNav &&
+      typeof gamepadNav.getMutationProcessingDelay === "function"
+    ) {
+      return gamepadNav.getMutationProcessingDelay(
+        now,
+        lastProcessedAt,
+        throttle,
+      );
+    }
+    return Math.max(0, throttle - (now - lastProcessedAt)) + 300;
+  }
+
+  function getMutationProcessingDeadline(now, lastDeadline, processingDelay) {
+    const gamepadNav = window.GamepadNav;
+    if (
+      gamepadNav &&
+      typeof gamepadNav.getMutationProcessingDeadline === "function"
+    ) {
+      return gamepadNav.getMutationProcessingDeadline(
+        now,
+        lastDeadline,
+        processingDelay,
+      );
+    }
+    const requestedDeadline = now + processingDelay;
+    return lastDeadline === 0
+      ? requestedDeadline
+      : Math.min(lastDeadline, requestedDeadline);
+  }
+
   function renderBigPictureStoreButtons(appid, isAdded, layout) {
     layout = layout || findBigPictureInterestLayout();
     if (!layout) return false;
+    if (
+      window.GamepadNav &&
+      typeof window.GamepadNav.captureStoreFocus === "function"
+    ) {
+      try {
+        window.GamepadNav.captureStoreFocus();
+      } catch (_) {}
+    }
     try {
       ensureStyles();
     } catch (_) {}
@@ -8448,7 +8706,6 @@
         layout,
         "luatools-gamepad-actions",
       );
-      layout.wishlistRow.after(actionRow);
     }
     actionRow.innerHTML = "";
 
@@ -8571,10 +8828,10 @@
         layout,
         "luatools-gamepad-protondb",
       );
-      layout.followRow.after(protonRow);
     }
     addBigPictureProtonDBButton(appid, layout, protonRow);
     alignBigPictureStoreRow(layout, protonRow);
+    normalizeBigPictureStoreRows(layout.column, actionRow, protonRow);
     if (
       window.GamepadNav &&
       typeof window.GamepadNav.registerStoreRows === "function"
@@ -8618,7 +8875,14 @@
       existingProton &&
       existingActions.getAttribute("data-appid") === String(appid)
     ) {
+      const rowsMoved = reconcileBigPictureStoreRows(
+        layout.column,
+        existingActions,
+        existingProton,
+        window.GamepadNav,
+      );
       if (
+        !rowsMoved &&
         window.GamepadNav &&
         typeof window.GamepadNav.registerStoreRows === "function"
       ) {
@@ -10510,49 +10774,71 @@
   // Heavily optimized and throttled version to avoid blocking gamepad
   if (typeof MutationObserver !== "undefined") {
     let mutationTimeout;
+    let mutationProcessingDeadline = 0;
+    let pendingMutations = [];
     let lastMutationProcessTime = 0;
     const MUTATION_THROTTLE = 1000; // Only process once per second
 
     const observer = new MutationObserver(function (mutations) {
-      // Additional throttle on top of debounce
+      pendingMutations = pendingMutations.concat(mutations);
       const now = Date.now();
-      if (now - lastMutationProcessTime < MUTATION_THROTTLE) {
-        return; // Skip if processed recently
-      }
+      const processingDelay = getMutationProcessingDelay(
+        now,
+        lastMutationProcessTime,
+        MUTATION_THROTTLE,
+      );
+      mutationProcessingDeadline = getMutationProcessingDeadline(
+        now,
+        mutationProcessingDeadline,
+        processingDelay,
+      );
+      const delayUntilDeadline = Math.max(
+        0,
+        mutationProcessingDeadline - now,
+      );
 
-      // Debounce mutations to avoid blocking the UI
+      // Debounce mutations without dropping a trailing pass during the throttle
+      // window, while keeping a fixed deadline for a continuous mutation burst.
       clearTimeout(mutationTimeout);
       mutationTimeout = setTimeout(function () {
+        mutationProcessingDeadline = 0;
         lastMutationProcessTime = Date.now();
+        const queuedMutations = pendingMutations;
+        pendingMutations = [];
 
         let shouldUpdate = false;
-        // Quick check: only process first 10 mutations to avoid long loops
-        const mutationsToCheck = Math.min(mutations.length, 10);
+        let shouldNormalizeStoreRows = false;
+        let currentActions = null;
+        let currentProton = null;
+        if (!window.__LUATOOLS_IS_BIG_PICTURE__) {
+          // Inspect the complete queued batch so a matching mutation cannot be
+          // stranded beyond an arbitrary prefix of a burst.
+          const mutationsToCheck = queuedMutations.length;
 
-        for (let i = 0; i < mutationsToCheck; i++) {
-          const mutation = mutations[i];
-          if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
-            // Only check first 3 added nodes to avoid blocking
-            const nodesToCheck = Math.min(mutation.addedNodes.length, 3);
+          for (let i = 0; i < mutationsToCheck; i++) {
+            const mutation = queuedMutations[i];
+            if (mutation.type === "childList" && mutation.addedNodes.length > 0) {
+              const nodesToCheck = mutation.addedNodes.length;
 
-            for (let j = 0; j < nodesToCheck; j++) {
-              const node = mutation.addedNodes[j];
-              if (node.nodeType === 1) {
-                // Element node
-                // Quick class check without querySelector (faster)
-                if (
-                  node.classList &&
-                  (node.classList.contains("steamdb-buttons") ||
-                    node.classList.contains("apphub_OtherSiteInfo") ||
-                    node.id === "FeatureTarget_interest-buttons")
-                ) {
-                  shouldUpdate = true;
-                  break;
+              for (let j = 0; j < nodesToCheck; j++) {
+                const node = mutation.addedNodes[j];
+                if (node.nodeType === 1) {
+                  // Element node
+                  // Quick class check without querySelector (faster)
+                  if (
+                    node.classList &&
+                    (node.classList.contains("steamdb-buttons") ||
+                      node.classList.contains("apphub_OtherSiteInfo") ||
+                      node.id === "FeatureTarget_interest-buttons")
+                  ) {
+                    shouldUpdate = true;
+                    break;
+                  }
                 }
               }
             }
+            if (shouldUpdate) break;
           }
-          if (shouldUpdate) break;
         }
 
         if (
@@ -10564,11 +10850,51 @@
           shouldUpdate = true;
         }
 
+        if (window.__LUATOOLS_IS_BIG_PICTURE__) {
+          currentActions = document.getElementById(
+            "luatools-gamepad-actions",
+          );
+          currentProton = document.getElementById(
+            "luatools-gamepad-protondb",
+          );
+          const rowParent = currentActions && currentActions.parentElement;
+          const children = rowParent
+            ? Array.from(rowParent.children || [])
+            : [];
+          const hasPendingStoreRegistration =
+            window.GamepadNav &&
+            typeof window.GamepadNav.hasPendingStoreRegistration ===
+              "function" &&
+            window.GamepadNav.hasPendingStoreRegistration();
+          if (
+            currentActions &&
+            currentProton &&
+            (hasPendingStoreRegistration ||
+              currentActions.parentElement !== currentProton.parentElement ||
+              children[children.length - 2] !== currentActions ||
+              children[children.length - 1] !== currentProton)
+          ) {
+            shouldNormalizeStoreRows = true;
+          }
+        }
+
+        if (shouldNormalizeStoreRows) {
+          const currentLayout = findBigPictureInterestLayout();
+          if (currentLayout) {
+            reconcileBigPictureStoreRows(
+              currentLayout.column,
+              currentActions,
+              currentProton,
+              window.GamepadNav,
+            );
+          }
+        }
+
         if (shouldUpdate) {
           updateButtonTranslations();
           addLuaToolsButton();
         }
-      }, 300); // Increased debounce to 300ms
+      }, delayUntilDeadline); // Debounce with a bounded trailing deadline
     });
 
     observer.observe(document.body, {
