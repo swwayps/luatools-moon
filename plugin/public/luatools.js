@@ -153,16 +153,145 @@
   let nativeOverlayNavigation = null;
   let nativeOverlaySequence = 0;
 
+  // These values come from Steam's internal focus-nav enums. The source enum
+  // used by BTakeFocus/TakeFocus is different from vgp detail.source:
+  // D$.GAMEPAD is 0, while Vz.GAMEPAD is 1.
+  const NATIVE_GAMEPAD_FOCUS_SOURCE = 0;
+  const NATIVE_DIRECTION = {
+    UP: 9,
+    DOWN: 10,
+    LEFT: 11,
+    RIGHT: 12,
+  };
+  const NATIVE_LAYOUT = {
+    NONE: 0,
+    COLUMN: 1,
+    ROW: 2,
+    GEOMETRIC: 6,
+  };
+  const NATIVE_NAV_ENTRY = {
+    MAINTAIN_X: 2,
+  };
+  const OVERLAY_FOCUSABLE_SELECTOR = [
+    "button:not([disabled])",
+    "a[href]:not([disabled])",
+    "input:not([disabled])",
+    "select:not([disabled])",
+    "textarea:not([disabled])",
+    '[tabindex="0"]',
+    '[tabindex]:not([tabindex="-1"])',
+    ".focusable:not([disabled])",
+  ].join(", ");
+
   function getNativeFocusController() {
     const controller = window.FocusNavController;
     if (
       !controller ||
-      !controller.m_ActiveContext ||
       typeof controller.NewGamepadNavigationTree !== "function"
     ) {
       return null;
     }
     return controller;
+  }
+
+  function getNativeFocusContext(controller) {
+    if (!controller) return null;
+
+    const contextGetters = [
+      function () {
+        return typeof controller.GetActiveContext === "function"
+          ? controller.GetActiveContext()
+          : null;
+      },
+      function () {
+        return typeof controller.FindAnActiveContext === "function"
+          ? controller.FindAnActiveContext()
+          : null;
+      },
+      function () {
+        return controller.m_ActiveContext || null;
+      },
+      function () {
+        return controller.m_LastActiveContext || null;
+      },
+      function () {
+        return typeof controller.GetDefaultContext === "function"
+          ? controller.GetDefaultContext()
+          : null;
+      },
+    ];
+
+    for (let index = 0; index < contextGetters.length; index++) {
+      try {
+        const context = contextGetters[index]();
+        if (context) return context;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  function getNativeFocusTrees(context) {
+    return context
+      ? Array.from(context.m_rgGamepadNavigationTrees || [])
+      : [];
+  }
+
+  function findNavigationOwner(context, element, preferredIds) {
+    if (!context || !element) return null;
+
+    const preferred = preferredIds || [];
+    const trees = getNativeFocusTrees(context);
+    trees.sort(function (left, right) {
+      const leftIndex = preferred.indexOf(left.m_ID);
+      const rightIndex = preferred.indexOf(right.m_ID);
+      return (leftIndex < 0 ? preferred.length : leftIndex) -
+        (rightIndex < 0 ? preferred.length : rightIndex);
+    });
+
+    for (let index = 0; index < trees.length; index++) {
+      const tree = trees[index];
+      const parentNode = findDeepestContainingNavigationNode(
+        tree.Root || tree.m_Root,
+        element,
+      );
+      if (parentNode) return { tree: tree, parentNode: parentNode };
+    }
+    return null;
+  }
+
+  function isVisibleFocusableElement(element) {
+    if (!element || element.isConnected === false) return false;
+    try {
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const style =
+        typeof window.getComputedStyle === "function"
+          ? window.getComputedStyle(element)
+          : null;
+      return !style ||
+        (style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function getOverlayFocusableElements(overlay) {
+    if (!overlay || typeof overlay.querySelectorAll !== "function") return [];
+    return Array.from(overlay.querySelectorAll(OVERLAY_FOCUSABLE_SELECTOR)).filter(
+      isVisibleFocusableElement,
+    );
+  }
+
+  function findActiveOverlay() {
+    if (typeof document.querySelectorAll !== "function") return null;
+    const overlays = Array.from(
+      document.querySelectorAll(OVERLAY_SELECTOR_STRING),
+    ).filter(function (overlay) {
+      return overlay && overlay.isConnected !== false;
+    });
+    return overlays.length ? overlays[overlays.length - 1] : null;
   }
 
   function findDeepestContainingNavigationNode(node, element) {
@@ -267,9 +396,9 @@
     }
   }
 
-  function bindNativeOverlayInput(element, index, elements, nodes) {
+  function bindNativeOverlayInput(element, navigation) {
     function onFocus() {
-      elements.forEach(function (candidate) {
+      navigation.elements.forEach(function (candidate) {
         candidate.classList.remove("active-focus");
       });
       element.classList.add("active-focus");
@@ -290,17 +419,32 @@
         return;
       }
 
-      if (button < 9 || button > 12) return;
+      if (button < NATIVE_DIRECTION.UP || button > NATIVE_DIRECTION.RIGHT) {
+        return;
+      }
+
+      const currentIndex = navigation.elements.indexOf(element);
+      if (currentIndex < 0) return;
+
       consumeNativeInput(event);
-      const nextIndex = findDirectionalElementIndex(elements, index, button);
-      if (nextIndex >= 0 && nodes[nextIndex]) {
-        nodes[nextIndex].BTakeFocus(detail.source || 1);
+      const nextIndex = findDirectionalElementIndex(
+        navigation.elements,
+        currentIndex,
+        button,
+      );
+      const nextElement = navigation.elements[nextIndex];
+      const nextItem = nextElement && navigation.items.get(nextElement);
+      if (nextItem && nextItem.node) {
+        nextItem.node.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE, button);
       }
     }
 
     function onButtonUp(event) {
       const button = Number((event.detail || {}).button);
-      if (button === 1 || (button >= 9 && button <= 12)) {
+      if (
+        button === 1 ||
+        (button >= NATIVE_DIRECTION.UP && button <= NATIVE_DIRECTION.RIGHT)
+      ) {
         consumeNativeInput(event);
       }
     }
@@ -338,33 +482,15 @@
 
     cleanupNativeHeaderNavigation();
     const controller = getNativeFocusController();
-    if (!controller || !element) return false;
+    const context = getNativeFocusContext(controller);
 
     try {
-      const context = controller.m_ActiveContext;
-      const trees = Array.from(context.m_rgGamepadNavigationTrees || []);
-      trees.sort(function (left, right) {
-        return Number(right.m_ID === "StoreMenu") - Number(left.m_ID === "StoreMenu");
-      });
-
-      let tree = null;
-      let parentNode = null;
-      for (let index = 0; index < trees.length; index++) {
-        const candidate = findDeepestContainingNavigationNode(
-          trees[index].Root || trees[index].m_Root,
-          element,
-        );
-        if (candidate) {
-          tree = trees[index];
-          parentNode = candidate;
-          break;
-        }
-      }
-      if (!tree || !parentNode) return false;
-
+      const owner = findNavigationOwner(context, element, ["StoreMenu"]);
+      if (!owner) return false;
+      const tree = owner.tree;
+      const parentNode = owner.parentNode;
       const node = tree.CreateNode(parentNode);
       node.SetProperties({
-        layout: 0,
         focusable: true,
         actionDescriptionMap: {},
       });
@@ -415,6 +541,110 @@
     return null;
   }
 
+  function collectFocusableStoreNodes(node, result) {
+    if (!node) return result;
+    const children = node.m_rgChildren || [];
+    const properties = node.m_Properties || node.properties || {};
+    if (node.m_element && properties.focusable === true && children.length === 0) {
+      result.push(node);
+      return result;
+    }
+    children.forEach(function (child) {
+      collectFocusableStoreNodes(child, result);
+    });
+    return result;
+  }
+
+  function getFocusedStoreNode(rowNode) {
+    if (!rowNode) return null;
+    try {
+      const descendant =
+        typeof rowNode.GetActiveDescendant === "function"
+          ? rowNode.GetActiveDescendant()
+          : null;
+      if (descendant && descendant !== rowNode && descendant.m_element) {
+        return descendant;
+      }
+    } catch (_) {}
+
+    let focused = null;
+    (function walk(node) {
+      if (focused || !node) return;
+      try {
+        if (
+          node.m_element &&
+          typeof node.BHasFocus === "function" &&
+          node.BHasFocus()
+        ) {
+          focused = node;
+          return;
+        }
+      } catch (_) {}
+      (node.m_rgChildren || []).forEach(walk);
+    })(rowNode);
+    return focused;
+  }
+
+  function findClosestStoreNode(rowNode, currentRect) {
+    const candidates = collectFocusableStoreNodes(rowNode, []);
+    if (candidates.length === 0) return null;
+    if (!currentRect) return candidates[0];
+
+    const currentX = (currentRect.left + currentRect.right) / 2;
+    let bestNode = null;
+    let bestScore = Infinity;
+    candidates.forEach(function (candidate) {
+      let rect = null;
+      try {
+        rect = candidate.GetBoundingRect();
+      } catch (_) {}
+      if (!rect) return;
+      const candidateX = (rect.left + rect.right) / 2;
+      const overlap =
+        Math.min(currentRect.right, rect.right) -
+        Math.max(currentRect.left, rect.left);
+      const distance = Math.abs(currentX - candidateX);
+      const score = distance * (overlap > 0 ? 0.25 : 3);
+      if (score < bestScore) {
+        bestScore = score;
+        bestNode = candidate;
+      }
+    });
+    return bestNode || candidates[0];
+  }
+
+  function moveBetweenNativeStoreRows(rowNode, detail, direction) {
+    const parent = rowNode && rowNode.m_Parent;
+    if (!parent) return false;
+
+    const siblings = parent.m_rgChildren || [];
+    const currentIndex = siblings.indexOf(rowNode);
+    if (currentIndex < 0) return false;
+
+    const focusedNode = getFocusedStoreNode(rowNode);
+    let currentRect = null;
+    try {
+      currentRect = focusedNode && focusedNode.GetBoundingRect();
+    } catch (_) {}
+
+    const step = direction === NATIVE_DIRECTION.UP ? -1 : 1;
+    for (
+      let index = currentIndex + step;
+      index >= 0 && index < siblings.length;
+      index += step
+    ) {
+      const target = findClosestStoreNode(siblings[index], currentRect);
+      if (
+        target &&
+        typeof target.BTakeFocus === "function" &&
+        target.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE, direction)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function registerNativeStoreNavigation(rows) {
     rows = Array.from(rows || []).filter(function (row) {
       return !!(row && row.isConnected);
@@ -448,7 +678,8 @@
 
     cleanupNativeStoreNavigation();
     const controller = getNativeFocusController();
-    if (!controller) return false;
+    const context = getNativeFocusContext(controller);
+    if (!controller || !context) return false;
 
     const disposers = [];
     let removalObserver = null;
@@ -466,45 +697,37 @@
     }
 
     try {
-      const context = controller.m_ActiveContext;
-      const trees = Array.from(context.m_rgGamepadNavigationTrees || []);
-      trees.sort(function (left, right) {
-        return (
-          Number(right.m_ID === "FeatureTarget_interest-buttons") -
-          Number(left.m_ID === "FeatureTarget_interest-buttons")
-        );
-      });
-
-      let tree = null;
-      let parentNode = null;
-      for (let index = 0; index < trees.length; index++) {
-        const candidate = findDeepestContainingNavigationNode(
-          trees[index].Root || trees[index].m_Root,
-          rows[0],
-        );
-        if (
-          candidate &&
-          candidate.m_element &&
-          rows.every(function (row) {
-            return candidate.m_element.contains(row);
-          })
-        ) {
-          tree = trees[index];
-          parentNode = candidate;
-          break;
-        }
-      }
-      if (!tree || !parentNode) {
+      const owner = findNavigationOwner(context, rows[0], [
+        "FeatureTarget_interest-buttons",
+      ]);
+      if (!owner) {
         dispose();
         return false;
       }
+      const tree = owner.tree;
+      const parentNode = owner.parentNode;
       const nativeFocusRing = findNativeStoreFocusRing(parentNode);
 
       rows.forEach(function (row) {
         const rowNode = tree.CreateNode(parentNode);
         rowNode.SetProperties({
           focusable: false,
-          layout: 2,
+          layout: NATIVE_LAYOUT.ROW,
+          navEntryPreferPosition: NATIVE_NAV_ENTRY.MAINTAIN_X,
+          onMoveUp: function (detail) {
+            return moveBetweenNativeStoreRows(
+              rowNode,
+              detail,
+              NATIVE_DIRECTION.UP,
+            );
+          },
+          onMoveDown: function (detail) {
+            return moveBetweenNativeStoreRows(
+              rowNode,
+              detail,
+              NATIVE_DIRECTION.DOWN,
+            );
+          },
           actionDescriptionMap: {},
         });
         disposers.push(tree.RegisterNavigationItem(rowNode, row));
@@ -514,18 +737,12 @@
             "button:not([disabled]), a[href]:not([disabled])",
           ),
         ).forEach(function (element) {
-          const node = tree.CreateNode(rowNode);
+          const node = tree.CreateNode(rowNode, nativeFocusRing);
           node.SetProperties({
-            layout: 0,
             focusable: true,
             actionDescriptionMap: {},
           });
           disposers.push(tree.RegisterNavigationItem(node, element));
-          // These controls are cloned outside React, so Steam registers their
-          // navigation nodes but does not attach the visual FocusRing. Sharing
-          // the neighboring native ring gives them the exact Follow/Ignore
-          // indicator instead of LuaTools' overlay-specific blue highlight.
-          if (nativeFocusRing) node.m_FocusRing = nativeFocusRing;
           disposers.push(bindNativeConfirm(element));
         });
       });
@@ -547,6 +764,7 @@
       nativeStoreNavigation = {
         rows: rows,
         elements: elements,
+        tree: tree,
         cleanup: dispose,
       };
       return true;
@@ -575,25 +793,65 @@
     );
   }
 
+  function nativeNodeHasFocus(node) {
+    try {
+      return !!(
+        node &&
+        typeof node.BHasFocus === "function" &&
+        node.BHasFocus()
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
   function registerNativeOverlayNavigation(overlay, elements) {
+    if (!overlay) return false;
+
+    if (hasNativeOverlayNavigation(overlay)) {
+      const currentElements =
+        elements && elements.length
+          ? elements
+          : getOverlayFocusableElements(overlay);
+      nativeOverlayNavigation.sync(currentElements);
+      return true;
+    }
+
     cleanupNativeOverlayNavigation();
     const controller = getNativeFocusController();
-    if (!controller || !overlay || !elements || elements.length === 0) {
+    const context = getNativeFocusContext(controller);
+    const initialElements = Array.from(elements || []).filter(
+      isVisibleFocusableElement,
+    );
+    if (!controller || !context || initialElements.length === 0) {
       return false;
     }
 
-    const disposers = [];
     let unregisterTree = null;
+    let unregisterRoot = null;
     let removalObserver = null;
     let disposed = false;
+    let navigation = null;
 
     function dispose() {
       if (disposed) return;
       disposed = true;
       if (removalObserver) removalObserver.disconnect();
-      for (let index = disposers.length - 1; index >= 0; index--) {
+      if (navigation && navigation.items) {
+        navigation.items.forEach(function (item) {
+          try {
+            item.unbind();
+          } catch (_) {}
+          try {
+            item.unregister();
+          } catch (_) {}
+        });
+        navigation.items.clear();
+        navigation.elements = [];
+      }
+      if (unregisterRoot) {
         try {
-          disposers[index]();
+          unregisterRoot();
         } catch (_) {}
       }
       if (unregisterTree) {
@@ -604,24 +862,24 @@
     }
 
     try {
-      const context = controller.m_ActiveContext;
-      const contextTrees = Array.from(
-        context.m_rgGamepadNavigationTrees || [],
-      );
+      const owner = findNavigationOwner(context, overlay.parentElement || overlay, [
+        "StoreMenu",
+      ]);
+      const contextTrees = getNativeFocusTrees(context);
       const activeTree =
         (typeof controller.GetActiveNavTree === "function" &&
           controller.GetActiveNavTree()) ||
+        context.m_LastActiveNavTree ||
         context.m_LastActiveFocusNavTree ||
-        contextTrees.find(function (tree) {
-          return tree.m_ID === "StoreMenu";
-        }) ||
         contextTrees[0] ||
         null;
+      const parentTree = (owner && owner.tree) || activeTree;
+      if (!parentTree) return false;
 
       const tree = controller.NewGamepadNavigationTree(
         context,
         "LuaToolsOverlay-" + ++nativeOverlaySequence,
-        activeTree,
+        parentTree,
         {
           virtualFocus: false,
           modal: true,
@@ -629,45 +887,132 @@
         },
       );
 
-      // Direction events are handled at each focused action below. Keeping the
-      // root non-directional avoids a second Steam handler moving focus twice.
-      tree.Root.SetProperties({ layout: 0, actionDescriptionMap: {} });
-      disposers.push(tree.RegisterNavigationItem(tree.Root, overlay));
+      // 0 is falsy in Steam's GetLayout(), so use explicit geometric layout.
+      // Leaf handlers below consume direction events before this root can move.
+      const root = tree.Root || tree.m_Root;
+      root.SetProperties({
+        layout: NATIVE_LAYOUT.GEOMETRIC,
+        actionDescriptionMap: {},
+      });
+      unregisterRoot = tree.RegisterNavigationItem(root, overlay);
 
-      const nodes = elements.map(function (element) {
-        const node = tree.CreateNode(tree.Root);
-        node.SetProperties({
-          layout: 0,
-          focusable: true,
-          actionDescriptionMap: {},
+      navigation = {
+        element: overlay,
+        tree: tree,
+        root: root,
+        elements: [],
+        items: new Map(),
+        cleanup: dispose,
+        sync: null,
+      };
+
+      function sync(nextElements) {
+        if (disposed) return;
+        const normalized = [];
+        const seen = new Set();
+        Array.from(nextElements || []).forEach(function (element) {
+          if (
+            !seen.has(element) &&
+            isVisibleFocusableElement(element)
+          ) {
+            seen.add(element);
+            normalized.push(element);
+          }
         });
-        disposers.push(tree.RegisterNavigationItem(node, element));
-        return node;
-      });
-      elements.forEach(function (element, index) {
-        disposers.push(bindNativeOverlayInput(element, index, elements, nodes));
-      });
 
-      unregisterTree = controller.RegisterGamepadNavigationTree(tree, window);
+        let focusedElement = null;
+        navigation.items.forEach(function (item, element) {
+          if (nativeNodeHasFocus(item.node)) focusedElement = element;
+        });
+
+        navigation.items.forEach(function (item, element) {
+          if (normalized.indexOf(element) !== -1 && element.isConnected) {
+            return;
+          }
+          try {
+            item.unbind();
+          } catch (_) {}
+          try {
+            item.unregister();
+          } catch (_) {}
+          navigation.items.delete(element);
+        });
+
+        normalized.forEach(function (element) {
+          if (navigation.items.has(element)) return;
+          const node = tree.CreateNode(root);
+          node.SetProperties({
+            focusable: true,
+            actionDescriptionMap: {},
+          });
+          const unregister = tree.RegisterNavigationItem(node, element);
+          navigation.items.set(element, {
+            node: node,
+            unregister: unregister,
+            unbind: bindNativeOverlayInput(element, navigation),
+          });
+        });
+        navigation.elements = normalized;
+        if (navigation.elements.length === 0) {
+          cleanupNativeOverlayNavigation();
+          return;
+        }
+
+        if (
+          focusedElement &&
+          navigation.items.has(focusedElement) &&
+          focusedElement.isConnected
+        ) {
+          return;
+        }
+        const firstItem = navigation.items.get(navigation.elements[0]);
+        if (firstItem && typeof firstItem.node.BTakeFocus === "function") {
+          firstItem.node.BTakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE);
+        }
+      }
+
+      nativeOverlayNavigation = navigation;
+      sync(initialElements);
+
+      unregisterTree =
+        typeof controller.RegisterGamepadNavigationTree === "function"
+          ? controller.RegisterGamepadNavigationTree(tree, window)
+          : null;
       tree.SetIsEnabled(true);
       tree.Activate(true);
-      tree.TakeFocus(1);
+      tree.TakeFocus(NATIVE_GAMEPAD_FOCUS_SOURCE);
 
       removalObserver = new MutationObserver(function () {
-        if (!overlay.isConnected) cleanupNativeOverlayNavigation();
+        if (!overlay.isConnected) {
+          cleanupNativeOverlayNavigation();
+          return;
+        }
+        sync(getOverlayFocusableElements(overlay));
       });
-      removalObserver.observe(overlay.parentElement || document.documentElement, {
+      removalObserver.observe(overlay, {
         childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style", "disabled", "hidden"],
       });
-
-      nativeOverlayNavigation = {
-        element: overlay,
-        cleanup: dispose,
-      };
       return true;
     } catch (error) {
       console.warn("[Gamepad] Could not register LuaTools overlay focus:", error);
-      dispose();
+      if (nativeOverlayNavigation) {
+        dispose();
+        nativeOverlayNavigation = null;
+      } else {
+        if (unregisterRoot) {
+          try {
+            unregisterRoot();
+          } catch (_) {}
+        }
+        if (unregisterTree) {
+          try {
+            unregisterTree();
+          } catch (_) {}
+        }
+      }
       return false;
     }
   }
@@ -725,7 +1070,7 @@
     if (!isBigPictureMode()) return;
 
     // Only scan if there's a LuaTools overlay active
-    const activeOverlay = document.querySelector(OVERLAY_SELECTOR_STRING);
+    const activeOverlay = findActiveOverlay();
 
     if (!activeOverlay) {
       console.log("[Gamepad] No LuaTools overlay active, skipping scan");
@@ -735,31 +1080,8 @@
       return;
     }
 
-    // Only scan elements INSIDE the active overlay
-    const selectors = [
-      "button:not([disabled])",
-      "a[href]:not([disabled])",
-      "input:not([disabled])",
-      "select:not([disabled])",
-      "textarea:not([disabled])",
-      '[tabindex="0"]',
-      '[tabindex]:not([tabindex="-1"])',
-      ".focusable:not([disabled])",
-    ].join(", ");
-
-    // Use querySelectorAll on the overlay, not the whole document
-    const elements = Array.from(activeOverlay.querySelectorAll(selectors));
-    state.focusableElements = elements.filter(function (el) {
-      const rect = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return (
-        rect.width > 0 &&
-        rect.height > 0 &&
-        style.display !== "none" &&
-        style.visibility !== "hidden" &&
-        style.opacity !== "0"
-      );
-    });
+    // Only scan elements INSIDE the active overlay.
+    state.focusableElements = getOverlayFocusableElements(activeOverlay);
 
     console.log(
       "[Gamepad] Scanned " +
@@ -915,7 +1237,7 @@
     }
 
     // Check if there's an active LuaTools overlay
-    const hasActiveOverlay = document.querySelector(OVERLAY_SELECTOR_STRING);
+    const hasActiveOverlay = findActiveOverlay();
 
     // If no overlay is active, skip input processing but keep polling
     if (!hasActiveOverlay) {
@@ -992,7 +1314,7 @@
 
   // Block Steam's gamepad navigation when overlay is active
   function blockSteamNavigation(event) {
-    const hasActiveOverlay = document.querySelector(OVERLAY_SELECTOR_STRING);
+    const hasActiveOverlay = findActiveOverlay();
 
     if (hasActiveOverlay && state.gamepadConnected) {
       // Block arrow keys, Enter, Escape, Backspace and other navigation keys
@@ -1020,12 +1342,15 @@
 
   // Block clicks on Steam UI when overlay is active
   function blockSteamClicks(event) {
-    const hasActiveOverlay = document.querySelector(OVERLAY_SELECTOR_STRING);
+    const hasActiveOverlay = findActiveOverlay();
 
     if (hasActiveOverlay && state.gamepadConnected) {
       // Only allow clicks inside the overlay
-      const clickedInsideOverlay = event.target.closest(
-        OVERLAY_SELECTOR_STRING,
+      const clickedInsideOverlay = !!(
+        hasActiveOverlay &&
+        event.target &&
+        typeof hasActiveOverlay.contains === "function" &&
+        hasActiveOverlay.contains(event.target)
       );
 
       if (!clickedInsideOverlay) {
@@ -1040,7 +1365,7 @@
 
   // Block browser history navigation when overlay is active
   function blockHistoryNavigation(event) {
-    const hasActiveOverlay = document.querySelector(OVERLAY_SELECTOR_STRING);
+    const hasActiveOverlay = findActiveOverlay();
     if (hasActiveOverlay && state.gamepadConnected) {
       console.log("[Gamepad] Blocked history navigation (popstate)");
       event.preventDefault();
@@ -8293,6 +8618,12 @@
       existingProton &&
       existingActions.getAttribute("data-appid") === String(appid)
     ) {
+      if (
+        window.GamepadNav &&
+        typeof window.GamepadNav.registerStoreRows === "function"
+      ) {
+        window.GamepadNav.registerStoreRows([existingActions, existingProton]);
+      }
       return true;
     }
     if (

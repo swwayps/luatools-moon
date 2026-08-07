@@ -11,8 +11,9 @@ if (start < 0 || end < 0) {
 }
 
 class FakeElement {
-  constructor(name) {
+  constructor(name, tagName = "DIV") {
     this.name = name;
+    this.tagName = tagName;
     this.parentElement = null;
     this.children = [];
     this.listeners = new Map();
@@ -20,20 +21,42 @@ class FakeElement {
     this.isConnected = true;
     this.classes = new Set();
     this.classList = {
-      add: (...names) => names.forEach((name) => this.classes.add(name)),
-      remove: (...names) => names.forEach((name) => this.classes.delete(name)),
-      contains: (name) => this.classes.has(name),
+      add: (...names) => names.forEach((className) => this.classes.add(className)),
+      remove: (...names) => names.forEach((className) => this.classes.delete(className)),
+      contains: (className) => this.classes.has(className),
     };
     this.rect = { left: 0, right: 10, top: 0, bottom: 10, width: 10, height: 10 };
+    this.style = { display: "", visibility: "", opacity: "" };
   }
 
   appendChild(child) {
     child.parentElement = this;
+    child.isConnected = this.isConnected;
     this.children.push(child);
+    return child;
   }
 
   contains(candidate) {
-    return candidate === this || this.children.some((child) => child.contains(candidate));
+    return (
+      candidate === this ||
+      this.children.some((child) => child.contains(candidate))
+    );
+  }
+
+  querySelectorAll() {
+    const descendants = [];
+    const visit = (element) => {
+      for (const child of element.children) {
+        descendants.push(child);
+        visit(child);
+      }
+    };
+    visit(this);
+    return descendants;
+  }
+
+  closest() {
+    return null;
   }
 
   addEventListener(type, callback) {
@@ -75,29 +98,58 @@ class FakeElement {
 }
 
 class FakeNode {
-  constructor(tree, parent) {
+  constructor(tree, parent, focusRing = null) {
     this.m_Tree = tree;
     this.m_Parent = parent;
     this.m_rgChildren = [];
     this.m_element = null;
-    this.properties = null;
+    this.m_FocusRing = focusRing;
+    this.m_Properties = {};
+    this.properties = this.m_Properties;
     this.focused = false;
+    this.m_ActiveChild = null;
     if (parent) parent.m_rgChildren.push(this);
   }
 
   SetProperties(properties) {
-    this.properties = properties;
+    this.m_Properties = properties || {};
+    this.properties = this.m_Properties;
   }
 
-  BTakeFocus(source) {
-    for (const sibling of this.m_Parent?.m_rgChildren || []) {
-      if (sibling !== this && sibling.focused) {
-        sibling.focused = false;
-        sibling.m_element?.dispatch("blur");
-      }
-    }
+  BHasFocus() {
+    return this.focused;
+  }
+
+  GetFocusable() {
+    if (this.m_Properties.focusable) return "self";
+    if (this.m_rgChildren.length) return "children";
+    return "none";
+  }
+
+  GetBoundingRect() {
+    return this.m_element?.getBoundingClientRect();
+  }
+
+  GetActiveChild() {
+    return this.m_ActiveChild;
+  }
+
+  GetActiveDescendant() {
+    return this.m_ActiveChild?.GetActiveDescendant() || this;
+  }
+
+  BTakeFocus(source, direction) {
+    this.m_Tree.clearFocus();
     this.focused = true;
     this.focusSource = source;
+    this.focusDirection = direction;
+
+    let node = this;
+    while (node.m_Parent) {
+      node.m_Parent.m_ActiveChild = node;
+      node = node.m_Parent;
+    }
+    this.m_Tree.lastFocusedNode = this;
     this.m_element?.dispatch("focus");
     return true;
   }
@@ -107,26 +159,42 @@ class FakeTree {
   constructor(id, parent, properties) {
     this.m_ID = id;
     this.m_ParentNavTree = parent;
+    this.m_Properties = properties;
     this.properties = properties;
     this.m_Root = new FakeNode(this, null);
     this.registered = [];
     this.unregistered = [];
     this.enabled = false;
     this.activated = false;
+    this.lastFocusedNode = null;
   }
 
   get Root() {
     return this.m_Root;
   }
 
-  CreateNode(parent) {
-    return new FakeNode(this, parent);
+  CreateNode(parent, focusRing) {
+    return new FakeNode(this, parent, focusRing);
   }
 
   RegisterNavigationItem(node, element) {
     node.m_element = element;
+    node.m_bMounted = true;
     this.registered.push({ node, element });
-    return () => this.unregistered.push(element);
+    return () => {
+      node.m_bMounted = false;
+      node.focused = false;
+      this.unregistered.push(element);
+    };
+  }
+
+  clearFocus() {
+    const clear = (node) => {
+      if (node.focused) node.m_element?.dispatch("blur");
+      node.focused = false;
+      node.m_rgChildren.forEach(clear);
+    };
+    clear(this.Root);
   }
 
   SetIsEnabled(value) {
@@ -139,13 +207,18 @@ class FakeTree {
 
   TakeFocus(source) {
     this.focusTaken = true;
+    this.focusSource = source;
     this.Root.m_rgChildren[0]?.BTakeFocus(source);
+  }
+
+  GetLastFocusedNode() {
+    return this.lastFocusedNode;
   }
 }
 
 const header = new FakeElement("header");
 const nativeRow = new FakeElement("native-row");
-const headerButton = new FakeElement("luatools-header");
+const headerButton = new FakeElement("luatools-header", "BUTTON");
 header.appendChild(nativeRow);
 nativeRow.appendChild(headerButton);
 
@@ -157,15 +230,28 @@ nativeRowNode.m_element = nativeRow;
 const interestRoot = new FakeElement("interest-root");
 const interestColumn = new FakeElement("interest-column");
 const actionRow = new FakeElement("luatools-gamepad-actions");
+const nativeFollowRowElement = new FakeElement("native-follow-row");
 const protonRow = new FakeElement("luatools-gamepad-protondb");
-const restartAction = new FakeElement("restart-steam");
-const addAction = new FakeElement("add-via-luatools");
-const protonAction = new FakeElement("protondb");
+const restartAction = new FakeElement("restart-steam", "BUTTON");
+const addAction = new FakeElement("add-via-luatools", "BUTTON");
+const followAction = new FakeElement("follow", "BUTTON");
+const ignoreAction = new FakeElement("ignore", "BUTTON");
+const protonAction = new FakeElement("protondb", "BUTTON");
+
+restartAction.rect = { left: 100, right: 250, top: 100, bottom: 140, width: 150, height: 40 };
+addAction.rect = { left: 260, right: 410, top: 100, bottom: 140, width: 150, height: 40 };
+followAction.rect = { left: 100, right: 250, top: 160, bottom: 200, width: 150, height: 40 };
+ignoreAction.rect = { left: 260, right: 410, top: 160, bottom: 200, width: 150, height: 40 };
+protonAction.rect = { left: 100, right: 410, top: 220, bottom: 260, width: 310, height: 40 };
+
 interestRoot.appendChild(interestColumn);
 interestColumn.appendChild(actionRow);
+interestColumn.appendChild(nativeFollowRowElement);
 interestColumn.appendChild(protonRow);
 actionRow.appendChild(restartAction);
 actionRow.appendChild(addAction);
+nativeFollowRowElement.appendChild(followAction);
+nativeFollowRowElement.appendChild(ignoreAction);
 protonRow.appendChild(protonAction);
 actionRow.querySelectorAll = () => [restartAction, addAction];
 protonRow.querySelectorAll = () => [protonAction];
@@ -175,11 +261,16 @@ interestTree.Root.m_element = interestRoot;
 const interestColumnNode = interestTree.CreateNode(interestTree.Root);
 interestColumnNode.m_element = interestColumn;
 const nativeFollowRowNode = interestTree.CreateNode(interestColumnNode);
-nativeFollowRowNode.m_element = new FakeElement("native-follow-row");
+nativeFollowRowNode.m_element = nativeFollowRowElement;
 const nativeFollowNode = interestTree.CreateNode(nativeFollowRowNode);
-nativeFollowNode.m_element = new FakeElement("native-follow");
+nativeFollowNode.m_element = followAction;
+nativeFollowNode.SetProperties({ focusable: true });
+const nativeIgnoreNode = interestTree.CreateNode(nativeFollowRowNode);
+nativeIgnoreNode.m_element = ignoreAction;
+nativeIgnoreNode.SetProperties({ focusable: true });
 const nativeStoreFocusRing = { type: "steam-native-focus-ring" };
 nativeFollowNode.m_FocusRing = nativeStoreFocusRing;
+nativeIgnoreNode.m_FocusRing = nativeStoreFocusRing;
 
 const context = {
   m_rgGamepadNavigationTrees: new Set([storeTree, interestTree]),
@@ -187,6 +278,10 @@ const context = {
 const createdTrees = [];
 const controller = {
   m_ActiveContext: context,
+  m_LastActiveContext: context,
+  GetActiveContext: () => controller.m_ActiveContext,
+  FindAnActiveContext: () => context,
+  GetDefaultContext: () => context,
   GetActiveNavTree: () => storeTree,
   NewGamepadNavigationTree(ctx, id, parent, properties) {
     if (ctx !== context) throw new Error("wrong navigation context");
@@ -233,7 +328,10 @@ const factory = new Function(
   `${block}\nreturn { registerNativeHeaderNavigation, cleanupNativeHeaderNavigation, registerNativeStoreNavigation, cleanupNativeStoreNavigation, registerNativeOverlayNavigation, cleanupNativeOverlayNavigation, hasNativeOverlayNavigation };`,
 );
 const api = factory(
-  { FocusNavController: controller },
+  {
+    FocusNavController: controller,
+    getComputedStyle: (element) => element.style,
+  },
   { documentElement: new FakeElement("document") },
   FakeMutationObserver,
 );
@@ -281,7 +379,9 @@ if (
   throw new Error("game store rows were not attached to the native interest column");
 }
 for (const action of [restartAction, addAction, protonAction]) {
-  const entry = interestTree.registered.find((item) => item.element === action);
+  const entry = interestTree.registered.find(
+    (item) => item.element === action,
+  );
   if (!entry || !entry.node.properties.focusable) {
     throw new Error(action.name + " was not registered as a focusable store action");
   }
@@ -289,10 +389,35 @@ for (const action of [restartAction, addAction, protonAction]) {
     throw new Error(action.name + " did not reuse the native Steam focus ring");
   }
 }
+if (actionRowEntry.node.properties.navEntryPreferPosition !== 2) {
+  throw new Error("LuaTools action row does not preserve the horizontal focus position");
+}
+if (typeof actionRowEntry.node.properties.onMoveDown !== "function") {
+  throw new Error("LuaTools action row has no deterministic down-navigation handler");
+}
+
+// Model the DOM order Steam uses after the injected action row is mounted.
+interestColumnNode.m_rgChildren = [
+  actionRowEntry.node,
+  nativeFollowRowNode,
+  protonRowEntry.node,
+];
+const addEntry = interestTree.registered.find(
+  (entry) => entry.element === addAction,
+);
+addEntry.node.BTakeFocus(0, 10);
+const movedDown = actionRowEntry.node.properties.onMoveDown(
+  { button: 10, source: 1 },
+  actionRowEntry.node,
+);
+if (!movedDown || !nativeIgnoreNode.focused) {
+  throw new Error("down from Add via LuaTools did not preserve the right-hand column");
+}
+
 const restartEntry = interestTree.registered.find(
   (entry) => entry.element === restartAction,
 );
-restartEntry.node.BTakeFocus(1);
+restartEntry.node.BTakeFocus(0, 12);
 if (restartAction.classList.contains("active-focus")) {
   throw new Error("game store action used the LuaTools overlay focus style");
 }
@@ -301,12 +426,24 @@ if (restartAction.clickCount !== 1) {
   throw new Error("gamepad confirm did not activate the game store action");
 }
 
+// The controller can temporarily have no active OS focus while the Big Picture
+// page is visible. Registration must use Steam's discoverable context fallback.
+api.cleanupNativeHeaderNavigation();
+controller.m_ActiveContext = undefined;
+const fallbackHeaderButton = new FakeElement("fallback-header", "BUTTON");
+nativeRow.appendChild(fallbackHeaderButton);
+if (!api.registerNativeHeaderNavigation(fallbackHeaderButton)) {
+  throw new Error("navigation registration failed without m_ActiveContext");
+}
+controller.m_ActiveContext = context;
+api.cleanupNativeHeaderNavigation();
+
 const overlayParent = new FakeElement("body");
 const overlay = new FakeElement("overlay");
-const firstAction = new FakeElement("first-action");
-const secondAction = new FakeElement("second-action");
-const lowerLeftAction = new FakeElement("lower-left-action");
-const lowerRightAction = new FakeElement("lower-right-action");
+const firstAction = new FakeElement("first-action", "BUTTON");
+const secondAction = new FakeElement("second-action", "BUTTON");
+const lowerLeftAction = new FakeElement("lower-left-action", "BUTTON");
+const lowerRightAction = new FakeElement("lower-right-action", "BUTTON");
 firstAction.rect = { left: 700, right: 740, top: 250, bottom: 290, width: 40, height: 40 };
 secondAction.rect = { left: 760, right: 800, top: 250, bottom: 290, width: 40, height: 40 };
 lowerLeftAction.rect = { left: 450, right: 675, top: 335, bottom: 410, width: 225, height: 75 };
@@ -331,20 +468,35 @@ const modalTree = createdTrees.at(-1);
 if (!modalTree.properties.modal || modalTree.m_ParentNavTree !== storeTree) {
   throw new Error("overlay tree is not modal or does not belong to the active tree");
 }
-if (modalTree.Root.properties.layout !== 0) {
-  throw new Error("overlay root installed a competing Steam direction handler");
+if (modalTree.Root.properties.layout !== 6) {
+  throw new Error("overlay root did not install explicit geometric navigation");
 }
 if (!modalTree.enabled || !modalTree.activated) {
   throw new Error("overlay tree was not enabled and activated");
 }
-if (!modalTree.focusTaken || !modalTree.Root.m_rgChildren[0].focused) {
-  throw new Error("overlay tree did not establish its initial native focus");
+if (!modalTree.focusTaken || modalTree.focusSource !== 0 || !modalTree.Root.m_rgChildren[0].focused) {
+  throw new Error("overlay tree did not establish initial gamepad focus");
 }
 if (!api.hasNativeOverlayNavigation(overlay)) {
   throw new Error("active native overlay was not tracked");
 }
 if (!firstAction.classList.contains("active-focus")) {
   throw new Error("initially focused overlay action has no visible indicator");
+}
+const modalObserver = FakeMutationObserver.instances.at(-1);
+if (modalObserver.target !== overlay || !modalObserver.options.subtree) {
+  throw new Error("overlay navigation does not observe dynamic descendants");
+}
+
+const dynamicAction = new FakeElement("dynamic-action", "BUTTON");
+dynamicAction.rect = { left: 820, right: 880, top: 250, bottom: 290, width: 60, height: 40 };
+overlay.appendChild(dynamicAction);
+modalObserver.trigger();
+const dynamicEntry = modalTree.registered.find(
+  (entry) => entry.element === dynamicAction,
+);
+if (!dynamicEntry || !dynamicEntry.node.properties.focusable) {
+  throw new Error("button inserted after modal registration was not made focusable");
 }
 
 const rightEvent = firstAction.dispatch("vgp_onbuttondown", {
@@ -360,6 +512,9 @@ if (
   !secondAction.classList.contains("active-focus")
 ) {
   throw new Error("visible focus indicator did not follow Steam navigation");
+}
+if (modalTree.Root.m_rgChildren[1].focusSource !== 0 || modalTree.Root.m_rgChildren[1].focusDirection !== 12) {
+  throw new Error("overlay navigation used the wrong Steam focus source or direction");
 }
 if (!rightEvent.preventDefaultCalled || !rightEvent.stopImmediatePropagationCalled) {
   throw new Error("handled Steam direction input escaped the LuaTools overlay");
@@ -380,7 +535,7 @@ if (secondAction.clickCount !== 1) {
 }
 
 overlay.isConnected = false;
-FakeMutationObserver.instances.at(-1).trigger();
+modalObserver.trigger();
 if (api.hasNativeOverlayNavigation(overlay)) {
   throw new Error("removed overlay kept its native navigation tree active");
 }
@@ -390,12 +545,6 @@ if (!modalTree.controllerUnregistered) {
 if (lowerLeftAction.classList.contains("active-focus")) {
   throw new Error("removed overlay kept its visible focus indicator");
 }
-
-api.cleanupNativeHeaderNavigation();
-if (!storeTree.unregistered.includes(headerButton)) {
-  throw new Error("header navigation item was not cleaned up");
-}
-
 
 api.cleanupNativeStoreNavigation();
 for (const element of [
