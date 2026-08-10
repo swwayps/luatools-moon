@@ -577,11 +577,34 @@ is_safe_native_launcher() {
 		! is_slsteam_injected_wrapper "$original"
 }
 
+# Valve's distro launcher (bin_steam.sh, which /usr/bin/steam symlinks to on
+# Fedora/Nobara) derives STEAMPACKAGE from its own argv[0] and aborts with
+# "Unknown Steam package" for any other name, so a captured original must never
+# be executed as `steam.orig`. Map such a path to the `steam`-named alias the
+# launcher shim keeps beside it, creating that alias when it is absent (it lives
+# in our own backup tree). Failure is reported so `-shutdown` can be skipped
+# rather than issued against a launcher that would abort.
+slsteam_name_safe_launcher_path() {
+	local path="$1" sibling
+	[ -n "$path" ] || return 1
+	case "${path##*/}" in
+		steam|steambeta|bin_steam.sh|steam.sh)
+			printf '%s\n' "$path"
+			return 0
+			;;
+	esac
+	sibling="${path%/*}/steam"
+	[ -x "$sibling" ] || return 1
+	[ "$(readlink -f "$sibling" 2>/dev/null || true)" = \
+	  "$(readlink -f "$path" 2>/dev/null || true)" ] || return 1
+	printf '%s\n' "$sibling"
+}
+
 # Resolve a launcher for `-shutdown` without routing through the injected
 # wrapper or a managed system shim. A missing/unsafe candidate deliberately
 # returns failure so stop_steam can use its bounded signal escalation.
 resolve_shutdown_launcher() {
-	local search_path dir candidate original
+	local search_path dir candidate original safe_original fallback
 	search_path="$(path_without_slsteam_wrapper "${PATH:-}")"
 	while IFS= read -r dir; do
 		[ -n "$dir" ] || dir="."
@@ -590,8 +613,24 @@ resolve_shutdown_launcher() {
 		if is_slsteam_system_launcher_shim "$candidate"; then
 			original="$(slsteam_shim_original "$candidate" 2>/dev/null || true)"
 			is_safe_native_launcher "$original" || continue
-			printf '%s\n' "$original"
-			return 0
+			# A captured original may only be run under a name Valve's launcher
+			# accepts. Its `steam` alias is the normal answer; failing that, the
+			# data-dir steam.sh takes `-shutdown` and ignores its own argv[0],
+			# which still beats escalating straight to signals (an unclean exit
+			# costs the next boot a full client re-verification).
+			safe_original="$(slsteam_name_safe_launcher_path "$original" 2>/dev/null || true)"
+			if [ -n "$safe_original" ]; then
+				printf '%s\n' "$safe_original"
+				return 0
+			fi
+			for fallback in "$HOME/.local/share/Steam/steam.sh" \
+			                "$HOME/.steam/steam/steam.sh" \
+			                "$HOME/.steam/debian-installation/steam.sh"; do
+				[ -x "$fallback" ] || continue
+				printf '%s\n' "$fallback"
+				return 0
+			done
+			continue
 		fi
 		is_safe_native_launcher "$candidate" || continue
 		printf '%s\n' "$candidate"

@@ -91,13 +91,21 @@ mkdir -p "$FAKE/system/bin" "$FAKE/system/games" \
 printf '#!/bin/sh\n# slsteam-moon system launcher shim\n' > "$FAKE/system/bin/steam"
 printf '#!/bin/sh\nexec /usr/lib/steam/steam\n' > "$FAKE/system/games/steam"
 chmod 0755 "$FAKE/system/bin/steam" "$FAKE/system/games/steam"
+# The shim's own mirrored capture, so the report can state whether that shim has
+# a usable `steam`-named exec alias (Valve's launcher aborts under any other
+# argv[0]; without the alias Steam dies before writing any log, which is exactly
+# what this field makes visible).
+SHIM_MIRROR="$FAKE/.local/share/SLSsteam/system-launcher-backup/${FAKE#/}/system/bin"
+mkdir -p "$SHIM_MIRROR"
 for backup in \
     "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/bin/steam.orig" \
     "$FAKE/.local/share/SLSsteam/system-launcher-backup/usr/games/steam.orig" \
-    "$FAKE/.local/share/SLSsteam/system-launcher-backup/steam.orig"; do
+    "$FAKE/.local/share/SLSsteam/system-launcher-backup/steam.orig" \
+    "$SHIM_MIRROR/steam.orig"; do
     printf 'captured launcher; TOP_SECRET_BACKUP_CANARY\n' > "$backup"
     chmod 0755 "$backup"
 done
+ln -sfn steam.orig "$SHIM_MIRROR/steam"
 export DIAG_LAUNCHER_DIRS="$FAKE/system/bin:$FAKE/system/games"
 export DIAG_LAUNCHER_BACKUP_ROOT="$FAKE/.local/share/SLSsteam/system-launcher-backup"
 export SLSM_COVERAGE_POLICY=launcher
@@ -176,6 +184,8 @@ in_coverage() { if grep -qF "$2" <<<"$coverage"; then check "$1" 0; else check "
 in_coverage "coverage: effective policy" 'effective policy: launcher'
 in_coverage "coverage: shim classification" 'status=shim'
 in_coverage "coverage: vanilla classification" 'status=vanilla'
+in_coverage "coverage: shim exec alias state" 'shim exec: '
+in_coverage "coverage: shim exec alias is ready" 'status=ready'
 in_coverage "coverage: mirrored backup paths" 'backup: mirrored '
 in_coverage "coverage: legacy backup paths" 'backup: legacy '
 # NB: the .dmp minidumps are binary and archived AS-IS by design — they are

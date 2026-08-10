@@ -168,13 +168,24 @@ exec "$@"
 EOF
 chmod 0755 "$SHUT_BIN/pgrep" "$SHUT_BIN/pkill" "$SHUT_BIN/sleep" "$SHUT_BIN/timeout"
 
-SHUT_BACKUP="$TMP/original-steam"
+# Mirror the production layout: the captured original is `<mirror>/steam.orig`
+# with a `steam` alias beside it. Valve's launcher aborts under any other
+# argv[0], so `-shutdown` must be issued through that alias, never through the
+# `.orig` path (see slsteam-moon/scripts/test-launcher-basename.sh).
+SHUT_BACKUP_DIR="$TMP/shutdown-backup/usr/bin"
+SHUT_BACKUP="$SHUT_BACKUP_DIR/steam.orig"
+mkdir -p "$SHUT_BACKUP_DIR"
 cat > "$SHUT_BACKUP" <<'EOF'
 #!/usr/bin/env bash
+case "${0##*/}" in
+  steam|steambeta|bin_steam.sh) ;;
+  *) printf "Unknown Steam package '%s'\n" "${0##*/}" >&2; exit 1 ;;
+esac
 printf 'graceful\n' > "$SHUT_GRACEFUL"
 rm -f "$SHUT_STATE"
 EOF
 chmod 0755 "$SHUT_BACKUP"
+ln -sfn steam.orig "$SHUT_BACKUP_DIR/steam"
 cat > "$SHUT_SYSTEM/steam" <<EOF
 #!/usr/bin/env bash
 # slsteam-moon system launcher shim

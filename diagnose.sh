@@ -272,8 +272,10 @@ _diag_launcher_dirs() {
 _collect_launch_coverage() {
 	local stage="$1" dest="$stage/launch-coverage.txt" raw
 	local dir launcher status found=0 backup_root backup found_backup=0
+	local exec_alias exec_status exec_candidate exec_target
 	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-coverage.XXXXXX" 2>/dev/null || true)"
 	[ -n "$raw" ] || return 0
+	backup_root="${DIAG_LAUNCHER_BACKUP_ROOT:-$HOME/.local/share/SLSsteam/system-launcher-backup}"
 	{
 		printf 'effective policy: %s\n' "$(_diag_effective_policy)"
 		while IFS= read -r dir; do
@@ -287,10 +289,32 @@ _collect_launch_coverage() {
 				status=vanilla
 			fi
 			printf 'system launcher: %s status=%s\n' "$launcher" "$status"
+			[ "$status" = shim ] || continue
+			# Valve's launcher refuses to run as anything but `steam`, so a shim
+			# is only fully operational when a `steam`-named alias for the
+			# captured original exists. Derived from paths (never by reading a
+			# launcher body) and reported because its absence is invisible
+			# otherwise: the launch then dies before Steam writes any log.
+			exec_alias="${backup_root%/}/${launcher#/}"
+			exec_alias="${exec_alias%/*}/steam"
+			exec_status=missing
+			for exec_candidate in "$exec_alias" "${backup_root%/}/steam"; do
+				[ -x "$exec_candidate" ] || continue
+				exec_target="$(readlink -f "$exec_candidate" 2>/dev/null || true)"
+				case "$exec_target" in
+					"${backup_root%/}"/*.orig)
+						exec_alias="$exec_candidate"
+						exec_status=ready
+						;;
+				esac
+				if [ "$exec_status" = ready ]; then
+					break
+				fi
+			done
+			printf 'shim exec: %s status=%s\n' "$exec_alias" "$exec_status"
 		done < <(_diag_launcher_dirs)
 		[ "$found" -eq 1 ] || printf 'system launcher: none detected\n'
 
-		backup_root="${DIAG_LAUNCHER_BACKUP_ROOT:-$HOME/.local/share/SLSsteam/system-launcher-backup}"
 		if [ -d "$backup_root" ]; then
 			while IFS= read -r -d '' backup; do
 				found_backup=1
