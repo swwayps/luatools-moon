@@ -166,6 +166,74 @@ else
 	printf 'ok:   residual srt-logger path does not launch Steam\n'
 fi
 
+# --- An aborted restart must be reported, not silent ------------------------
+# The caller detaches this script and discards its exit code, so an abort that
+# writes nothing is indistinguishable from Steam simply never coming back.
+rm -f "$LAUNCH_MARKER" "$TESTDIR/home/.lumen.log"
+printf '%s\n' alive > "$LOGGER_STATE"
+FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
+	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
+	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
+	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
+	bash "$RESTART_SH" || true
+if grep -q 'restart_steam. aborted: srt-logger' "$TESTDIR/home/.lumen.log" 2>/dev/null; then
+	printf 'ok:   an aborted restart records the blocking process in the log\n'
+else
+	printf 'FAIL: aborted restart left no diagnosable record\n'
+	failures=$((failures+1))
+fi
+
+# --- A straggler that exits on its own must NOT cancel the restart ----------
+# steam.sh and srt-logger are never signalled by the escalation above, so a
+# process that merely needs a moment to exit must be waited out rather than
+# treated as a stuck client.
+rm -f "$LAUNCH_MARKER" "$LOGGER_STATE" "$STEAM_SH_STATE"
+COUNTER="$TESTDIR/steamsh-checks"
+: > "$COUNTER"
+printf '%s\n' alive > "$STEAM_SH_STATE"
+cat > "$FAKEBIN/pgrep" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = -x ] && [ "${2:-}" = steam ]; then
+	[ -e "${TEST_STATE:-}" ] && exit 0 || exit 1
+fi
+if [ "${1:-}" = -f ]; then
+	case "${2:-}" in
+		*'/steam.sh'*)
+			# Report the wrapper as alive for the first two probes, then let it
+			# exit the way a real straggler does.
+			printf 'x' >> "${TEST_COUNTER:-/dev/null}"
+			if [ "$(wc -c < "${TEST_COUNTER:-/dev/null}")" -le 2 ]; then exit 0; fi
+			exit 1 ;;
+		*srt-logger*) [ -e "${TEST_LOGGER_STATE:-}" ] && exit 0 || exit 1 ;;
+		*steamwebhelper*) exit 1 ;;
+	esac
+fi
+exit 1
+FAKE
+chmod +x "$FAKEBIN/pgrep"
+if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
+	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
+	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
+	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" TEST_COUNTER="$COUNTER" \
+	bash "$RESTART_SH"; then
+	printf 'ok:   a straggler that exits during the wait does not abort the restart\n'
+else
+	printf 'FAIL: transient straggler cancelled a restart the user asked for\n'
+	failures=$((failures+1))
+fi
+# The relaunch is detached, so give the child a bounded moment to appear
+# (the faked `sleep` above returns instantly, removing the script's own settle).
+for _ in $(seq 1 40); do
+	[ -e "$LAUNCH_MARKER" ] && break
+	command sleep 0.05
+done
+if [ -e "$LAUNCH_MARKER" ]; then
+	printf 'ok:   the restart relaunches Steam once the straggler is gone\n'
+else
+	printf 'FAIL: restart did not relaunch Steam after the straggler exited\n'
+	failures=$((failures+1))
+fi
+
 BUNDLE="$SCRIPT_DIR/../dist/luatools-linux.zip"
 if [ ! -f "$BUNDLE" ] || ! unzip -p "$BUNDLE" backend/scripts/restart_steam.sh \
 	| cmp -s - "$RESTART_SH"; then

@@ -121,12 +121,35 @@ if pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamwebhelper' >/dev/null 2>&1; 
   sleep 1
 fi
 
-# Never start a second client while any process from the previous launch is
-# still alive.  The wrapper and logger can outlive the exact `steam` process.
-if pgrep -x steam >/dev/null 2>&1 \
-   || pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
-   || pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 \
-   || pgrep -f 'srt-logger' >/dev/null 2>&1; then
+# Name the first process from the previous launch that is still running, if
+# any. The steam.sh wrapper and the SRT logger belong to the session rather
+# than to the process signalled above, so they are never TERMed/KILLed here;
+# they only need a moment to notice the client is gone.
+residual_process() {
+  pgrep -x steam >/dev/null 2>&1 && { printf 'steam'; return 0; }
+  pgrep -f 'steamwebhelper' >/dev/null 2>&1 && { printf 'steamwebhelper'; return 0; }
+  pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 && { printf 'steam.sh'; return 0; }
+  pgrep -f 'srt-logger' >/dev/null 2>&1 && { printf 'srt-logger'; return 0; }
+  return 1
+}
+
+# Wait out a transient straggler (up to ~5s) instead of cancelling a restart
+# the user explicitly asked for. This doubles as the settle that lets the lock
+# and pipe files be released before the relaunch.
+residual=""
+for _ in $(seq 1 25); do
+  residual="$(residual_process)"
+  [ -z "$residual" ] && break
+  sleep 0.2
+done
+
+if [ -n "$residual" ]; then
+  # Never start a second client on top of a live one: two clients racing the
+  # same install and config state is worse than a restart the user can retry.
+  # Record it, because the caller detaches this script and cannot see the exit
+  # code — a silent abort looks exactly like Steam never coming back.
+  printf '%s [restart_steam] aborted: %s from the previous session is still running\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$residual" >> "$HOME/.lumen.log" 2>/dev/null || true
   exit 1
 fi
 
