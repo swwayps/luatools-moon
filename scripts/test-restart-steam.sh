@@ -16,6 +16,12 @@
 # chosen action and exits BEFORE touching the running Steam, so we can pin the
 # decision against a fake `systemctl` on PATH (runs on any host).
 #
+# It also pins the desktop shutdown policy, which is latency-sensitive: the
+# button is on the user's critical path, so the script may only wait on
+# processes that can actually block a new client, and it must not ask a
+# non-running Steam to shut down (that boots a whole bootstrapper and loses the
+# clean-exit record, forcing the expensive startup verification).
+#
 # Run: bash scripts/test-restart-steam.sh
 
 set -u
@@ -83,14 +89,13 @@ out="$(run_restart none)"
 check "Desktop -> relaunches via the slsteam-moon wrapper" \
 	"$out" "desktop:$TESTDIR/home/.local/share/SLSsteam/path/steam"
 
-# --- Desktop: refuse relaunch while the old steam.sh wrapper remains ---------
+# --- Desktop shutdown policy fakes ------------------------------------------
 EVENTS="$TESTDIR/events"
-STATE="$TESTDIR/steam-alive"
+CLIENT_STATE="$TESTDIR/steam-alive"
 STEAM_SH_STATE="$TESTDIR/steamsh-alive"
 LOGGER_STATE="$TESTDIR/logger-alive"
 LAUNCH_MARKER="$TESTDIR/launched"
-: > "$EVENTS"
-printf '%s\n' alive > "$STEAM_SH_STATE"
+
 cat > "$FAKEBIN/steam" <<'FAKE'
 #!/usr/bin/env bash
 printf 'steam %s\n' "$*" >> "$TEST_EVENTS"
@@ -99,13 +104,18 @@ FAKE
 chmod +x "$FAKEBIN/steam"
 cat > "$FAKEBIN/pgrep" <<'FAKE'
 #!/usr/bin/env bash
+# The client and the webhelper are keyed off one state file so a test can make
+# Steam "refuse to die"; steam.sh and srt-logger have their own states so their
+# presence can be asserted NOT to block the restart.
 if [ "${1:-}" = -x ] && [ "${2:-}" = steam ]; then
-	[ -e "${TEST_STATE:-}" ] && exit 0 || exit 1
+	[ -e "${TEST_CLIENT_STATE:-}" ] && exit 0 || exit 1
+fi
+if [ "${1:-}" = -x ] && [ "${2:-}" = steamwebhelper ]; then
+	exit 1
 fi
 if [ "${1:-}" = -f ]; then
 	case "${2:-}" in
 		*'/steam.sh'*) [ -e "${TEST_STEAM_SH_STATE:-}" ] && exit 0 || exit 1 ;;
-		*srt-logger*console-linux.txt*) exit 1 ;;
 		*srt-logger*) [ -e "${TEST_LOGGER_STATE:-}" ] && exit 0 || exit 1 ;;
 		*steamwebhelper*) exit 1 ;;
 	esac
@@ -129,109 +139,142 @@ cat > "$TESTDIR/home/.local/share/SLSsteam/path/steam" <<'FAKE'
 touch "$TEST_LAUNCH_MARKER"
 FAKE
 chmod +x "$TESTDIR/home/.local/share/SLSsteam/path/steam"
-if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
-	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
-	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
-	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
-	bash "$RESTART_SH"; then
-	printf 'FAIL: restart relaunched while steam.sh remained alive\n'
+
+run_desktop() { # runs the real shutdown+relaunch path against the fakes
+	FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
+		TEST_EVENTS="$EVENTS" TEST_CLIENT_STATE="$CLIENT_STATE" \
+		TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
+		TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
+		bash "$RESTART_SH"
+}
+
+await_launch() { # the relaunch is detached; the faked sleep returns instantly
+	local i
+	for i in $(seq 1 40); do
+		[ -e "$LAUNCH_MARKER" ] && return 0
+		command sleep 0.05
+	done
+	[ -e "$LAUNCH_MARKER" ]
+}
+
+# --- A client that refuses to die blocks the restart ------------------------
+# Starting a second client over a live one would have two clients racing the
+# same install and config state.
+rm -f "$LAUNCH_MARKER" "$STEAM_SH_STATE" "$LOGGER_STATE"
+: > "$EVENTS"
+printf '%s\n' alive > "$CLIENT_STATE"
+rm -f "$TESTDIR/home/.lumen.log"
+if run_desktop; then
+	printf 'FAIL: restart relaunched while the client was still alive\n'
 	failures=$((failures+1))
 else
-	printf 'ok:   restart refuses a residual steam.sh process\n'
+	printf 'ok:   restart refuses to start a second client\n'
 fi
 if [ -e "$LAUNCH_MARKER" ]; then
-	printf 'FAIL: residual steam.sh path launched a new client\n'
+	printf 'FAIL: a live client did not prevent the relaunch\n'
 	failures=$((failures+1))
 else
-	printf 'ok:   residual steam.sh path does not launch Steam\n'
+	printf 'ok:   a live client prevents the relaunch\n'
 fi
-
-# The logger command line is not required to include console-linux.txt.
-rm -f "$STEAM_SH_STATE" "$LAUNCH_MARKER"
-printf '%s\n' alive > "$LOGGER_STATE"
-if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
-	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
-	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
-	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
-	bash "$RESTART_SH"; then
-	printf 'FAIL: restart relaunched while srt-logger remained alive\n'
-	failures=$((failures+1))
-else
-	printf 'ok:   restart refuses a residual srt-logger process\n'
-fi
-if [ -e "$LAUNCH_MARKER" ]; then
-	printf 'FAIL: residual srt-logger path launched a new client\n'
-	failures=$((failures+1))
-else
-	printf 'ok:   residual srt-logger path does not launch Steam\n'
-fi
-
-# --- An aborted restart must be reported, not silent ------------------------
-# The caller detaches this script and discards its exit code, so an abort that
-# writes nothing is indistinguishable from Steam simply never coming back.
-rm -f "$LAUNCH_MARKER" "$TESTDIR/home/.lumen.log"
-printf '%s\n' alive > "$LOGGER_STATE"
-FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
-	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
-	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
-	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
-	bash "$RESTART_SH" || true
-if grep -q 'restart_steam. aborted: srt-logger' "$TESTDIR/home/.lumen.log" 2>/dev/null; then
-	printf 'ok:   an aborted restart records the blocking process in the log\n'
+if grep -q 'restart_steam. aborted' "$TESTDIR/home/.lumen.log" 2>/dev/null; then
+	printf 'ok:   an aborted restart is recorded for diagnosis\n'
 else
 	printf 'FAIL: aborted restart left no diagnosable record\n'
 	failures=$((failures+1))
 fi
+if grep -q 'SIGKILL' "$TESTDIR/home/.lumen.log" 2>/dev/null; then
+	printf 'ok:   a client that ignores the clean quit is escalated before aborting\n'
+else
+	printf 'FAIL: escalation to SIGKILL was not attempted or not recorded\n'
+	failures=$((failures+1))
+fi
 
-# --- A straggler that exits on its own must NOT cancel the restart ----------
-# steam.sh and srt-logger are never signalled by the escalation above, so a
-# process that merely needs a moment to exit must be waited out rather than
-# treated as a stuck client.
-rm -f "$LAUNCH_MARKER" "$LOGGER_STATE" "$STEAM_SH_STATE"
-COUNTER="$TESTDIR/steamsh-checks"
-: > "$COUNTER"
+# --- steam.sh / srt-logger must NOT block the restart -----------------------
+# steam.sh is the client's PARENT, so it always outlives it, and the srt-logger
+# helpers are reparented to init. Neither can hold Steam's single-instance
+# guard, so waiting on them only added latency to every restart.
+rm -f "$LAUNCH_MARKER" "$CLIENT_STATE"
+: > "$EVENTS"
 printf '%s\n' alive > "$STEAM_SH_STATE"
+printf '%s\n' alive > "$LOGGER_STATE"
+if run_desktop; then
+	printf 'ok:   a residual steam.sh or srt-logger does not cancel the restart\n'
+else
+	printf 'FAIL: residual session helpers cancelled the restart\n'
+	failures=$((failures+1))
+fi
+if await_launch; then
+	printf 'ok:   the restart relaunches Steam despite session helpers lingering\n'
+else
+	printf 'FAIL: restart did not relaunch Steam with session helpers lingering\n'
+	failures=$((failures+1))
+fi
+
+# --- No client running -> never ask Steam to shut down ----------------------
+# `steam -shutdown` with nothing to answer it boots an entire bootstrapper
+# (~10s observed) and exits without writing the `Shutdown` line, so the NEXT
+# start pays `Verifying all executable checksums`.
+rm -f "$LAUNCH_MARKER" "$CLIENT_STATE" "$STEAM_SH_STATE" "$LOGGER_STATE"
+: > "$EVENTS"
+if run_desktop; then
+	printf 'ok:   a restart with no running client succeeds\n'
+else
+	printf 'FAIL: restart failed when no client was running\n'
+	failures=$((failures+1))
+fi
+if grep -q 'shutdown' "$EVENTS" 2>/dev/null; then
+	printf 'FAIL: asked a non-running Steam to shut down\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   no shutdown request is sent when Steam is not running\n'
+fi
+if await_launch; then
+	printf 'ok:   the relaunch still happens with no previous client\n'
+else
+	printf 'FAIL: no relaunch when there was no previous client\n'
+	failures=$((failures+1))
+fi
+
+# --- A running client IS asked to quit cleanly first ------------------------
+# The clean request is what writes `Shutdown` and keeps the next start on the
+# cheap `Verifying file sizes only` path, so signals must not come first.
+rm -f "$LAUNCH_MARKER" "$STEAM_SH_STATE" "$LOGGER_STATE"
+: > "$EVENTS"
+printf '%s\n' alive > "$CLIENT_STATE"
 cat > "$FAKEBIN/pgrep" <<'FAKE'
 #!/usr/bin/env bash
+# Report the client as alive for the first two probes, then let the clean quit
+# take effect, so no signal escalation should be needed.
 if [ "${1:-}" = -x ] && [ "${2:-}" = steam ]; then
-	[ -e "${TEST_STATE:-}" ] && exit 0 || exit 1
-fi
-if [ "${1:-}" = -f ]; then
-	case "${2:-}" in
-		*'/steam.sh'*)
-			# Report the wrapper as alive for the first two probes, then let it
-			# exit the way a real straggler does.
-			printf 'x' >> "${TEST_COUNTER:-/dev/null}"
-			if [ "$(wc -c < "${TEST_COUNTER:-/dev/null}")" -le 2 ]; then exit 0; fi
-			exit 1 ;;
-		*srt-logger*) [ -e "${TEST_LOGGER_STATE:-}" ] && exit 0 || exit 1 ;;
-		*steamwebhelper*) exit 1 ;;
-	esac
+	printf 'x' >> "${TEST_PROBES:-/dev/null}"
+	[ "$(wc -c < "${TEST_PROBES:-/dev/null}")" -le 2 ] && exit 0
+	exit 1
 fi
 exit 1
 FAKE
 chmod +x "$FAKEBIN/pgrep"
+PROBES="$TESTDIR/probes"
+: > "$PROBES"
 if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
-	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
-	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
-	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" TEST_COUNTER="$COUNTER" \
+	TEST_EVENTS="$EVENTS" TEST_CLIENT_STATE="$CLIENT_STATE" \
+	TEST_PROBES="$PROBES" TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
 	bash "$RESTART_SH"; then
-	printf 'ok:   a straggler that exits during the wait does not abort the restart\n'
+	printf 'ok:   a running client is restarted without escalation\n'
 else
-	printf 'FAIL: transient straggler cancelled a restart the user asked for\n'
+	printf 'FAIL: restart failed for a client that quit cleanly\n'
 	failures=$((failures+1))
 fi
-# The relaunch is detached, so give the child a bounded moment to appear
-# (the faked `sleep` above returns instantly, removing the script's own settle).
-for _ in $(seq 1 40); do
-	[ -e "$LAUNCH_MARKER" ] && break
-	command sleep 0.05
-done
-if [ -e "$LAUNCH_MARKER" ]; then
-	printf 'ok:   the restart relaunches Steam once the straggler is gone\n'
+if grep -q 'steam -shutdown' "$EVENTS" 2>/dev/null; then
+	printf 'ok:   the clean shutdown request is sent to a running client\n'
 else
-	printf 'FAIL: restart did not relaunch Steam after the straggler exited\n'
+	printf 'FAIL: no clean shutdown request was sent\n'
 	failures=$((failures+1))
+fi
+if grep -q 'pkill' "$EVENTS" 2>/dev/null; then
+	printf 'FAIL: signalled Steam even though it quit cleanly\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   no signal is sent when the clean quit works\n'
 fi
 
 BUNDLE="$SCRIPT_DIR/../dist/luatools-linux.zip"

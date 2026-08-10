@@ -95,68 +95,103 @@ if [ -n "${SLS_RESTART_DRYRUN:-}" ]; then
   exit 0
 fi
 
-# Ask Steam to shut down cleanly first.
-if command -v steam >/dev/null 2>&1; then
-  steam -shutdown >/dev/null 2>&1 || true
-fi
+# --- Shutdown + relaunch ----------------------------------------------------
+# This path is on the user's critical path: they watch the window close and wait
+# for the next client. A measured restart spent 15s between Steam's own
+# `Shutdown` line and the relaunch, so every wait here ends the instant its
+# condition is met, and nothing is waited on that cannot actually block a new
+# client.
+#
+# Two invariants this must not trade away:
+#   1. The quit has to be the CLEAN one. Steam writes `Shutdown` to
+#      bootstrap_log.txt from the bootstrapper's normal exit path; without that
+#      line the next startup runs `Checking for update on startup` plus
+#      `Verifying all executable checksums` (measured median 3s, p90 4s, max
+#      28s, plus an HTTPS manifest round-trip). SIGKILL skips the write, so
+#      signals stay a last resort rather than the default.
+#   2. Never start a second client over a live one.
 
-# Wait up to ~10s for the i386 Steam client and webhelper to exit.
-for _ in $(seq 1 50); do
-  if ! pgrep -x steam >/dev/null 2>&1 \
-     && ! pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
-    break
-  fi
-  sleep 0.2
-done
+restart_trace() {
+  printf '%s [restart_steam] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$1" \
+    >> "$HOME/.lumen.log" 2>/dev/null || true
+}
 
-# Escalate if still alive: SIGTERM, then SIGKILL.
-if pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
-  pkill -TERM -x steam >/dev/null 2>&1 || true
-  pkill -TERM -f 'steamwebhelper' >/dev/null 2>&1 || true
-  sleep 2
-fi
-if pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
-  pkill -KILL -x steam >/dev/null 2>&1 || true
-  pkill -KILL -f 'steamwebhelper' >/dev/null 2>&1 || true
-  sleep 1
-fi
+now_ms() {
+  local value
+  value="$(date +%s%3N 2>/dev/null)"
+  case "$value" in
+    ''|*[!0-9]*) echo 0 ;;
+    *)           echo "$value" ;;
+  esac
+}
 
-# Name the first process from the previous launch that is still running, if
-# any. The steam.sh wrapper and the SRT logger belong to the session rather
-# than to the process signalled above, so they are never TERMed/KILLed here;
-# they only need a moment to notice the client is gone.
-residual_process() {
-  pgrep -x steam >/dev/null 2>&1 && { printf 'steam'; return 0; }
-  pgrep -f 'steamwebhelper' >/dev/null 2>&1 && { printf 'steamwebhelper'; return 0; }
-  pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 && { printf 'steam.sh'; return 0; }
-  pgrep -f 'srt-logger' >/dev/null 2>&1 && { printf 'srt-logger'; return 0; }
+since_ms() { # $1 start stamp from now_ms
+  local end
+  end="$(now_ms)"
+  if [ "$1" = 0 ] || [ "$end" = 0 ]; then echo '?'; else echo $(( end - $1 )); fi
+}
+
+# The client and its webhelper are the only processes that gate a relaunch:
+# Steam's single-instance guard is the client's own IPC endpoint. `steam.sh` is
+# the client's PARENT, so it always outlives it, and the srt-logger helpers are
+# reparented to init and merely hold log FDs. Waiting on either of those only
+# postpones the restart — and refusing over them cancelled restarts outright.
+client_alive() {
+  pgrep -x steam >/dev/null 2>&1 && return 0
+  pgrep -x steamwebhelper >/dev/null 2>&1 && return 0
   return 1
 }
 
-# Wait out a transient straggler (up to ~5s) instead of cancelling a restart
-# the user explicitly asked for. This doubles as the settle that lets the lock
-# and pipe files be released before the relaunch.
-residual=""
-for _ in $(seq 1 25); do
-  residual="$(residual_process)"
-  [ -z "$residual" ] && break
-  sleep 0.2
-done
+# Poll until the client is gone. $1 = number of 100ms slices to allow.
+await_client_exit() {
+  local slices="$1" i=0
+  while [ "$i" -lt "$slices" ]; do
+    client_alive || return 0
+    sleep 0.1
+    i=$(( i + 1 ))
+  done
+  ! client_alive
+}
 
-if [ -n "$residual" ]; then
-  # Never start a second client on top of a live one: two clients racing the
-  # same install and config state is worse than a restart the user can retry.
-  # Record it, because the caller detaches this script and cannot see the exit
-  # code — a silent abort looks exactly like Steam never coming back.
-  printf '%s [restart_steam] aborted: %s from the previous session is still running\n' \
-    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$residual" >> "$HOME/.lumen.log" 2>/dev/null || true
+restart_begin="$(now_ms)"
+
+# Only ask a RUNNING client to quit. With nothing to answer the request,
+# `steam -shutdown` boots an entire bootstrapper just to deliver it: measured at
+# ~10s, ending in `Verifying all executable checksums` and no `Shutdown` line —
+# precisely the cost this path exists to avoid.
+if client_alive; then
+  shutdown_begin="$(now_ms)"
+  if command -v steam >/dev/null 2>&1; then
+    steam -shutdown >/dev/null 2>&1 || true
+  fi
+
+  if ! await_client_exit 120; then  # up to ~12s for the clean quit
+    restart_trace 'clean shutdown unfinished after 12s, escalating to SIGTERM'
+    pkill -TERM -x steam >/dev/null 2>&1 || true
+    pkill -TERM -x steamwebhelper >/dev/null 2>&1 || true
+    if ! await_client_exit 30; then  # up to ~3s
+      restart_trace 'SIGTERM did not stop Steam, escalating to SIGKILL (next start will re-verify)'
+      pkill -KILL -x steam >/dev/null 2>&1 || true
+      pkill -KILL -x steamwebhelper >/dev/null 2>&1 || true
+      await_client_exit 20 || true
+    fi
+  fi
+  restart_trace "shutdown completed in $(since_ms "$shutdown_begin")ms"
+fi
+
+if client_alive; then
+  # Report it: the caller detaches this script and discards the exit code, so a
+  # silent abort is indistinguishable from Steam never coming back.
+  restart_trace 'aborted: Steam is still running, refusing to start a second client'
   exit 1
 fi
 
-# A short settle so the lock/pipe files are released before relaunch.
-sleep 1
+# Brief settle so the exiting client's socket and pipe files are reaped before a
+# new client probes them. The old fixed 1s was pure latency on every restart.
+sleep 0.3
 
 if [ -n "$LAUNCHER" ]; then
   setsid nohup "$LAUNCHER" </dev/null >/dev/null 2>&1 &
 fi
+restart_trace "relaunch issued $(since_ms "$restart_begin")ms after the request"
 exit 0
