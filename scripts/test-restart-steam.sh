@@ -83,5 +83,97 @@ out="$(run_restart none)"
 check "Desktop -> relaunches via the slsteam-moon wrapper" \
 	"$out" "desktop:$TESTDIR/home/.local/share/SLSsteam/path/steam"
 
+# --- Desktop: refuse relaunch while the old steam.sh wrapper remains ---------
+EVENTS="$TESTDIR/events"
+STATE="$TESTDIR/steam-alive"
+STEAM_SH_STATE="$TESTDIR/steamsh-alive"
+LOGGER_STATE="$TESTDIR/logger-alive"
+LAUNCH_MARKER="$TESTDIR/launched"
+: > "$EVENTS"
+printf '%s\n' alive > "$STEAM_SH_STATE"
+cat > "$FAKEBIN/steam" <<'FAKE'
+#!/usr/bin/env bash
+printf 'steam %s\n' "$*" >> "$TEST_EVENTS"
+exit 0
+FAKE
+chmod +x "$FAKEBIN/steam"
+cat > "$FAKEBIN/pgrep" <<'FAKE'
+#!/usr/bin/env bash
+if [ "${1:-}" = -x ] && [ "${2:-}" = steam ]; then
+	[ -e "${TEST_STATE:-}" ] && exit 0 || exit 1
+fi
+if [ "${1:-}" = -f ]; then
+	case "${2:-}" in
+		*'/steam.sh'*) [ -e "${TEST_STEAM_SH_STATE:-}" ] && exit 0 || exit 1 ;;
+		*srt-logger*console-linux.txt*) exit 1 ;;
+		*srt-logger*) [ -e "${TEST_LOGGER_STATE:-}" ] && exit 0 || exit 1 ;;
+		*steamwebhelper*) exit 1 ;;
+	esac
+fi
+exit 1
+FAKE
+chmod +x "$FAKEBIN/pgrep"
+cat > "$FAKEBIN/pkill" <<'FAKE'
+#!/usr/bin/env bash
+printf 'pkill %s\n' "$*" >> "$TEST_EVENTS"
+exit 0
+FAKE
+chmod +x "$FAKEBIN/pkill"
+cat > "$FAKEBIN/sleep" <<'FAKE'
+#!/usr/bin/env bash
+exit 0
+FAKE
+chmod +x "$FAKEBIN/sleep"
+cat > "$TESTDIR/home/.local/share/SLSsteam/path/steam" <<'FAKE'
+#!/usr/bin/env bash
+touch "$TEST_LAUNCH_MARKER"
+FAKE
+chmod +x "$TESTDIR/home/.local/share/SLSsteam/path/steam"
+if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
+	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
+	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
+	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
+	bash "$RESTART_SH"; then
+	printf 'FAIL: restart relaunched while steam.sh remained alive\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   restart refuses a residual steam.sh process\n'
+fi
+if [ -e "$LAUNCH_MARKER" ]; then
+	printf 'FAIL: residual steam.sh path launched a new client\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   residual steam.sh path does not launch Steam\n'
+fi
+
+# The logger command line is not required to include console-linux.txt.
+rm -f "$STEAM_SH_STATE" "$LAUNCH_MARKER"
+printf '%s\n' alive > "$LOGGER_STATE"
+if FAKE_MODE=none HOME="$TESTDIR/home" PATH="$FAKEBIN:$PATH" \
+	TEST_EVENTS="$EVENTS" TEST_STATE="$STATE" \
+	TEST_STEAM_SH_STATE="$STEAM_SH_STATE" TEST_LOGGER_STATE="$LOGGER_STATE" \
+	TEST_LAUNCH_MARKER="$LAUNCH_MARKER" \
+	bash "$RESTART_SH"; then
+	printf 'FAIL: restart relaunched while srt-logger remained alive\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   restart refuses a residual srt-logger process\n'
+fi
+if [ -e "$LAUNCH_MARKER" ]; then
+	printf 'FAIL: residual srt-logger path launched a new client\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   residual srt-logger path does not launch Steam\n'
+fi
+
+BUNDLE="$SCRIPT_DIR/../dist/luatools-linux.zip"
+if [ ! -f "$BUNDLE" ] || ! unzip -p "$BUNDLE" backend/scripts/restart_steam.sh \
+	| cmp -s - "$RESTART_SH"; then
+	printf 'FAIL: packaged LuaTools restart helper differs from the source helper\n'
+	failures=$((failures+1))
+else
+	printf 'ok:   packaged LuaTools restart helper matches the source\n'
+fi
+
 if [ "$failures" -eq 0 ]; then echo; echo "ALL PASS"; exit 0; fi
 echo; echo "$failures CHECK(S) FAILED"; exit 1

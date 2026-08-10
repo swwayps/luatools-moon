@@ -121,6 +121,15 @@ if pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamwebhelper' >/dev/null 2>&1; 
   sleep 1
 fi
 
+# Never start a second client while any process from the previous launch is
+# still alive.  The wrapper and logger can outlive the exact `steam` process.
+if pgrep -x steam >/dev/null 2>&1 \
+   || pgrep -f 'steamwebhelper' >/dev/null 2>&1 \
+   || pgrep -f '/steam.sh([[:space:]]|$)' >/dev/null 2>&1 \
+   || pgrep -f 'srt-logger' >/dev/null 2>&1; then
+  exit 1
+fi
+
 # A short settle so the lock/pipe files are released before relaunch.
 sleep 1
 
