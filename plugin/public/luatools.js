@@ -2938,7 +2938,18 @@
                           contentScriptQuery: "",
                         },
                       )
-                        .then(function () {
+                        .then(function (res) {
+                          const payload =
+                            typeof res === "string" ? JSON.parse(res) : res;
+                          if (!payload || payload.success !== true) {
+                            throw new Error(
+                              (payload && payload.error) ||
+                                t(
+                                  "menu.remove.failure",
+                                  "Failed to remove LuaTools.",
+                                ),
+                            );
+                          }
                           try {
                             window.__LuaToolsButtonInserted = false;
                             window.__LuaToolsPresenceCheckInFlight = false;
@@ -8745,7 +8756,15 @@
               appid: appid,
               contentScriptQuery: "",
             })
-              .then(function () {
+              .then(function (res) {
+                const payload =
+                  typeof res === "string" ? JSON.parse(res) : res;
+                if (!payload || payload.success !== true) {
+                  throw new Error(
+                    (payload && payload.error) ||
+                      t("menu.remove.failure", "Failed to remove LuaTools."),
+                  );
+                }
                 const currentLayout = findBigPictureInterestLayout();
                 if (currentLayout) {
                   renderBigPictureStoreButtons(appid, false, currentLayout);
@@ -8999,7 +9018,15 @@
           appid,
           contentScriptQuery: "",
         })
-          .then(function () {
+          .then(function (res) {
+            const payload =
+              typeof res === "string" ? JSON.parse(res) : res;
+            if (!payload || payload.success !== true) {
+              throw new Error(
+                (payload && payload.error) ||
+                  t("menu.remove.failure", "Failed to remove LuaTools."),
+              );
+            }
             try {
               removeBtn.remove();
               fixesBtn.remove();

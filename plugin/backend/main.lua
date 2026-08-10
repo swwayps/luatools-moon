@@ -520,37 +520,108 @@ end
 
 function DeleteLuaToolsForApp(appid)
     if type(appid) == "table" then appid = appid.appid end
-    local base = steam_utils.detect_steam_install_path()
+    appid = tonumber(appid)
+    if not appid or appid <= 0 or appid ~= math.floor(appid) then
+        return json_err("invalid appid")
+    end
+
+    local base_ok, base = pcall(steam_utils.detect_steam_install_path)
+    if not base_ok or type(base) ~= "string" or base == "" then
+        return json_err("Steam install path unavailable")
+    end
+
     local target_dir = fs.join(base, "config", "stplug-in")
     local candidates = {
         fs.join(target_dir, tostring(appid) .. ".lua"),
         fs.join(target_dir, tostring(appid) .. ".lua.disabled"),
     }
-    -- slsteammoon: purge this game's archived manifests from SLSsteam's
-    -- store first -- the .lua (which lists the depots) is about to be removed.
-    do
-        local ok_sls, sls = pcall(require, "slsteam")
-        if ok_sls and sls and sls.purge_store_for_lua then
-            for _, p in ipairs(candidates) do
-                pcall(sls.purge_store_for_lua, p)
+    local failures = {}
+    local function fail(stage, detail)
+        failures[#failures + 1] = stage .. ": " .. tostring(detail or "operation failed")
+    end
+
+    -- Cleanup must finish before removing the source script. The script is
+    -- the only durable record of the depot list used by manifest cleanup, and
+    -- retaining it makes a failed operation retryable from the UI.
+    local helper_ok, sls = pcall(require, "slsteam")
+    if not helper_ok or type(sls) ~= "table" then
+        fail("slsteam helper", sls or "unavailable")
+    else
+        if type(sls.purge_store_for_lua) ~= "function" then
+            fail("manifest store cleanup", "helper unavailable")
+        else
+            for _, path in ipairs(candidates) do
+                local call_ok, operation_ok, detail =
+                    pcall(sls.purge_store_for_lua, path)
+                if not call_ok then
+                    fail("manifest store cleanup", operation_ok)
+                elseif operation_ok ~= true then
+                    fail("manifest store cleanup", detail)
+                end
+            end
+        end
+
+        if type(sls.purge_pins_for_app) ~= "function" then
+            fail("manifest pin cleanup", "helper unavailable")
+        else
+            local call_ok, operation_ok, detail =
+                pcall(sls.purge_pins_for_app, appid)
+            if not call_ok then
+                fail("manifest pin cleanup", operation_ok)
+            elseif operation_ok ~= true then
+                fail("manifest pin cleanup", detail)
             end
         end
     end
+
+    local cacheForgotten = 0
+    if helper_ok and type(sls) == "table" and type(sls.forget_app) == "function" then
+        local call_ok, operation_ok, detail, moved =
+            pcall(sls.forget_app, appid)
+        if not call_ok then
+            fail("app cache cleanup", operation_ok)
+        elseif operation_ok ~= true then
+            cacheForgotten = tonumber(moved) or 0
+            fail("app cache cleanup", detail)
+        else
+            cacheForgotten = tonumber(detail) or 0
+        end
+    elseif helper_ok then
+        fail("app cache cleanup", "helper unavailable")
+    end
+
     local deleted = {}
-    for _, p in ipairs(candidates) do
-        if fs.exists(p) then
-            pcall(fs.remove, p)
-            table.insert(deleted, p)
+    if #failures == 0 then
+        for _, path in ipairs(candidates) do
+            local exists_ok, exists = pcall(fs.exists, path)
+            if not exists_ok then
+                fail("script inspection", exists)
+            elseif exists then
+                local remove_ok, removed, remove_error = pcall(fs.remove, path)
+                local after_ok, remains = pcall(fs.exists, path)
+                if not remove_ok then
+                    fail("script removal", removed)
+                elseif removed ~= true then
+                    fail("script removal", remove_error or "remove failed")
+                elseif not after_ok then
+                    fail("script inspection", remains)
+                elseif remains then
+                    fail("script removal", "file remains after remove")
+                else
+                    deleted[#deleted + 1] = path
+                end
+            end
         end
     end
-    -- slsteammoon: purge any manifest version pins for the removed script.
-    do
-        local ok_sls, sls = pcall(require, "slsteam")
-        if ok_sls and sls and sls.purge_pins_for_app then
-            pcall(sls.purge_pins_for_app, appid)
-        end
-    end
-    return json_ok({ success = true, deleted = deleted, count = #deleted })
+
+    local response = {
+        success = #failures == 0,
+        deleted = deleted,
+        count = #deleted,
+        cacheForgotten = cacheForgotten,
+    }
+    if #failures > 0 then response.error = table.concat(failures, "; ") end
+    return json_ok(response)
 end
 
 function CheckForFixes(appid)

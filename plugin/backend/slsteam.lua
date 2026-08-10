@@ -11,12 +11,140 @@
 
 local slsteam = {}
 
-local function config_path()
+local function config_root()
+  local xdg = os.getenv("XDG_CONFIG_HOME")
+  if xdg and xdg ~= "" then return xdg end
   local home = os.getenv("HOME") or ""
   if home == "" then return nil end
-  return home .. "/.config/SLSsteam/config.yaml"
+  return home .. "/.config"
 end
 
+local function config_path()
+  local root = config_root()
+  if not root then return nil end
+  return root .. "/SLSsteam/config.yaml"
+end
+
+local function cache_dir()
+  local root = config_root()
+  if not root then return nil end
+  return root .. "/SLSsteam/cache"
+end
+
+local function shell_single_quote(value)
+  local quote = string.char(39)
+  local escaped = tostring(value):gsub(quote,
+    quote .. string.char(92) .. quote .. quote)
+  return quote .. escaped .. quote
+end
+
+-- Return readable for a regular cache file, missing when metadata confirms
+-- that it is absent, and unreadable when the path exists but cannot be opened.
+-- The latter must fail closed: cleanup cannot delete the source Lua script
+-- while an artifact's state is unknown.
+local function file_state(path)
+  local file = io.open(path, "rb")
+  if file then
+    file:close()
+    return "readable"
+  end
+  local status, reason, code = os.execute("test -f " .. shell_single_quote(path) ..
+                                        " >/dev/null 2>&1")
+  if status == true or status == 0 then return "unreadable" end
+  -- test(1) exits 1 for a confirmed non-match. LuaJIT returns 256
+  -- (the shell exit code shifted by 8), while newer Lua returns the code as
+  -- the third result. Any other result means metadata inspection failed.
+  if (status == nil or status == false) and code == 1 then return "missing" end
+  if type(status) == "number" and status == 256 then return "missing" end
+  return "unknown"
+end
+
+-- Quarantine app-scoped cache artifacts explicitly tied to an app removed by
+-- LuaTools. ManifestId files are depot-scoped and are intentionally left to
+-- the native watcher, which has the app-to-depot relation index needed to
+-- preserve pins shared by multiple scripts. This mirrors
+-- AppInfoProvision::forgetApp's recoverable contract: rename, never delete.
+-- The Lua-side call is needed because Lumen and the injected client are
+-- separate processes and the plugin has no C++ module loader.
+-- Returns true,count | false,error,count.
+local forget_sequence = 0
+
+local function quarantine_file(original, suffix)
+  for attempt = 0, 1024 do
+    local target = original .. suffix
+    if attempt > 0 then target = target .. "." .. tostring(attempt) end
+    -- GNU mv -n performs an atomic no-replace rename. If the destination
+    -- already exists it exits successfully but leaves the source in place;
+    -- detect that case and retry with a suffix instead of unlinking a source
+    -- that a native writer may have replaced concurrently.
+    local status = os.execute("mv -n -- " .. shell_single_quote(original) ..
+                             " " .. shell_single_quote(target) ..
+                             " >/dev/null 2>&1")
+    if status == true or status == 0 then
+      local source_state = file_state(original)
+      local target_state = file_state(target)
+      if source_state == "missing"
+         and (target_state == "readable" or target_state == "unreadable") then
+        return target
+      end
+      if source_state == "readable" or source_state == "unreadable" then
+        if target_state == "readable" or target_state == "unreadable" then
+          -- No-replace collision: preserve the existing quarantine and try the
+          -- next destination. A successful move must remove the source.
+        else
+          return nil
+        end
+      else
+        return nil
+      end
+    else
+      return nil
+    end
+  end
+  return nil
+end
+
+function slsteam.forget_app(appid)
+  appid = tonumber(appid)
+  if not appid or appid <= 0 or appid ~= math.floor(appid) then
+    return false, "invalid appid", 0
+  end
+
+  local dir = cache_dir()
+  if not dir then return false, "HOME not set", 0 end
+  local id = tostring(appid)
+  local names = {
+    "picsbuffer_" .. id .. ".bin",
+    "picsbuffer_" .. id .. ".yaml",
+    "synthetic_" .. id,
+    "ticket_" .. id .. ".yaml",
+    "encryptedTicket_" .. id .. ".yaml",
+  }
+  forget_sequence = forget_sequence + 1
+  local suffix = ".forgotten." .. tostring(os.time()) .. "." ..
+                 tostring(forget_sequence)
+  local count = 0
+  local failed = {}
+  for _, name in ipairs(names) do
+    local original = dir .. "/" .. name
+    local state = file_state(original)
+    if state == "unreadable" or state == "unknown" then
+      failed[#failed + 1] = name
+    elseif state == "readable" then
+      if quarantine_file(original, suffix) then
+        count = count + 1
+      else
+        failed[#failed + 1] = name
+      end
+    end
+  end
+  if #failed > 0 then
+    return false, "failed to quarantine: " .. table.concat(failed, ", "), count
+  end
+  return true, count
+end
+
+-- Read the file while preserving its exact line endings.
 local function read_lines(path)
   local f = io.open(path, "rb")
   if not f then return nil end
@@ -195,8 +323,11 @@ function slsteam.purge_store_for_lua(lua_path)
     if not seen[id] then
       seen[id] = true
       -- prefix single-quoted; the glob stays unquoted so the shell expands it.
-      os.execute("rm -f -- " .. shsq(store .. "/" .. id .. "_") ..
-                 "*.manifest 2>/dev/null")
+      local status = os.execute("rm -f -- " .. shsq(store .. "/" .. id .. "_") ..
+                              "*.manifest 2>/dev/null")
+      if status ~= true and status ~= 0 then
+        return false, "failed to purge manifests for depot " .. id, count
+      end
       count = count + 1
     end
   end
@@ -222,7 +353,7 @@ function slsteam.purge_pins_for_app(appid)
   local path = config_path()
   if not path then return false, "HOME not set" end
   local lines, has_trailing_nl = read_lines(path)
-  if not lines then return false, "SLSsteam config.yaml not found" end
+  if not lines then return true, "not_present" end
 
   -- locate the ManifestPins block [header_idx .. block_end]
   local header_idx
