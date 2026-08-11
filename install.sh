@@ -231,7 +231,11 @@ preask_prompts() {
 	if has_gamescope_session; then
 		resolve_yesno PREASK_GAMEMODE "$Q_GAMEMODE_EN" "$Q_GAMEMODE_PT" "n" || true
 	fi
-	resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n" || true
+	# Cloud-save question only when the hook isn't deployed yet. An existing
+	# install is kept current silently, so asking again would be noise.
+	if ! cloudredirect_installed; then
+		resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n" || true
+	fi
 }
 
 # Mutable-system launcher privilege preflight. This is deliberately best-effort:
@@ -2010,8 +2014,40 @@ install_steamos_gamemode_dropin() {
 # (millennium branch only; always 0 on the main line).
 CR_FLATPAK_INSTALLED=0
 
-# Deploy the bundled, patched 32-bit cloud_redirect.so (2.1.5 + 120s
-# steamclient wait + CAS-path fix) into ~/.local/share/CloudRedirect.
+# Records the identity of the published hook that produced $CR_SO_PATH, so a
+# re-run can tell "already current" from "an update is available" without
+# re-downloading 2 MB. Holds the ETag raw.githubusercontent.com serves for
+# cloud_redirect.so (content-derived, so it changes exactly when the hook does).
+CR_SO_STAMP="$CR_DIR/.cloud_redirect.etag"
+
+# True when the CloudRedirect hook is already deployed on this machine.
+cloudredirect_installed() {
+	[ -s "$CR_SO_PATH" ]
+}
+
+# ETag of the published hook, or empty when it can't be determined (offline,
+# proxy that strips the header, ...). HEAD only — no payload is transferred.
+cr_published_stamp() {
+	curl -fsSLI "$CR_SO_URL" 2>/dev/null |
+		tr -d '\r' |
+		awk 'tolower($1) == "etag:" { sub(/^[^:]*:[[:space:]]*/, ""); stamp = $0 } END { print stamp }'
+}
+
+# 0 when the deployed hook is known to match the published one. Unknown stays
+# "not current" so the update path runs and settles it by content comparison.
+cr_hook_is_current() {
+	local published stored
+	cloudredirect_installed || return 1
+	[ -s "$CR_SO_STAMP" ] || return 1
+	published="$(cr_published_stamp)"
+	[ -n "$published" ] || return 1
+	stored="$(cat "$CR_SO_STAMP" 2>/dev/null)"
+	[ "$published" = "$stored" ]
+}
+
+# Deploy the patched 32-bit cloud_redirect.so from the cloudredirect-moon repo
+# into ~/.local/share/CloudRedirect. No-op (beyond the download) when the
+# published hook is byte-identical to the deployed one.
 install_cloudredirect_so() {
 	local tmp so
 
@@ -2037,12 +2073,49 @@ install_cloudredirect_so() {
 	fi
 
 	mkdir -p "$CR_DIR"
-	install -m 755 "$so" "$CR_SO_PATH" 2>/dev/null || {
-		cp -f "$so" "$CR_SO_PATH" && chmod 755 "$CR_SO_PATH"
-	}
+
+	# Nothing changed: leave the deployed file alone and just record the stamp,
+	# so the next run can skip the download entirely.
+	if cmp -s "$so" "$CR_SO_PATH"; then
+		cr_write_so_stamp
+		log_info "$(L "cloud_redirect.so is already up to date" \
+		             "cloud_redirect.so já está atualizado")"
+		return 0
+	fi
+
+	# Replace by rename so the new hook lands on a fresh inode. Writing over the
+	# existing file in place would corrupt it for any Steam process that still
+	# has it mapped.
+	local staged="$CR_DIR/.cloud_redirect.so.new"
+	if ! cp -f "$so" "$staged" 2>/dev/null; then
+		log_warn "$(L "Could not stage cloud_redirect.so; skipping cloud saves." \
+		             "Não foi possível preparar o cloud_redirect.so; pulando cloud saves.")"
+		return 1
+	fi
+	chmod 755 "$staged" 2>/dev/null
+	if ! mv -f "$staged" "$CR_SO_PATH" 2>/dev/null; then
+		rm -f "$staged" 2>/dev/null
+		log_warn "$(L "Could not install cloud_redirect.so; skipping cloud saves." \
+		             "Não foi possível instalar o cloud_redirect.so; pulando cloud saves.")"
+		return 1
+	fi
+
+	cr_write_so_stamp
 	log_success "$(L "cloud_redirect.so installed to $CR_SO_PATH" \
 	             "cloud_redirect.so instalado em $CR_SO_PATH")"
 	return 0
+}
+
+# Persist the published hook's identity next to the deployed .so. Best-effort:
+# a missing stamp only costs a re-download on the next run.
+cr_write_so_stamp() {
+	local published
+	published="$(cr_published_stamp)"
+	if [ -n "$published" ]; then
+		printf '%s\n' "$published" > "$CR_SO_STAMP" 2>/dev/null || true
+	else
+		rm -f "$CR_SO_STAMP" 2>/dev/null || true
+	fi
 }
 
 # Ensure SLSsteam's DisableCloud matches whether cloud saves will actually
@@ -2260,10 +2333,34 @@ ensure_cloudredirect_config() {
 }
 
 install_cloudredirect() {
-	# Cloud saves are optional, so ask first. CloudRedirect (the .so hook) only
-	# matters to people who want Steam Cloud saves to work for these games; skip
-	# the whole step if they say no. Sign-in now lives in Lumen Settings → Cloud
-	# Saves (no flatpak login app on the main line).
+	# Already installed → the user answered this question on a previous run, so
+	# don't ask again. Keep the hook current instead: update it silently when the
+	# published build differs from the deployed one, and do nothing when it
+	# doesn't.
+	if cloudredirect_installed; then
+		if cr_hook_is_current; then
+			log_info "$(L "CloudRedirect is installed and up to date." \
+			             "CloudRedirect está instalado e atualizado.")"
+		else
+			log_info "$(L "CloudRedirect is installed; checking for an update." \
+			             "CloudRedirect está instalado; verificando atualização.")"
+			if install_cloudredirect_so; then
+				# Only worth scanning for the legacy CAS layout after the hook
+				# changed; the find over compatdata is slow on big libraries.
+				repair_cas_save_layout
+			fi
+		fi
+		# Cheap and idempotent, and needed for the hook to actually receive the
+		# cloud RPCs — run on both paths.
+		sync_cloud_config_with_hook
+		ensure_cloudredirect_config
+		return 0
+	fi
+
+	# Not installed yet. Cloud saves are optional, so ask first. CloudRedirect
+	# (the .so hook) only matters to people who want Steam Cloud saves to work
+	# for these games; skip the whole step if they say no. Sign-in now lives in
+	# Lumen Settings → Cloud Saves (no flatpak login app on the main line).
 	if ! resolve_yesno PREASK_CLOUD "$Q_CLOUD_EN" "$Q_CLOUD_PT" "n"; then
 		log_info "$(L "Skipping cloud saves (CloudRedirect)." \
 		             "Pulando os cloud saves (CloudRedirect).")"
