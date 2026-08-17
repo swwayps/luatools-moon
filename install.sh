@@ -643,8 +643,10 @@ resolve_shutdown_launcher() {
 	return 1
 }
 
-# How is Steam installed? native / flatpak / snap / none.
-detect_steam_type() {
+# Print the first usable native Steam launcher. Sandboxed packages are checked
+# separately: having Flatpak/Snap installed must not hide a working native
+# installation, and a coexistence diagnostic needs the concrete native path.
+find_native_steam_launcher() {
 	# A native package-manager install puts the launcher in a system bin dir.
 	# Both search lists are overridable so tests can be isolated from whatever
 	# Steam happens to be installed on the host running them.
@@ -653,8 +655,8 @@ detect_steam_type() {
 	local c dir resolved wrapper_dir
 	for c in $fixed_candidates; do
 		if is_safe_native_launcher "$c"; then
-			echo "native"
-			return
+			printf '%s\n' "$c"
+			return 0
 		fi
 	done
 	# NixOS has no /usr/bin: `programs.steam.enable` symlinks the launcher into
@@ -676,17 +678,50 @@ detect_steam_type() {
 			case "$resolved" in
 				"$wrapper_dir"/*) continue ;;
 				/nix/store/*)
-					echo "native"
-					return
+					printf '%s\n' "$c"
+					return 0
 					;;
 			esac
 		done < <(printf '%s\n' "$search_path" | tr ':' '\n')
 	fi
-	if command -v flatpak >/dev/null 2>&1 && flatpak list 2>/dev/null | grep -qi "com.valvesoftware.Steam"; then
+	return 1
+}
+
+flatpak_steam_installed() {
+	command -v flatpak >/dev/null 2>&1 \
+		&& flatpak list --app --columns=application 2>/dev/null \
+			| grep -Fx "com.valvesoftware.Steam" >/dev/null
+}
+
+snap_steam_installed() {
+	command -v snap >/dev/null 2>&1 \
+		&& snap list 2>/dev/null \
+			| grep -iE '^steam[[:space:]]' >/dev/null
+}
+
+sandboxed_steam_installations() {
+	local detected=""
+	flatpak_steam_installed && detected="Flatpak"
+	if snap_steam_installed; then
+		if [ -n "$detected" ]; then detected="$detected/Snap"
+		else detected="Snap"
+		fi
+	fi
+	printf '%s\n' "$detected"
+}
+
+# How is Steam installed? native / flatpak / snap / none. Native deliberately
+# wins when package types coexist because this stack targets that installation.
+detect_steam_type() {
+	if find_native_steam_launcher >/dev/null 2>&1; then
+		echo "native"
+		return
+	fi
+	if flatpak_steam_installed; then
 		echo "flatpak"
 		return
 	fi
-	if command -v snap >/dev/null 2>&1 && snap list 2>/dev/null | grep -qi "^steam "; then
+	if snap_steam_installed; then
 		echo "snap"
 		return
 	fi
@@ -710,7 +745,7 @@ suggest_native_steam_install() {
 }
 
 check_steam_native() {
-	local steam_type
+	local steam_type isolated=""
 	steam_type="$(detect_steam_type)"
 
 	case "$steam_type" in
@@ -718,24 +753,28 @@ check_steam_native() {
 			log_success "$(L "Native Steam detected" "Steam nativa detectada")"
 			;;
 		flatpak|snap)
+			isolated="$(sandboxed_steam_installations)"
+			[ -n "$isolated" ] || isolated="${steam_type^}"
 			echo ""
-			log_error "$(L "Steam was installed via ${steam_type^}." \
-			              "A Steam foi instalada via ${steam_type^}.")"
+			log_error "$(L "No native Steam installation was detected." \
+			              "Nenhuma instalação nativa da Steam foi detectada.")"
 			echo ""
+			echo -e "  $(L "A ${isolated} Steam installation is present." \
+			                   "Há uma instalação da Steam via ${isolated}.")"
 			echo -e "  $(L "slsteam-moon only works with NATIVE Steam" \
-			               "slsteam-moon só funciona com a Steam NATIVA")"
+			                   "slsteam-moon só funciona com a Steam NATIVA")"
 			echo -e "  $(L "(the one from your package manager)." \
-			               "(a do seu gerenciador de pacotes).")"
+			                   "(a do seu gerenciador de pacotes).")"
 			echo ""
-			echo -e "  $(L "1) Uninstall the ${steam_type^} version:" \
-			               "1) Desinstale a versão ${steam_type^}:")"
-			if [ "$steam_type" = "flatpak" ]; then
-				echo -e "       ${GREEN}flatpak uninstall com.valvesoftware.Steam${NC}"
-			else
-				echo -e "       ${GREEN}sudo snap remove steam${NC}"
-			fi
-			echo -e "  $(L "2) Install native Steam:" "2) Instale a Steam nativa:")"
+			echo -e "  $(L "You can keep the ${isolated} version installed; native Steam can coexist with it." \
+			                   "Você pode manter a versão ${isolated} instalada; a Steam nativa pode coexistir com ela.")"
+			echo -e "  $(L "You do not need to uninstall it." \
+			                   "Não é necessário desinstalá-la.")"
+			echo ""
+			echo -e "  $(L "1) Install native Steam:" "1) Instale a Steam nativa:")"
 			echo -e "       ${GREEN}$(suggest_native_steam_install)${NC}"
+			echo -e "  $(L "2) Open the native launcher once, not the ${isolated} app icon." \
+			                   "2) Abra uma vez o launcher nativo, não o ícone da versão ${isolated}.")"
 			echo ""
 			fail "$(L "Aborted. Please install native Steam and re-run this installer." \
 			          "Abortado. Instale a Steam nativa e rode este instalador novamente.")"
@@ -776,13 +815,90 @@ check_steam_native() {
 # points, only that Steam bootstrapped it).
 check_steam_bootstrapped() {
 	local link="$HOME/.steam/steam"
-	local root
+	local root isolated="" native_launcher=""
 	root="$(readlink -e -q "$link" 2>/dev/null || true)"
 
 	# Bootstrapped: ~/.steam/steam is a symlink resolving to a dir with steam.sh.
 	if [ -L "$link" ] && [ -n "$root" ] && [ -f "$root/steam.sh" ]; then
 		log_success "$(L "Steam has been initialized" "Steam já foi inicializada")"
 		return 0
+	fi
+
+	# A foreign real path blocks Valve from creating its canonical symlink. Do
+	# not call this a first-launch issue and never replace it automatically: it
+	# may contain user data or belong to another Steam layout.
+	if [ -e "$link" ] && [ ! -L "$link" ]; then
+		echo ""
+		log_error "$(L "The native Steam bootstrap path is blocked." \
+		              "O caminho de inicialização da Steam nativa está bloqueado.")"
+		echo ""
+		echo -e "  $(L "$link exists but is not the expected symbolic link." \
+		                   "$link existe, mas não é o link simbólico esperado.")"
+		echo -e "  $(L "The installer will not modify or replace it automatically, to protect its contents." \
+		                   "O instalador não vai modificá-lo nem substituí-lo automaticamente, para proteger o conteúdo.")"
+		echo -e "  $(L "Inspect or repair the native Steam installation, then run this installer again." \
+		                   "Inspecione ou repare a instalação nativa da Steam e rode este instalador novamente.")"
+		echo ""
+		fail "$(L "Aborted. The native Steam bootstrap path needs repair." \
+		          "Abortado. O caminho de inicialização da Steam nativa precisa ser reparado.")"
+	fi
+
+	if [ -L "$link" ] && [ -z "$root" ]; then
+		echo ""
+		log_error "$(L "The native Steam symbolic link is broken." \
+		              "O link simbólico da Steam nativa está quebrado.")"
+		echo ""
+		echo -e "  $(L "$link points to a path that does not exist." \
+		                   "$link aponta para um caminho que não existe.")"
+		echo -e "  $(L "Repair the native Steam installation, then run this installer again." \
+		                   "Repare a instalação nativa da Steam e rode este instalador novamente.")"
+		echo ""
+		fail "$(L "Aborted. The native Steam symbolic link needs repair." \
+		          "Abortado. O link simbólico da Steam nativa precisa ser reparado.")"
+	fi
+
+	if [ -L "$link" ] && [ -n "$root" ] && [ ! -f "$root/steam.sh" ]; then
+		echo ""
+		log_error "$(L "The native Steam root is incomplete: steam.sh is missing." \
+		              "A raiz da Steam nativa está incompleta: steam.sh está ausente.")"
+		echo ""
+		echo -e "  $(L "Repair or finish initializing native Steam, then run this installer again." \
+		                   "Repare ou termine de inicializar a Steam nativa e rode este instalador novamente.")"
+		echo ""
+		fail "$(L "Aborted. The native Steam installation is incomplete." \
+		          "Abortado. A instalação nativa da Steam está incompleta.")"
+	fi
+
+	# When package types coexist, opening the sandboxed app does not initialize
+	# the native data root. Keep coexistence supported, but point at the exact
+	# launcher that check_steam_native already validated instead of telling the
+	# user to click an ambiguous menu icon.
+	isolated="$(sandboxed_steam_installations)"
+	if [ -n "$isolated" ]; then
+		native_launcher="$(find_native_steam_launcher 2>/dev/null || true)"
+		echo ""
+		log_error "$(L "Native Steam has not been initialized for this user." \
+		              "A Steam nativa ainda não foi inicializada para este usuário.")"
+		echo ""
+		echo -e "  $(L "A separate ${isolated} Steam installation was found." \
+		                   "Foi encontrada outra instalação da Steam via ${isolated}.")"
+		echo -e "  $(L "Opening that copy does not initialize the native installation." \
+		                   "Abrir essa cópia não inicializa a instalação nativa.")"
+		echo -e "  $(L "You do not need to uninstall it; both versions can coexist." \
+		                   "Não é necessário desinstalá-la; as duas versões podem coexistir.")"
+		echo ""
+		echo -e "  $(L "Close every Steam window, then open the native launcher directly:" \
+		                   "Feche todas as janelas da Steam e abra diretamente o launcher nativo:")"
+		if [ -n "$native_launcher" ]; then
+			echo -e "       ${GREEN}${native_launcher}${NC}"
+		else
+			echo -e "       ${GREEN}steam${NC}"
+		fi
+		echo -e "  $(L "Wait for the login window, close Steam, and run this installer again." \
+		                   "Espere a janela de login, feche a Steam e rode este instalador novamente.")"
+		echo ""
+		fail "$(L "Aborted. Initialize native Steam, then re-run this installer." \
+		          "Abortado. Inicialize a Steam nativa e rode este instalador novamente.")"
 	fi
 
 	echo ""
