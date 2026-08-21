@@ -302,6 +302,8 @@ get_distro_family() {
 			echo "fedora"
 		elif [ "${ID:-}" = "arch" ] || [[ "${ID_LIKE:-}" =~ arch ]]; then
 			echo "arch"
+		elif [ "${ID:-}" = "gentoo" ] || [[ "${ID_LIKE:-}" =~ gentoo ]]; then
+			echo "gentoo"
 		elif [[ "${ID:-}" =~ opensuse ]] || [[ "${ID_LIKE:-}" =~ opensuse ]]; then
 			echo "opensuse"
 		else
@@ -738,6 +740,7 @@ suggest_native_steam_install() {
 		debian)   echo "sudo apt update && sudo apt install steam-installer" ;;
 		fedora)   echo "sudo dnf install steam" ;;
 		arch)     echo "sudo pacman -S steam" ;;
+		gentoo)   echo "sudo eselect repository enable steam-overlay && sudo emaint sync -r steam-overlay && sudo emerge --ask games-util/steam-launcher" ;;
 		opensuse) echo "sudo zypper install steam" ;;
 		*)        echo "$(L "see your distro's documentation to install native Steam" \
 		                    "consulte a documentação da sua distro para instalar a Steam nativa")" ;;
@@ -942,13 +945,13 @@ pkg_for() {
 	local tool="$1" family="$2"
 	case "$tool" in
 		jq)
-			echo "jq" ;;
+			if [ "$family" = "gentoo" ]; then echo "app-misc/jq"; else echo "jq"; fi ;;
 		curl)
-			echo "curl" ;;
+			if [ "$family" = "gentoo" ]; then echo "net-misc/curl"; else echo "curl"; fi ;;
 		tar)
-			echo "tar" ;;
+			if [ "$family" = "gentoo" ]; then echo "app-arch/tar"; else echo "tar"; fi ;;
 		unzip)
-			echo "unzip" ;;
+			if [ "$family" = "gentoo" ]; then echo "app-arch/unzip"; else echo "unzip"; fi ;;
 		steam-run)
 			echo "steam-run" ;;
 		notify-send)
@@ -959,6 +962,7 @@ pkg_for() {
 				debian)   echo "libnotify-bin" ;;
 				fedora)   echo "libnotify" ;;
 				arch)     echo "libnotify" ;;
+				gentoo)   echo "x11-libs/libnotify" ;;
 				opensuse) echo "libnotify-tools" ;;
 				*)        echo "libnotify" ;;
 			esac
@@ -981,6 +985,9 @@ pm_install() {
 			;;
 		arch)
 			$sudo_cmd pacman -S --noconfirm "$@"
+			;;
+		gentoo)
+			$sudo_cmd emerge --ask=n --noreplace "$@"
 			;;
 		opensuse)
 			$sudo_cmd zypper install -y "$@"
