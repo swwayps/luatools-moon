@@ -27,8 +27,9 @@ local fo = dofile("plugin/backend/fix_overlays.lua")
 -- build_overrides(dll_names): map a set of present DLL basenames to a
 -- WINEDLLOVERRIDES string. Only DLLs the fix actually shipped get an entry,
 -- so we never override a builtin that the game doesn't replace.
--- Native-first DLLs (the fix's own code) -> "=n". DLLs that must chain to the
--- builtin afterwards (winmm, winhttp, version) -> "=n,b".
+-- Only DLL names that collide with a known Wine builtin need an override.
+-- Private payload DLLs already load natively through normal Windows lookup and
+-- must not be forced. Known proxy DLLs (winmm, winhttp, version) use "=n,b".
 -- ---------------------------------------------------------------------------
 
 -- C1: a typical online-fix payload.
@@ -38,17 +39,17 @@ do
     "dnet.dll", "steam_api64.dll",
   })
   check("C1 has prefix", s:sub(1, #'WINEDLLOVERRIDES="') == 'WINEDLLOVERRIDES="')
-  check("C1 OnlineFix64 native", s:find("OnlineFix64=n") ~= nil)
-  check("C1 steam_api64 native", s:find("steam_api64=n") ~= nil)
+  check("C1 omits private OnlineFix64", s:find("OnlineFix64") == nil)
+  check("C1 omits private steam_api64", s:find("steam_api64") == nil)
   check("C1 winmm native+builtin", s:find("winmm=n,b") ~= nil)
   check("C1 no .dll suffix in key", s:find("%.dll=") == nil)
   check("C1 quoted", s:sub(-1) == '"')
 end
 
--- C2: only a steam_api64 (Goldberg-style) -> single override.
+-- C2: steam_api64 has no competing Wine builtin and needs no override.
 do
   local s = fo.build_overrides({ "steam_api64.dll" })
-  check("C2 single steam_api64", s == 'WINEDLLOVERRIDES="steam_api64=n"')
+  check("C2 steam_api64 -> nil", s == nil)
 end
 
 -- C3: case-insensitive matching, dedup, ignore non-dll/unknown files.
@@ -247,7 +248,7 @@ local function fake_fs(entries)
   }
 end
 
--- C12: finds DLLs nested anywhere in the tree, ignores directories/non-dll.
+-- C12: private payload DLLs nested in the tree need no override.
 do
   local ffs = fake_fs({
     { name = "Game.exe", is_directory = false },
@@ -257,9 +258,7 @@ do
     { name = "readme.txt", is_directory = false },
   })
   local s = fo.overrides_for_install_dir(ffs, "/games/foo")
-  check("C12 builds override from tree", s ~= nil)
-  check("C12 has OnlineFix64", s and s:find("OnlineFix64=n") ~= nil)
-  check("C12 has steam_api64", s and s:find("steam_api64=n") ~= nil)
+  check("C12 private DLLs -> nil", s == nil)
 end
 
 -- C13: no fix DLLs in the tree -> nil.
@@ -280,10 +279,8 @@ end
 
 -- ---------------------------------------------------------------------------
 -- parse_dlllist / build_overrides_from_list / dlllist.txt handling.
--- A fix's dlllist.txt is honoured (every named DLL forced, system-proxy names
--- chained native+builtin, the rest native only) AND unioned with the
--- recognised fix DLLs found in the folder, so a short/incomplete dlllist never
--- suppresses a DLL the game actually needs.
+-- A fix's dlllist.txt contributes evidence, but only names colliding with Wine
+-- builtins are emitted. Private payload DLLs use normal Windows DLL lookup.
 -- ---------------------------------------------------------------------------
 
 -- D1: parse tolerates CRLF, spaces, comments, path prefixes, non-dll lines.
@@ -296,13 +293,12 @@ do
 end
 check("D1 non-string -> empty", #fo.parse_dlllist(nil) == 0)
 
--- D2: build_overrides_from_list forces ALL named DLLs (not allowlist-limited);
--- uncommon system proxies chain n,b.
+-- D2: only Wine system proxies are emitted; private names are ignored.
 do
   local s = fo.build_overrides_from_list({ "EMP.dll", "dsound.dll", "uplay_r1_loader64.dll" })
-  check("D2 EMP native", s:find("EMP=n") ~= nil)
+  check("D2 omits EMP", s:find("EMP") == nil)
   check("D2 dsound native+builtin (uncommon proxy)", s:find("dsound=n,b") ~= nil)
-  check("D2 uplay loader native", s:find("uplay_r1_loader64=n") ~= nil)
+  check("D2 omits uplay loader", s:find("uplay_r1_loader64") == nil)
   check("D2 quoted", s:sub(1, #'WINEDLLOVERRIDES="') == 'WINEDLLOVERRIDES="' and s:sub(-1) == '"')
 end
 check("D2 empty -> nil", fo.build_overrides_from_list({}) == nil)
@@ -314,8 +310,7 @@ do
   check("D3 single winmm", select(2, s:gsub("[Ww]in[Mm][Mm]=", "")) == 1)
 end
 
--- D4: overrides_for_install_dir prefers a dlllist.txt when present, reading it
--- via the injected reader; uses its names verbatim over the allowlist scan.
+-- D4: dlllist evidence includes the system proxy but omits private DLLs.
 do
   local ffs = {
     list_recursive = function(_)
@@ -328,11 +323,11 @@ do
   }
   local reader = function(p) return p == "/g/dlllist.txt" and "OnlineFix64.dll\ndsound.dll\n" or nil end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
-  check("D4 uses dlllist OnlineFix64", s and s:find("OnlineFix64=n") ~= nil)
+  check("D4 omits dlllist OnlineFix64", s and s:find("OnlineFix64") == nil)
   check("D4 dlllist covers dsound (not in allowlist)", s and s:find("dsound=n,b") ~= nil)
 end
 
--- D5: empty/missing dlllist.txt -> fall back to the allowlist scan.
+-- D5: empty/missing dlllist with only a private DLL needs no override.
 do
   local ffs = {
     list_recursive = function(_)
@@ -344,7 +339,7 @@ do
   }
   local reader = function(_) return "" end  -- empty dlllist
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
-  check("D5 falls back to allowlist scan", s and s:find("steam_api64=n") ~= nil)
+  check("D5 private fallback -> nil", s == nil)
 end
 
 -- D6: a SHORT/incomplete dlllist.txt must NOT suppress the folder DLLs. Many
@@ -352,7 +347,7 @@ end
 -- list the loader reads), yet the folder also carries SteamOverlay64/winmm/
 -- dnet/steam_api64/winhttp -- all of which need a Wine override or the game
 -- won't actually connect. The result must UNION the dlllist with every
--- recognised fix DLL present in the folder. (Meccha Chameleon regression.)
+-- recognised proxy DLL present in the folder. (Meccha Chameleon regression.)
 do
   local ffs = {
     list_recursive = function(_)
@@ -370,14 +365,12 @@ do
   }
   local reader = function(p) return p == "/g/dlllist.txt" and "OnlineFix64.dll\n" or nil end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
-  check("D6 keeps OnlineFix64", s and s:find("OnlineFix64=n") ~= nil)
-  check("D6 adds SteamOverlay64 from folder", s and s:find("SteamOverlay64=n") ~= nil)
+  check("D6 omits OnlineFix64", s and s:find("OnlineFix64") == nil)
+  check("D6 omits SteamOverlay64", s and s:find("SteamOverlay64") == nil)
   check("D6 adds winmm (n,b) from folder", s and s:find("winmm=n,b") ~= nil)
-  check("D6 adds dnet from folder", s and s:find("dnet=n") ~= nil)
-  check("D6 adds steam_api64 from folder", s and s:find("steam_api64=n") ~= nil)
+  check("D6 omits dnet", s and s:find("dnet") == nil)
+  check("D6 omits steam_api64", s and s:find("steam_api64") == nil)
   check("D6 adds winhttp (n,b) from folder", s and s:find("winhttp=n,b") ~= nil)
-  check("D6 single OnlineFix64 (no dupe)",
-        s and select(2, s:gsub("OnlineFix64=", "")) == 1)
   check("D6 ignores OnlineFix.ini", s and s:find("OnlineFix%.ini") == nil)
 end
 
@@ -396,7 +389,7 @@ do
   local reader = function(p) return p == "/g/dlllist.txt" and "dsound.dll\n" or nil end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
   check("D7 dlllist proxy dsound (n,b)", s and s:find("dsound=n,b") ~= nil)
-  check("D7 folder OnlineFix64 still present", s and s:find("OnlineFix64=n") ~= nil)
+  check("D7 private OnlineFix64 omitted", s and s:find("OnlineFix64") == nil)
 end
 
 -- D8: the REAL Meccha Chameleon "Steam Generic" fix layout. DLLs live nested
@@ -423,9 +416,9 @@ do
     return p == "/g/Chameleon/Binaries/Win64/dlllist.txt" and "OnlineFix64.dll" or nil
   end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
-  check("D8 OnlineFix64 native", s and s:find("OnlineFix64=n") ~= nil)
+  check("D8 OnlineFix64 omitted", s and s:find("OnlineFix64") == nil)
   check("D8 winmm proxy loader (n,b) -- the fix", s and s:find("winmm=n,b") ~= nil)
-  check("D8 steam_api64 native", s and s:find("steam_api64=n") ~= nil)
+  check("D8 steam_api64 omitted", s and s:find("steam_api64") == nil)
   check("D8 no .of treated as dll", s and s:find("Shipping%.of") == nil)
 end
 
@@ -443,34 +436,31 @@ do
   }
   local s = fo.overrides_for_install_dir(ffs, "/g")  -- no reader, no dlllist
   check("D9 dsound proxy loader (n,b)", s and s:find("dsound=n,b") ~= nil)
-  check("D9 OnlineFix64 native", s and s:find("OnlineFix64=n") ~= nil)
+  check("D9 OnlineFix64 omitted", s and s:find("OnlineFix64") == nil)
 end
 
 -- ---------------------------------------------------------------------------
 -- build_overrides_all / fix manifest (.slssteam_fix_dlls).
--- The manifest, written by downloader.sh at apply time, lists EXACTLY the DLLs
--- the fix/crack archive shipped (not the game's own). It is authoritative: it
--- is the only way to tell a crack DLL (arbitrary name -- voices38, Goldberg's
--- steam_api64, any cracker) from the hundreds of game DLLs they get extracted
--- next to. Every listed DLL is forced =n,b (matches the proven community
--- launch line), so the override is crack-agnostic instead of name-allowlisted.
+-- The manifest lists exactly the DLLs the fix archive shipped. It is
+-- authoritative input, but only shipped names that collide with Wine builtins
+-- become overrides; arbitrary/private DLLs already load normally.
 -- ---------------------------------------------------------------------------
 
--- M1: build_overrides_all forces n,b for every named DLL, dedups case-insensitively.
+-- M1: private names are omitted; known system proxies are emitted once.
 do
-  local s = fo.build_overrides_all({ "steam_api64.dll", "voices38.dll", "Voices38.dll", "data.bin" })
-  check("M1 steam_api64 n,b", s and s:find("steam_api64=n,b") ~= nil)
-  check("M1 voices38 n,b", s and s:find("voices38=n,b") ~= nil)
-  check("M1 dedup voices38", s and select(2, s:gsub("[Vv]oices38=", "")) == 1)
+  local s = fo.build_overrides_all({ "steam_api64.dll", "voices38.dll", "WinMM.dll", "winmm.dll", "data.bin" })
+  check("M1 omits steam_api64", s and s:find("steam_api64") == nil)
+  check("M1 omits voices38", s and s:find("voices38") == nil)
+  check("M1 winmm n,b", s and s:find("winmm=n,b") ~= nil)
+  check("M1 dedup winmm", s and select(2, s:gsub("[Ww]in[Mm][Mm]=", "")) == 1)
   check("M1 ignores non-dll", s and s:find("data") == nil)
   check("M1 quoted", s and s:sub(1, #'WINEDLLOVERRIDES="') == 'WINEDLLOVERRIDES="' and s:sub(-1) == '"')
 end
 check("M1 empty -> nil", fo.build_overrides_all({}) == nil)
 check("M1 no dll -> nil", fo.build_overrides_all({ "readme.txt" }) == nil)
 
--- M2: overrides_for_install_dir uses the manifest when present, forcing EXACTLY
--- the crack's DLLs (voices38 + steam_api64) and NOT the game's own DLLs
--- (d3d11.dll, the game exe) that sit in the same tree.
+-- M2: a private-only manifest returns nil and remains authoritative; runtime
+-- must not fall through and override the game's unrelated d3d11.dll.
 do
   local ffs = {
     list_recursive = function(_)
@@ -487,9 +477,7 @@ do
     return p == "/g/.slssteam_fix_dlls" and "steam_api64.dll\nvoices38.dll\n" or nil
   end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
-  check("M2 steam_api64 from manifest", s and s:find("steam_api64=n,b") ~= nil)
-  check("M2 voices38 from manifest", s and s:find("voices38=n,b") ~= nil)
-  check("M2 does NOT touch game d3d11", s and s:find("d3d11") == nil)
+  check("M2 private-only manifest -> nil", s == nil)
 end
 
 -- M3: manifest is authoritative even over a dlllist.txt (manifest = exact ship
@@ -512,7 +500,26 @@ do
   end
   local s = fo.overrides_for_install_dir(ffs, "/g", reader)
   check("M3 manifest covers winmm", s and s:find("winmm=n,b") ~= nil)
-  check("M3 manifest covers OnlineFix64", s and s:find("OnlineFix64=n,b") ~= nil)
+  check("M3 manifest omits OnlineFix64", s and s:find("OnlineFix64") == nil)
+end
+
+-- M4: Terraria's actual fix manifest has only private DLL names. Neither has
+-- a Wine builtin competitor, so the correct launch option is no override.
+do
+  local ffs = {
+    list_recursive = function(_)
+      return {
+        { name = "OnlineFix.dll", path = "/g/OnlineFix.dll", is_directory = false },
+        { name = "steam_api.dll", path = "/g/steam_api.dll", is_directory = false },
+        { name = ".slssteam_fix_dlls", path = "/g/.slssteam_fix_dlls", is_directory = false },
+      }
+    end,
+  }
+  local reader = function(p)
+    return p == "/g/.slssteam_fix_dlls" and "OnlineFix.dll\nsteam_api.dll\n" or nil
+  end
+  check("M4 Terraria private-only manifest -> nil",
+        fo.overrides_for_install_dir(ffs, "/g", reader) == nil)
 end
 
 if fails == 0 then

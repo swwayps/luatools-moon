@@ -59,10 +59,17 @@ preload("api_manifest", {})
 preload("downloads", {})
 preload("fixes", {})
 preload("ryuu_auth", {})
+preload("lua_tools_auth", {})
+preload("lua_tools_fixes", {})
+preload("lua_tools_fix_state", {})
+preload("lua_tools_fix_index", {})
+preload("lua_tools_recommended_add", {})
+preload("lua_tools_auto_fix", { tick = function() return { success = true } end })
 preload("settings.manager", {})
 preload("auto_update", {})
 
-local loaded = pcall(dofile, "plugin/backend/main.lua")
+local loaded, load_error = pcall(dofile, "plugin/backend/main.lua")
+if not loaded then io.stderr:write("main.lua load failed: " .. tostring(load_error) .. "\n") end
 local failures = 0
 local function check(value, message)
   if value then print("ok   " .. message) else print("FAIL " .. message); failures = failures + 1 end

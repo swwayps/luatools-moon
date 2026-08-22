@@ -58,6 +58,11 @@ local function builtin_id(api, honor_custom_marker)
     return LEGACY_BUILTIN_IDS[api.url]
 end
 
+local function is_managed_api(api)
+    return builtin_id(api, false) == "luie" or
+        (type(api) == "table" and api.managed == true)
+end
+
 local function read_catalog(path)
     if not fs.exists(path) then return nil, "missing" end
     local data = utils.read_json(path)
@@ -117,17 +122,18 @@ local function reconcile_catalog(defaults, user_data)
             if default and not seen_builtins[id] then
                 local merged = copy_table(default)
                 local historical_names = HISTORICAL_BUILTIN_NAMES[id] or {}
-                if type(saved.name) == "string" and saved.name ~= ""
+                if not is_managed_api(default)
+                    and type(saved.name) == "string" and saved.name ~= ""
                     and not historical_names[saved.name] then
                     merged.name = saved.name
                 end
                 if saved.enabled ~= nil then
                     merged.enabled = saved.enabled ~= false
                 end
-                if saved.api_key ~= nil then
+                if not is_managed_api(default) and saved.api_key ~= nil then
                     merged.api_key = saved.api_key
                 end
-                if saved.removed == true then
+                if not is_managed_api(default) and saved.removed == true then
                     merged.removed = true
                     merged.enabled = false
                 end
@@ -360,6 +366,9 @@ function api_manifest.add_custom_api(payload)
         or payload.name == "" or payload.url == "" then
         return { success = false, error = "Invalid payload: name and url are required" }
     end
+    if payload.name:lower():match("^%s*luie%s*$") then
+        return { success = false, error = "Luie is a managed lua.tools source" }
+    end
 
     local data, err = ensure_user_catalog()
     if not data then return { success = false, error = err } end
@@ -389,12 +398,35 @@ function api_manifest.get_api_credential_state(api, hubcap_api_key)
     local uses_hubcap_key = builtin_id(api, true) == "hubcap"
         or string.find(url, "<moapikey>", 1, true) ~= nil
     local uses_custom_key = string.find(url, "<apikey>", 1, true) ~= nil
+    local uses_lua_tools = builtin_id(api, false) == "luie"
     local needs_key = uses_hubcap_key or uses_custom_key
     local locked = (uses_hubcap_key
             and tostring(hubcap_api_key or ""):match("%S") == nil)
         or (uses_custom_key
             and tostring(api.api_key or ""):match("%S") == nil)
-    return { needsKey = needs_key, locked = locked }
+    if uses_lua_tools then
+        local ok_auth, lua_tools_auth = pcall(require, "lua_tools_auth")
+        local ok_status, status = false, nil
+        if ok_auth and lua_tools_auth and lua_tools_auth.status then
+            ok_status, status = pcall(lua_tools_auth.status)
+        end
+        locked = not (ok_status and type(status) == "table"
+            and status.success == true and status.configured == true)
+    end
+    return {
+        needsKey = needs_key,
+        needsLogin = uses_lua_tools,
+        locked = locked,
+    }
+end
+
+local function current_hubcap_key()
+    local hubcap_api_key = ""
+    local ok, settings_manager = pcall(require, "settings.manager")
+    if ok and settings_manager and settings_manager.get_hubcap_api_key then
+        hubcap_api_key = tostring(settings_manager.get_hubcap_api_key() or "")
+    end
+    return hubcap_api_key
 end
 
 function api_manifest.get_api_list()
@@ -403,11 +435,7 @@ function api_manifest.get_api_list()
         return { success = false, error = tostring(apis), apis = {} }
     end
 
-    local hubcap_api_key = ""
-    local ok, settings_manager = pcall(require, "settings.manager")
-    if ok and settings_manager and settings_manager.get_hubcap_api_key then
-        hubcap_api_key = tostring(settings_manager.get_hubcap_api_key() or "")
-    end
+    local hubcap_api_key = current_hubcap_key()
 
     local api_names = {}
     for index, api in ipairs(apis) do
@@ -418,7 +446,9 @@ function api_manifest.get_api_list()
             name = api.name or "Unknown",
             index = index - 1,
             needsKey = credential_state.needsKey,
+            needsLogin = credential_state.needsLogin,
             locked = credential_state.locked,
+            managed = is_managed_api(api),
         })
     end
     return { success = true, apis = api_names }
@@ -428,12 +458,20 @@ function api_manifest.get_all_apis()
     local data, err = ensure_user_catalog()
     if not data then return { success = false, error = err, apis = {} } end
     local apis = {}
+    local hubcap_api_key = current_hubcap_key()
     for _, api in ipairs(data.api_list) do
         if api.removed ~= true then
+            local managed = is_managed_api(api)
+            local credential_state = api_manifest.get_api_credential_state(
+                api, hubcap_api_key)
             table.insert(apis, {
                 name = api.name or "Unknown",
-                url = api.url or "",
+                url = managed and "" or (api.url or ""),
                 enabled = api.enabled ~= false,
+                managed = managed,
+                needsKey = credential_state.needsKey,
+                needsLogin = credential_state.needsLogin,
+                locked = credential_state.locked,
             })
         end
     end
@@ -472,6 +510,10 @@ function api_manifest.remove_api(name)
         return { success = false, error = "API not found: " .. name }
     end
 
+    if is_managed_api(api) then
+        return { success = false, error = "Luie is managed and cannot be removed" }
+    end
+
     if builtin_id(api, true) then
         api.removed = true
         api.enabled = false
@@ -498,6 +540,9 @@ function api_manifest.rename_api(old_name, new_name)
     if not api then
         return { success = false, error = "API not found: " .. old_name }
     end
+    if is_managed_api(api) then
+        return { success = false, error = "Luie is managed and cannot be renamed" }
+    end
 
     api.name = new_name
     if not write_user_catalog(data) then
@@ -514,13 +559,14 @@ function api_manifest.set_api_order(ordered_names)
 
     local data, err = ensure_user_catalog()
     if not data then return { success = false, error = err } end
-    local new_list = {}
+    local reordered_mutable = {}
     local added = {}
 
     for _, name in ipairs(ordered_names) do
         for index, api in ipairs(data.api_list) do
-            if api.name == name and api.removed ~= true and not added[index] then
-                table.insert(new_list, api)
+            if not is_managed_api(api) and api.name == name
+                and api.removed ~= true and not added[index] then
+                table.insert(reordered_mutable, api)
                 added[index] = true
                 break
             end
@@ -528,11 +574,21 @@ function api_manifest.set_api_order(ordered_names)
     end
 
     for index, api in ipairs(data.api_list) do
-        if not added[index] then
-            table.insert(new_list, api)
+        if not is_managed_api(api) and not added[index] then
+            table.insert(reordered_mutable, api)
         end
     end
 
+    local new_list = {}
+    local mutable_index = 1
+    for index, api in ipairs(data.api_list) do
+        if is_managed_api(api) then
+            new_list[index] = api
+        else
+            new_list[index] = reordered_mutable[mutable_index]
+            mutable_index = mutable_index + 1
+        end
+    end
     data.api_list = new_list
     if not write_user_catalog(data) then
         return { success = false, error = "Failed to save API catalog" }

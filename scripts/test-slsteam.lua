@@ -53,6 +53,11 @@ c = r()
 check("F1 mapping written", c:find("285900:%s*480") ~= nil)
 check("F1 IdleStatus preserved", c:find("IdleStatus:") ~= nil)
 check("F1 AppId line preserved", c:find("  AppId: 0") ~= nil)
+check("F1 applied-state reader is exported", type(slsteam.get_fake_appid) == "function")
+if type(slsteam.get_fake_appid) == "function" then
+  check("F1 applied-state reader returns Spacewar", slsteam.get_fake_appid(285900) == 480)
+  check("F1 applied-state reader returns nil for another app", slsteam.get_fake_appid(620) == nil)
+end
 
 -- F1 idempotent: same appid+value already present.
 ok, msg = slsteam.set_fake_appid(285900, 480)
@@ -64,6 +69,9 @@ check("F2 updated", ok == true and msg == "updated")
 c = r()
 check("F2 new value", c:find("285900:%s*481") ~= nil)
 check("F2 old value gone", c:find("285900:%s*480") == nil)
+if type(slsteam.get_fake_appid) == "function" then
+  check("F2 applied-state reader follows an updated mapping", slsteam.get_fake_appid(285900) == 481)
+end
 local _, n285 = c:gsub("285900%s*:", "")
 check("F2 single mapping line", n285 == 1)
 
@@ -375,6 +383,7 @@ end
 for _, module in ipairs({
   "utils", "plugin_utils", "http_client", "locales.manager", "api_manifest",
   "downloads", "fixes", "ryuu_auth", "settings.manager", "auto_update",
+  "lua_tools_auth", "lua_tools_fixes",
 }) do
   package.preload[module] = function() return {} end
 end

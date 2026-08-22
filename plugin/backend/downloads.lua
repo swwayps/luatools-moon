@@ -10,6 +10,7 @@ local api_manifest = require("api_manifest")
 local settings_manager = require("settings.manager")
 local cjson = require("json")
 local smart_merge = require("smart_merge")
+local lua_tools_manifest = require("lua_tools_manifest")
 
 local downloads = {}
 local DOWNLOAD_STATE = {}
@@ -295,12 +296,34 @@ function downloads.start_add_via_luatools_from_url(appid, url, apiName, success_
     local code = tonumber(success_code) or 200
     if code < 100 or code > 599 then code = 200 end
     local name = tostring(apiName or "Manual source"):gsub("%z", "")
-    local records = { table.concat({ "0", name, url, tostring(code), "" }, "\0") }
+    local records = {
+        table.concat({ "0", name, url, tostring(code), "" }, "\0") .. "\0"
+    }
     return _start_smart_records(appid, records, name)
 end
 
 function downloads.start_add_via_luatools(appid)
     return downloads.start_add_via_luatools_smart(appid)
+end
+
+function downloads.start_add_via_luatools_source(appid, source_name)
+    if type(appid) == "string" then appid = tonumber(appid) end
+    if not appid then return { success = false, error = "Invalid appid" } end
+    if tostring(source_name or ""):lower() ~= "luie" then
+        return { success = false, error = "Unknown managed source" }
+    end
+    local candidate, candidate_error = lua_tools_manifest.download_candidate(appid)
+    if not candidate then
+        return {
+            success = false,
+            errorCode = type(candidate_error) == "table" and candidate_error.code or "not_signed_in",
+            error = type(candidate_error) == "table" and candidate_error.message or "Sign in to lua.tools first.",
+        }
+    end
+    local record = table.concat({
+        "0", "Luie", candidate.url, tostring(candidate.successCode or 200), candidate.bearer,
+    }, "\0") .. "\0"
+    return _start_smart_records(appid, { record }, "Luie")
 end
 
 function downloads.check_apis_for_app(appid)
@@ -327,7 +350,22 @@ function downloads.check_apis_for_app(appid)
                 name = name,
                 available = false,
                 needsKey = credential_state.needsKey,
+                needsLogin = credential_state.needsLogin,
+                managed = api.builtin_id == "luie",
                 locked = true,
+            })
+            goto continue
+        end
+
+        if api.builtin_id == "luie" then
+            local status = lua_tools_manifest.check(appid)
+            table.insert(results, {
+                name = name,
+                available = status.available == true,
+                managed = true,
+                needsLogin = true,
+                locked = status.locked == true,
+                status = status.status,
             })
             goto continue
         end
@@ -496,7 +534,20 @@ local function _smart_records_for_app(appid)
         local name = tostring(api.name or "Unknown"):gsub("%z", "")
         local template = tostring(api.url or ""):gsub("%z", "")
         local credential_state = api_manifest.get_api_credential_state(api, hubcap_api_key)
-        local skip = template == "" or credential_state.locked
+        local skip = credential_state.locked
+        if api.builtin_id == "luie" then
+            if not skip then
+                local candidate = lua_tools_manifest.download_candidate(appid)
+                if candidate then
+                    records[#records + 1] = table.concat({
+                        tostring(index - 1), name, candidate.url,
+                        tostring(candidate.successCode or 200), candidate.bearer,
+                    }, "\0") .. "\0"
+                end
+            end
+            goto continue
+        end
+        skip = skip or template == ""
         if not skip and string.find(template, "<moapikey>", 1, true) then
             template = template:gsub("<moapikey>", hubcap_api_key)
         end
@@ -507,8 +558,9 @@ local function _smart_records_for_app(appid)
             records[#records + 1] = table.concat({
                 tostring(index - 1), name, template:gsub("<appid>", tostring(appid)),
                 tostring(tonumber(api.success_code) or 200), "",
-            }, "\0")
+            }, "\0") .. "\0"
         end
+        ::continue::
     end
     if #records == 0 then return nil, "No usable API sources" end
     return records

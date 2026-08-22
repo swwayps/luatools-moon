@@ -30,86 +30,114 @@ function steam_utils.has_lua_for_app(appid)
     return fs.exists(lua_file) or fs.exists(disabled_file)
 end
 
-function steam_utils.get_game_install_path_response(appid)
-    appid = tostring(appid)
-    local steam_path = steam_utils.detect_steam_install_path()
-    if not steam_path or steam_path == "" then
-        return { success = false, error = "Could not find Steam installation path" }
+local function dependency_steam_path(deps)
+    if deps and type(deps.steam_path) == "function" then
+        local ok, value = pcall(deps.steam_path)
+        return ok and tostring(value or "") or ""
     end
+    if deps and type(deps.steam_path) == "string" then return deps.steam_path end
+    return steam_utils.detect_steam_install_path()
+end
 
-    -- Steam keeps two copies of the library list: config/libraryfolders.vdf
-    -- and steamapps/libraryfolders.vdf. The content system reads the
-    -- steamapps copy and the two can drift, so a drive added later may be
-    -- present in one but stale or absent in the other. Reading only the
-    -- config copy made whole drives invisible here. Union BOTH files (plus
-    -- the Steam root itself) and de-duplicate.
-    local seen = {}
-    local all_library_paths = {}
-    local function add_lib(p)
-        if not p or p == "" then return end
-        p = p:gsub("\\\\", "\\"):gsub("/+$", "")
-        if p == "" or seen[p] then return end
-        seen[p] = true
-        table.insert(all_library_paths, p)
+local function library_paths(steam_path, deps)
+    local exists = deps and deps.exists or fs.exists
+    local read = deps and deps.read or m_utils.read_file
+    local seen, result = {}, {}
+    local function add(path)
+        path = tostring(path or ""):gsub("\\\\", "\\"):gsub("/+$", "")
+        if path == "" or seen[path] then return end
+        seen[path] = true
+        result[#result + 1] = path
     end
-
-    add_lib(steam_path)
-    local vdf_candidates = {
+    add(steam_path)
+    for _, candidate in ipairs({
         fs.join(steam_path, "config", "libraryfolders.vdf"),
         fs.join(steam_path, "steamapps", "libraryfolders.vdf"),
-    }
-    for _, vdf_path in ipairs(vdf_candidates) do
-        if fs.exists(vdf_path) then
-            local vdf_content = m_utils.read_file(vdf_path)
-            if vdf_content then
-                for p in vdf_content:gmatch('"path"%s+"([^"]+)"') do
-                    add_lib(p)
-                end
+    }) do
+        if exists(candidate) then
+            local content = read(candidate)
+            if type(content) == "string" then
+                for path in content:gmatch('"path"%s+"([^"]+)"') do add(path) end
             end
         end
     end
+    return result
+end
 
-    if #all_library_paths == 0 then
-        return { success = false, error = "Could not find libraryfolders.vdf" }
+function steam_utils.get_game_install_state(appid, deps)
+    local number = tonumber(appid)
+    if not number or number <= 0 or number ~= math.floor(number) then
+        return { found = false, complete = false, error = "invalid appid" }
     end
+    appid = tostring(math.floor(number))
+    local steam_path = dependency_steam_path(deps)
+    if steam_path == "" then
+        return { found = false, complete = false,
+            error = "Could not find Steam installation path" }
+    end
+    local exists = deps and deps.exists or fs.exists
+    local read = deps and deps.read or m_utils.read_file
 
-    local library_path = nil
-    local appmanifest_path = nil
-
-    for _, lib_path in ipairs(all_library_paths) do
-        local candidate = fs.join(lib_path, "steamapps", "appmanifest_" .. appid .. ".acf")
-        if fs.exists(candidate) then
-            library_path = lib_path
-            appmanifest_path = candidate
-            break
+    for _, library_path in ipairs(library_paths(steam_path, deps)) do
+        local manifest_path = fs.join(library_path, "steamapps",
+            "appmanifest_" .. appid .. ".acf")
+        if exists(manifest_path) then
+            local content = read(manifest_path)
+            if type(content) ~= "string" then
+                return { found = true, complete = false,
+                    libraryPath = library_path, appmanifestPath = manifest_path,
+                    error = "Failed to parse appmanifest" }
+            end
+            local install_dir = content:match('"installdir"%s+"([^"]+)"')
+            local game_name = content:match('"name"%s+"([^"]+)"')
+            local state_flags = tonumber(content:match('"StateFlags"%s+"(%d+)"'))
+            local bytes_downloaded = tonumber(
+                content:match('"BytesDownloaded"%s+"(%d+)"'))
+            local bytes_to_download = tonumber(
+                content:match('"BytesToDownload"%s+"(%d+)"'))
+            local install_path = install_dir and fs.join(library_path,
+                "steamapps", "common", install_dir) or nil
+            local directory_exists = type(install_path) == "string"
+                and exists(install_path) or false
+            local bytes_complete = bytes_to_download == nil
+                or bytes_to_download == 0
+                or (bytes_downloaded ~= nil and bytes_downloaded >= bytes_to_download)
+            return {
+                found = true,
+                complete = state_flags == 4 and bytes_complete and directory_exists,
+                steamPath = steam_path,
+                libraryPath = library_path,
+                appmanifestPath = manifest_path,
+                gameName = game_name,
+                installDir = install_dir,
+                installPath = install_path,
+                directoryExists = directory_exists,
+                stateFlags = state_flags,
+                bytesDownloaded = bytes_downloaded,
+                bytesToDownload = bytes_to_download,
+            }
         end
     end
+    return { found = false, complete = false, steamPath = steam_path,
+        error = "menu.error.notInstalled" }
+end
 
-    if not library_path or not appmanifest_path then
-        return { success = false, error = "menu.error.notInstalled" }
-    end
-
-    local manifest_content = m_utils.read_file(appmanifest_path)
-    if not manifest_content then
-        return { success = false, error = "Failed to parse appmanifest" }
-    end
-
-    local install_dir = manifest_content:match('"installdir"%s+"([^"]+)"')
-    if not install_dir then
+function steam_utils.get_game_install_path_response(appid)
+    local state = steam_utils.get_game_install_state(appid)
+    if not state.found then return { success = false, error = state.error } end
+    if not state.installDir then
         return { success = false, error = "Install directory not found" }
     end
-
-    local full_install_path = fs.join(library_path, "steamapps", "common", install_dir)
-    if not fs.exists(full_install_path) then
+    if not state.directoryExists then
         return { success = false, error = "Game directory not found" }
     end
 
     return {
         success = true,
-        installPath = full_install_path,
-        installDir = install_dir,
-        libraryPath = library_path,
-        path = full_install_path
+        installPath = state.installPath,
+        installDir = state.installDir,
+        libraryPath = state.libraryPath,
+        path = state.installPath
     }
 end
 

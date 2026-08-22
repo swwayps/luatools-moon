@@ -143,4 +143,20 @@ function fixes.get_apply_status(appid)
     return { success = true, state = { status = "downloading" } }
 end
 
+-- Manifest-only official entries still use the same poll/finalize path as an
+-- archive apply. Writing the worker state atomically makes the frontend observe
+-- one terminal extraction event without inventing a second progress protocol.
+function fixes.mark_apply_ready(appid)
+    local dest_root = utils.ensure_temp_download_dir()
+    local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
+    local temp_file = state_file .. ".tmp"
+    local ok, wrote = pcall(m_utils.write_file, temp_file,
+        '{"status":"extracted","bytesRead":0,"totalBytes":0}')
+    if not ok or wrote == false or not os.rename(temp_file, state_file) then
+        pcall(os.remove, temp_file)
+        return { success = false, error = "Could not prepare the manifest apply." }
+    end
+    return { success = true }
+end
+
 return fixes

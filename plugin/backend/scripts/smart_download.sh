@@ -54,18 +54,25 @@ rm -rf "$EXTRACT_DIR"; mkdir -p "$EXTRACT_DIR"
 trap 'rm -rf "$WORK" 2>/dev/null; rm -f "$CANDIDATES_FILE" "$COVERAGE_FILE" 2>/dev/null' EXIT
 unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY
 
-# NUL records: source-index, display-name, URL, accepted HTTP status.
-declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE C_REASON
+# NUL records: source-index, display-name, URL, accepted HTTP status, optional
+# bearer token. The token is copied into a private curl header file, never argv.
+declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE C_REASON C_AUTH_FILE
 n=0
 exec 3< "$CANDIDATES_FILE"
 while IFS= read -r -d '' idx <&3; do
   IFS= read -r -d '' name <&3 || break
   IFS= read -r -d '' url <&3 || break
   IFS= read -r -d '' code <&3 || break
+  IFS= read -r -d '' bearer <&3 || break
   [[ "$idx" =~ ^[0-9]+$ && "$code" =~ ^[0-9]+$ && -n "$url" ]] || continue
   C_INDEX[n]="$idx"; C_NAME[n]="$name"; C_URL[n]="$url"; C_CODE[n]="$code"
   C_ZIP[n]="$WORK/source_${n}.zip"; C_HEAD[n]="$WORK/source_${n}.headers"
   C_PIPE[n]="$WORK/source_${n}.stream"; C_TOTAL_FILE[n]="$WORK/source_${n}.total"
+  C_AUTH_FILE[n]=""
+  if [[ -n "$bearer" ]]; then
+    C_AUTH_FILE[n]="$WORK/source_${n}.auth"
+    printf 'Authorization: Bearer %s\n' "$bearer" > "${C_AUTH_FILE[n]}"
+  fi
   C_TOTAL[n]=""; C_STATE[n]="pending"; C_REASON[n]=""
   n=$((n + 1))
 done
@@ -105,6 +112,19 @@ zip_is_safe_and_usable() {
   [[ "$count" -eq 1 ]]
 }
 
+lua_is_safe_and_usable() {
+  local file="$1" size
+  size="$(stat -c %s "$file" 2>/dev/null)"
+  [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le 16777216 ]] || return 1
+  LC_ALL=C grep -Iq . "$file" || return 1
+  sed 's/--.*$//' "$file" 2>/dev/null | grep -Eq \
+    "^[[:space:]]*addappid[[:space:]]*\\([[:space:]]*${APPID}([[:space:]]*\\)|[[:space:]]*,)"
+}
+
+source_is_safe_and_usable() {
+  zip_is_safe_and_usable "$1" || lua_is_safe_and_usable "$1"
+}
+
 manifest_has_payload_magic() {
   local signature
   signature="$(od -An -tx1 -N4 "$1" 2>/dev/null | tr -d ' \n')"
@@ -133,7 +153,14 @@ extract_source() {
   local i="$1" dir unsafe
   printf -v dir '%s/source_%04d' "$EXTRACT_DIR" "${C_INDEX[i]}"
   rm -rf "$dir"; mkdir -p "$dir"
-  unzip -q "${C_ZIP[i]}" -d "$dir" || { rm -rf "$dir"; return 1; }
+  if zip_is_safe_and_usable "${C_ZIP[i]}"; then
+    unzip -q "${C_ZIP[i]}" -d "$dir" || { rm -rf "$dir"; return 1; }
+  elif lua_is_safe_and_usable "${C_ZIP[i]}"; then
+    cp -- "${C_ZIP[i]}" "$dir/${APPID}.lua" || { rm -rf "$dir"; return 1; }
+  else
+    rm -rf "$dir"
+    return 1
+  fi
   unsafe="$(find "$dir" \( -type l -o -type b -o -type c -o -type p -o -type s \) -print -quit 2>/dev/null)"
   [[ -z "$unsafe" ]] || { rm -rf "$dir"; return 1; }
   printf '%s' "${C_NAME[i]}" > "$dir/.source-name"
@@ -204,7 +231,9 @@ for ((i=0; i<n; i++)); do
   # COLLECTION_DEADLINE is only a fast-path cutoff after another source has
   # succeeded. Before that, curl owns the generous connection/inactivity guards
   # so slow links and delayed archive generation cannot become false failures.
-  stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' \
+  curl_auth=()
+  if [[ -n "${C_AUTH_FILE[i]}" ]]; then curl_auth=(-H "@${C_AUTH_FILE[i]}"); fi
+  stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' "${curl_auth[@]}" \
     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TRANSFER_TIME" \
     --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
     -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
@@ -255,7 +284,7 @@ while :; do
       C_STATE[i]="failed"
       if [[ "${http:-0}" == "404" ]]; then C_REASON[i]="not_found"; else C_REASON[i]="rejected"; fi
       slog "source index=${C_INDEX[i]} failed reason=${C_REASON[i]} rc=$rc http=${http:-0}"
-    elif ! zip_is_safe_and_usable "${C_ZIP[i]}"; then
+    elif ! source_is_safe_and_usable "${C_ZIP[i]}"; then
       C_STATE[i]="failed"; C_REASON[i]="invalid_package"
       slog "source index=${C_INDEX[i]} failed reason=invalid_package rc=$rc http=${http:-0}"
     elif extract_source "$i"; then

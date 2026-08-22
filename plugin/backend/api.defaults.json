@@ -17,6 +17,14 @@
             "enabled": true
         },
         {
+            "builtin_id": "luie",
+            "name": "Luie",
+            "provider": "lua.tools",
+            "source_name": "Luie",
+            "managed": true,
+            "enabled": true
+        },
+        {
             "builtin_id": "sushi",
             "name": "Sushi",
             "url": "https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/<appid>.zip",

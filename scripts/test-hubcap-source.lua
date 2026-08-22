@@ -59,6 +59,7 @@ package.loaded["settings.manager"] = {
     get_hubcap_api_key = function() return key end,
 }
 package.loaded.smart_merge = {}
+package.loaded.lua_tools_manifest = {}
 package.loaded.json = {
     encode = function() return "{}" end,
     decode = function() return {} end,

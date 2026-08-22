@@ -57,16 +57,15 @@ rm -f "$OUT/backend/lua_runtime.log" \
 chmod +x "$OUT/backend/scripts/"*.sh 2>/dev/null || true
 [[ ! -f "$OUT/backend/bin/7zz" ]] || chmod +x "$OUT/backend/bin/7zz"
 
-# Keep releases fresh when the live catalogue is reachable, but retain the
-# committed fallback index when offline. Tests set SKIP_INDEX_REFRESH=1 so a
-# build can be compared byte-for-byte with plugin/.
+# Store-page recommendation checks use a bundled manifest-only index. Refresh
+# it once while packaging so end users never fan out per-game catalogue
+# requests merely by pressing Add. A failed refresh leaves the committed copy.
 if [[ "${SKIP_INDEX_REFRESH:-0}" != "1" ]]; then
-  if CONNECT_TIMEOUT=10 MAX_TIME=45 \
-      bash "$OUT/backend/scripts/ryuu_index.sh" "$OUT/backend/ryuu_index.json" \
-      >/dev/null 2>&1; then
-    echo "[build] refreshed ryuu_index.json"
+  if python3 "$ROOT/scripts/refresh-lua-tools-fix-index.py" \
+      --output "$OUT/backend/lua_tools_fix_index.json" >/dev/null; then
+    echo "[build] refreshed lua_tools_fix_index.json"
   else
-    echo "[build] index refresh unavailable; using the bundled copy"
+    echo "[build] lua.tools index refresh unavailable; using the bundled copy"
   fi
 fi
 
@@ -80,11 +79,15 @@ with (root / "plugin.json").open(encoding="utf-8") as source:
     plugin = json.load(source)
 with (root / "backend" / "api.defaults.json").open(encoding="utf-8") as source:
     apis = json.load(source)
+with (root / "backend" / "lua_tools_fix_index.json").open(encoding="utf-8") as source:
+    fix_index = json.load(source)
 
 if not str(plugin.get("version", "")).strip():
     raise SystemExit("[build] plugin.json has no version")
 if not isinstance(apis.get("api_list"), list):
     raise SystemExit("[build] backend/api.defaults.json has no api_list")
+if fix_index.get("schema") != 1 or not isinstance(fix_index.get("apps"), dict):
+    raise SystemExit("[build] backend/lua_tools_fix_index.json is invalid")
 PY
 
 if command -v luajit >/dev/null 2>&1; then

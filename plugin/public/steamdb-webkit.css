@@ -1,1 +1,114 @@
-/* Deprecated: was SteamDB style shim; keeping file for migration safety. */
+/* LuaTools webview surfaces that need stable classes outside the generated JS. */
+
+.luatools-version-choice-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(8, 11, 15, 0.78);
+  backdrop-filter: blur(10px);
+}
+
+.luatools-version-choice-modal {
+  width: min(560px, calc(100vw - 32px));
+  padding: 28px 30px;
+  color: var(--lt-version-text, #f3f5f7);
+  background: var(--lt-version-bg, #25282f);
+  border: 1px solid var(--lt-version-border, #414956);
+  border-radius: 12px;
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  animation: lt-version-enter 160ms ease-out;
+}
+
+.luatools-version-choice-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 20px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.luatools-version-choice-heading i {
+  color: var(--lt-version-accent, #1a9fff);
+  font-size: 18px;
+}
+
+.luatools-version-choice-copy {
+  max-width: 62ch;
+  margin: 16px 0 20px;
+  color: var(--lt-version-muted, #aab2bd);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.luatools-version-choice-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 0;
+  color: var(--lt-version-text, #f3f5f7);
+  font-size: 14px;
+  line-height: 1.45;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.luatools-version-choice-check input {
+  width: 18px;
+  height: 18px;
+  margin: 1px 0 0;
+  accent-color: var(--lt-version-accent, #1a9fff);
+}
+
+.luatools-version-choice-check:has(input:disabled) {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.luatools-version-choice-actions {
+  display: grid;
+  grid-template-columns: 1fr 1.18fr auto;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.luatools-version-choice-actions .luatools-btn {
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.luatools-version-choice-actions .luatools-btn.ghost {
+  color: var(--lt-version-muted, #aab2bd);
+  background: transparent;
+  border-color: transparent;
+}
+
+.luatools-version-choice-actions .luatools-btn:focus-visible,
+.luatools-version-choice-actions .luatools-btn.active-focus,
+.luatools-version-choice-check input:focus-visible,
+.luatools-version-choice-check input.active-focus {
+  outline: 2px solid var(--lt-version-accent, #1a9fff);
+  outline-offset: 2px;
+}
+
+@keyframes lt-version-enter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 620px) {
+  .luatools-version-choice-overlay { padding: 12px; }
+  .luatools-version-choice-modal { padding: 24px 20px; }
+  .luatools-version-choice-actions { grid-template-columns: 1fr; }
+  .luatools-version-choice-actions .luatools-btn.primary { grid-row: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .luatools-version-choice-modal { animation: none; }
+}

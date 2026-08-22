@@ -34,6 +34,7 @@ FIRST_ENTRY="$(sed -n '1p' "$ENTRIES")"
 
 grep -qx 'plugin.json' "$ENTRIES"
 grep -qx 'backend/api.defaults.json' "$ENTRIES"
+grep -qx 'backend/lua_tools_fix_index.json' "$ENTRIES"
 if grep -qx 'backend/api.json' "$ENTRIES"; then
   echo "the release ZIP must not overwrite the legacy user API catalog" >&2
   exit 1

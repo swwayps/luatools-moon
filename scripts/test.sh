@@ -33,4 +33,14 @@ for test_file in scripts/test-*.lua; do
   luajit "$test_file"
 done
 
+for test_file in scripts/test-*.js; do
+  echo "[test] $test_file"
+  node "$test_file"
+done
+
+for test_file in scripts/test-*.py; do
+  echo "[test] $test_file"
+  python3 "$test_file"
+done
+
 echo "[test] all tests passed"

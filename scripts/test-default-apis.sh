@@ -14,16 +14,18 @@ with open(sys.argv[1], encoding="utf-8") as source:
 expected = [
     ("hubcap", "Sadie (Hubcap)", "https://hubcapmanifest.com/api/v1/manifest/<appid>?api_key=<moapikey>"),
     ("ryuu", "Ryuu", "http://167.235.229.108/<appid>"),
+    ("luie", "Luie", None),
     ("sushi", "Sushi", "https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/<appid>.zip"),
 ]
-actual = [(entry.get("builtin_id"), entry["name"], entry["url"]) for entry in entries]
+actual = [(entry.get("builtin_id"), entry["name"], entry.get("url")) for entry in entries]
 if actual != expected:
     raise SystemExit(f"default APIs differ: expected {expected}, got {actual}")
-if any("twentytwocloud.com" in entry["url"].lower() for entry in entries):
+if any("twentytwocloud.com" in entry.get("url", "").lower() for entry in entries):
     raise SystemExit("removed TwentyTwo Cloud endpoint returned to the defaults")
-if any("skyflarefox" in entry["url"].lower() for entry in entries):
+if any("skyflarefox" in entry.get("url", "").lower() for entry in entries):
     raise SystemExit("SkyAPI is live but must not be a default source")
-if any(entry.get("success_code") != 200 or entry.get("unavailable_code") != 404
+if any((entry.get("builtin_id") != "luie" and
+        (entry.get("success_code") != 200 or entry.get("unavailable_code") != 404))
        or entry.get("enabled") is not True for entry in entries):
     raise SystemExit("default API status codes or enabled flags changed")
 PY

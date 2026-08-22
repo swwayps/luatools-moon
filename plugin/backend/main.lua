@@ -17,6 +17,12 @@ local api_manifest     = require("api_manifest")
 local downloads        = require("downloads")
 local fixes            = require("fixes")
 local ryuu_auth        = require("ryuu_auth")
+local lua_tools_auth   = require("lua_tools_auth")
+local lua_tools_fixes  = require("lua_tools_fixes")
+local lua_tools_fix_index = require("lua_tools_fix_index")
+local lua_tools_fix_state = require("lua_tools_fix_state")
+local lua_tools_recommended_add = require("lua_tools_recommended_add")
+local lua_tools_auto_fix = require("lua_tools_auto_fix")
 local settings_manager = require("settings.manager")
 local auto_update      = require("auto_update")
 
@@ -137,6 +143,75 @@ local function on_frontend_loaded()
     copy_webkit_files()
 end
 
+local function decode_rpc_table(raw)
+    if type(raw) == "table" then return raw end
+    if type(raw) ~= "string" then return nil end
+    local ok, decoded = pcall(cjson.decode, raw)
+    return ok and type(decoded) == "table" and decoded or nil
+end
+
+local function on_tick(now, controls)
+    controls = type(controls) == "table" and controls or {}
+    return lua_tools_auto_fix.tick(now, {
+        auth_status = function()
+            local ok, status = pcall(lua_tools_auth.status)
+            return ok and status or { configured = false }
+        end,
+        install_state = function(appid)
+            local state = steam_utils.get_game_install_state(appid)
+            if type(state) == "table" and state.complete == true
+                and type(controls.is_app_busy) == "function" then
+                state.postInstallBusy = controls.is_app_busy(appid) == true
+            end
+            return state
+        end,
+        is_busy = function(appid)
+            return lua_tools_fix_state.get_pending(appid) ~= nil
+        end,
+        start_fix = function(appid, fix_id)
+            return decode_rpc_table(StartLuaToolsFix({
+                appid = appid,
+                fixId = fix_id,
+                gameName = "",
+                installPath = "",
+                contentScriptQuery = "",
+            })) or { success = false, errorCode = "start_failed" }
+        end,
+        poll_fix = function(appid)
+            return decode_rpc_table(GetApplyFixStatus({ appid = appid,
+                contentScriptQuery = "" }))
+                or { success = false, state = { status = "failed",
+                    errorCode = "status_failed" } }
+        end,
+        launch_options = function(appid)
+            local install = steam_utils.get_game_install_path_response(appid)
+            if type(install) ~= "table" or install.success ~= true then
+                return { success = false, errorCode = "not_installed",
+                    error = type(install) == "table" and install.error
+                        or "Game is not installed." }
+            end
+            return decode_rpc_table(GetFixLaunchOptions({
+                appid = appid,
+                compatToolName = "",
+                currentLaunchOptions = "",
+                installPath = install.installPath,
+                contentScriptQuery = "",
+            })) or { success = false, errorCode = "launch_options_failed" }
+        end,
+        set_launch_options = function(appid, options)
+            return type(controls.set_launch_options) == "function"
+                and controls.set_launch_options(appid, options) == true
+        end,
+        complete_fix = function(appid, fix_id)
+            return decode_rpc_table(CompleteLuaToolsFixApply({
+                appid = appid,
+                fixId = fix_id,
+                contentScriptQuery = "",
+            })) or { success = false, errorCode = "complete_failed" }
+        end,
+    })
+end
+
 -- ── Logger (called as "Logger.log" from JS) ──────────────────────────────────
 
 Logger = {}
@@ -216,6 +291,17 @@ end
 function StartAddViaLuaTools(appid)
     if type(appid) == "table" then appid = appid.appid end
     local ok, res = pcall(downloads.start_add_via_luatools, tonumber(appid))
+    if not ok then return json_err(res) end
+    return json_ok(res)
+end
+
+function StartAddViaLuaToolsSource(appid, contentScriptQuery, sourceName)
+    if type(appid) == "table" then
+        sourceName = appid.sourceName or appid.source
+        appid = appid.appid
+    end
+    local ok, res = pcall(downloads.start_add_via_luatools_source,
+        tonumber(appid), tostring(sourceName or ""))
     if not ok then return json_err(res) end
     return json_ok(res)
 end
@@ -626,25 +712,55 @@ end
 
 function CheckForFixes(appid)
     if type(appid) == "table" then appid = appid.appid end
-    local ok, res = pcall(fixes.check_for_fixes, tonumber(appid))
-    if not ok then return json_err(res) end
-    -- slsteammoon: augment with the ryuu Crack/Bypass lookup (bundled index +
-    -- non-blocking background refresh). Never fails the call.
-    pcall(function()
-        local crackfix = require("crackfix")
-        local home = os.getenv("HOME") or ""
-        local plugin_dir = ""
-        local okp, paths = pcall(require, "paths")
-        if okp and paths and paths.get_plugin_dir then plugin_dir = paths.get_plugin_dir() end
-        res.crackFix = crackfix.check(tonumber(appid), {
-            cache_path = (home ~= "") and (home .. "/.local/share/Lumen/ryuu_index.json") or nil,
-            bundled_path = (plugin_dir ~= "") and (plugin_dir .. "/backend/ryuu_index.json") or nil,
-            refresh_script = (plugin_dir ~= "") and (plugin_dir .. "/backend/scripts/ryuu_index.sh") or nil,
-        })
-        res.crackFix.authConfigured = ryuu_auth.status().configured == true
-    end)
-    if type(res) == "table" and type(res.crackFix) ~= "table" then
-        res.crackFix = { status = 404, available = false }
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local res = {
+        success = true,
+        appid = appid,
+        gameName = "Unknown Game (" .. tostring(appid) .. ")",
+        genericFix = { status = 404, available = false },
+        onlineFix = { status = 404, available = false },
+    }
+    -- The official lua.tools catalogue supersedes Ryuu for this surface. The
+    -- public response contains metadata only; bearer tokens and signed download
+    -- URLs stay in lua_tools_fixes and never cross the RPC boundary.
+    local ok_official, official = pcall(lua_tools_fixes.get_game, appid)
+    if not ok_official or type(official) ~= "table" then
+        official = { success = false, available = false, fixes = {} }
+    end
+    local applied_receipt = lua_tools_fix_state.get_applied(appid)
+    local applied_sources = lua_tools_fix_state.applied_sources(applied_receipt)
+    lua_tools_fix_state.decorate_game(official, applied_receipt)
+    res.luaToolsFixes = official
+    res.fallbackOnlineApplied = applied_sources.fallbackOnline
+    local ok_sls, sls = pcall(require, "slsteam")
+    res.spacewarApplied = ok_sls and sls and sls.get_fake_appid
+        and sls.get_fake_appid(appid) == 480 or false
+    if official.name and official.name ~= "" then res.gameName = official.name end
+    local recommended = official.recommended
+    if type(recommended) == "table" then
+        res.crackFix = {
+            status = 200,
+            available = true,
+            fixId = recommended.id,
+            title = recommended.title,
+            category = recommended.category,
+            tags = recommended.tags,
+            requiresPreparation = recommended.requiresPreparation == true,
+            requiresAuth = true,
+            authConfigured = official.authConfigured == true,
+            hasManifest = recommended.hasManifest == true,
+            hasFix = recommended.hasFix == true,
+            manifestFilename = recommended.manifestFilename,
+            fixFilename = recommended.fixFilename,
+        }
+    else
+        res.crackFix = {
+            status = 404,
+            available = false,
+            requiresAuth = true,
+            authConfigured = official.authConfigured == true,
+        }
     end
     return json_ok(res)
 end
@@ -679,19 +795,279 @@ function GetProtonDBStatus(appid)
     return json_ok(res)
 end
 
-function ApplyGameFix(appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath)
-    -- Millennium's IPC bridge sorts JS object keys alphabetically and passes their values as positional arguments.
-    -- The JS passes: { appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath }
-    -- So the Lua signature MUST be (appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath)
+function ApplyGameFix(appid, contentScriptQuery, downloadUrl, fixType, gameName, installPath, receiptKind)
+    -- Millennium's IPC bridge sorts JS object keys alphabetically and passes
+    -- their values positionally. receiptKind is a stable internal identifier;
+    -- user-visible/localized fixType is never used as persisted identity.
+
+    if type(appid) == "table" then
+        local payload = appid
+        appid, downloadUrl = payload.appid, payload.downloadUrl
+        fixType, gameName = payload.fixType, payload.gameName
+        installPath, receiptKind = payload.installPath, payload.receiptKind
+    end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local tracks_fallback = tostring(receiptKind or "") == "online_fix_fallback"
+    if tracks_fallback then
+        pcall(lua_tools_fix_state.abort, appid)
+        if not lua_tools_fix_state.begin_fallback_online(appid) then
+            return json_ok({ success = false, errorCode = "state_write_failed",
+                error = "Could not save the fallback fix application state." })
+        end
+    end
 
     local ok, res = pcall(fixes.apply_game_fix,
-        tonumber(appid), tostring(downloadUrl or ""),
+        appid, tostring(downloadUrl or ""),
         tostring(installPath or ""), tostring(fixType or ""), tostring(gameName or ""))
     if not ok then
+        if tracks_fallback then pcall(lua_tools_fix_state.abort, appid) end
         logger.warn("ApplyGameFix CRASHED: " .. tostring(res))
         return json_err(res)
     end
+    if tracks_fallback and (type(res) ~= "table" or res.success ~= true) then
+        pcall(lua_tools_fix_state.abort, appid)
+    elseif tracks_fallback and type(res) == "table" then
+        res.fixId = "online-fix-fallback"
+    end
     return json_ok(res)
+end
+
+function GetLuaToolsAuthStatus()
+    local ok, status = pcall(lua_tools_auth.status)
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function LoginLuaToolsWithCode(code, contentScriptQuery)
+    if type(code) == "table" then code = code.code end
+    local ok, status = pcall(lua_tools_auth.sign_in_with_code, tostring(code or ""))
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function AdoptLuaToolsSessionValue(contentScriptQuery, session)
+    if type(contentScriptQuery) == "table" then
+        session = contentScriptQuery.session or contentScriptQuery.cookie
+    end
+    local ok, status = pcall(lua_tools_auth.sign_in_with_session, tostring(session or ""))
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function StartLuaToolsDiscordLogin()
+    local ok, status = pcall(lua_tools_auth.begin_pkce)
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function PollLuaToolsDiscordLogin()
+    local ok, status = pcall(lua_tools_auth.poll_pkce)
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function CancelLuaToolsDiscordLogin()
+    local ok, status = pcall(lua_tools_auth.cancel_pkce)
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function LogoutLuaTools()
+    local ok, status = pcall(lua_tools_auth.clear)
+    if not ok then return json_err(status) end
+    return json_ok(status)
+end
+
+function GetLuaToolsFixesCatalogue()
+    local ok_auth, auth_status = pcall(lua_tools_auth.status)
+    if not ok_auth then return json_err(auth_status) end
+    if type(auth_status) ~= "table" or auth_status.configured ~= true then
+        return json_ok_array({ success = true, authRequired = true, games = {} }, "games")
+    end
+    local ok, result = pcall(lua_tools_fixes.list_games)
+    if not ok then return json_err(result) end
+    result.authRequired = false
+    return json_ok_array(result, "games")
+end
+
+function GetLuaToolsAddRecommendation(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid or appid <= 0 or appid ~= math.floor(appid) then
+        return json_err("invalid appid")
+    end
+    local ok_auth, auth_status = pcall(lua_tools_auth.status)
+    if not ok_auth then return json_err(auth_status) end
+    local configured = type(auth_status) == "table" and auth_status.configured == true
+    local ok_index, result = pcall(lua_tools_fix_index.recommendation,
+        appid, configured)
+    if not ok_index then return json_err(result) end
+    return json_ok(result)
+end
+
+function CancelLuaToolsAutoFix(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    local ok, result = pcall(lua_tools_auto_fix.cancel, tonumber(appid))
+    if not ok then return json_err(result) end
+    return json_ok(result)
+end
+
+function StartLuaToolsRecommendedAdd(appid, auto_apply, content_script_query, fix_id)
+    local payload = type(appid) == "table" and appid or {
+        appid = appid,
+        autoApply = auto_apply,
+        contentScriptQuery = content_script_query,
+        fixId = fix_id,
+    }
+    local ok, result = pcall(lua_tools_recommended_add.start,
+        tonumber(payload.appid), tostring(payload.fixId or ""),
+        payload.autoApply == true, {
+            publish = function(publish_appid, lua_body, steam_root)
+                local ok_module, manifestpins = pcall(require, "manifestpins")
+                if not ok_module or type(manifestpins) ~= "table"
+                    or type(manifestpins.install_luatools_manifest) ~= "function" then
+                    return false, "manifest_pin_unavailable"
+                end
+                local ctx = manifestpins.default_ctx()
+                ctx.stplug_dir = tostring(steam_root):gsub("/+$", "")
+                    .. "/config/stplug-in"
+                return manifestpins.install_luatools_manifest(
+                    ctx, publish_appid, lua_body)
+            end,
+            queue = function(queued_appid, fix_id)
+                return lua_tools_auto_fix.queue(queued_appid, fix_id)
+            end,
+        })
+    if not ok then return json_err(result) end
+    return json_ok(result)
+end
+
+function GetLuaToolsFixesForGame(appid)
+    if type(appid) == "table" then appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok_auth, auth_status = pcall(lua_tools_auth.status)
+    if not ok_auth then return json_err(auth_status) end
+    if type(auth_status) ~= "table" or auth_status.configured ~= true then
+        return json_ok({ success = true, authRequired = true, appid = appid, fixes = {} })
+    end
+    local ok, game = pcall(lua_tools_fixes.get_game, appid)
+    if not ok then return json_err(game) end
+    lua_tools_fix_state.decorate_game(game, lua_tools_fix_state.get_applied(appid))
+    game.authRequired = false
+    return json_ok_array(game, "fixes")
+end
+
+function StartLuaToolsFix(appid, contentScriptQuery, fixId, gameName, installPath)
+    if type(appid) == "table" then
+        local payload = appid
+        appid, fixId = payload.appid, payload.fixId
+        gameName, installPath = payload.gameName, payload.installPath
+    end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+
+    local ok_game, game = pcall(lua_tools_fixes.get_game, appid)
+    if not ok_game or type(game) ~= "table" then return json_err(game) end
+    local selected
+    for _, candidate in ipairs(type(game.fixes) == "table" and game.fixes or {}) do
+        if candidate.id == tostring(fixId or ""):lower() then selected = candidate; break end
+    end
+    if not selected or (selected.hasFix ~= true and selected.hasManifest ~= true) then
+        return json_ok({ success = false, errorCode = "unavailable",
+            error = "This lua.tools fix has no downloadable files." })
+    end
+    if selected.requiresPreparation == true then
+        return json_ok({ success = false, errorCode = "preparation_required",
+            error = "DenuvOwO preparation is not configured on this Linux system yet." })
+    end
+
+    -- Never trust a frontend-provided extraction directory. Resolve the game
+    -- library path from Steam's own appmanifest for this exact AppID.
+    local ok_install, install = pcall(steam_utils.get_game_install_path_response, appid)
+    if not ok_install or type(install) ~= "table" or install.success ~= true
+        or type(install.installPath) ~= "string" or install.installPath == "" then
+        return json_ok({ success = false, errorCode = "not_installed",
+            error = type(install) == "table" and install.error or "Game is not installed." })
+    end
+
+    local fix_download, manifest_download
+    for _, slot in ipairs({ "fix", "manifest" }) do
+        if (slot == "fix" and selected.hasFix == true)
+            or (slot == "manifest" and selected.hasManifest == true) then
+            local ok_resolve, download, download_error = pcall(
+                lua_tools_fixes.resolve_download, selected.id, slot)
+            if not ok_resolve then return json_err(download) end
+            if not download then
+                return json_ok({ success = false,
+                    errorCode = type(download_error) == "table" and download_error.code or "download_unavailable",
+                    error = type(download_error) == "table" and download_error.message or "Download unavailable." })
+            end
+            if slot == "fix" then fix_download = download else manifest_download = download end
+        end
+    end
+
+    local staged_manifest = ""
+    if manifest_download then
+        local ok_fetch, response = pcall(http_client.get, manifest_download.url, {
+            timeout = 60,
+            max_bytes = 2 * 1024 * 1024,
+        })
+        if not ok_fetch or type(response) ~= "table" or tonumber(response.status) ~= 200
+            or type(response.body) ~= "string" then
+            return json_ok({ success = false, errorCode = "manifest_download_failed",
+                error = "The lua.tools manifest could not be downloaded." })
+        end
+        local staged, stage_error = lua_tools_fix_state.stage_manifest(
+            appid, response.body, utils.ensure_temp_download_dir())
+        if not staged then
+            return json_ok({ success = false, errorCode = stage_error,
+                error = "The lua.tools manifest is invalid for this game." })
+        end
+        staged_manifest = staged
+    end
+
+    -- A prior interrupted reapply never replaces its completed receipt. Drop
+    -- only its private staging transaction before starting the new one.
+    pcall(lua_tools_fix_state.abort, appid)
+    if not lua_tools_fix_state.begin(appid, selected, staged_manifest) then
+        if staged_manifest ~= "" then pcall(os.remove, staged_manifest) end
+        return json_ok({ success = false, errorCode = "state_write_failed",
+            error = "Could not save the fix application state." })
+    end
+
+    local ok_apply, result
+    if fix_download then
+        ok_apply, result = pcall(fixes.apply_game_fix, appid, fix_download.url,
+            install.installPath, "lua.tools", tostring(gameName or game.name or ""))
+    else
+        ok_apply, result = pcall(fixes.mark_apply_ready, appid)
+    end
+    if not ok_apply then
+        pcall(lua_tools_fix_state.abort, appid)
+        return json_err(result)
+    end
+    if type(result) ~= "table" or result.success ~= true then
+        pcall(lua_tools_fix_state.abort, appid)
+    end
+    if type(result) == "table" then
+        result.fixId = selected.id
+        result.category = selected.category
+    end
+    return json_ok(result)
+end
+
+function CompleteLuaToolsFixApply(appid, contentScriptQuery, fixId)
+    if type(appid) == "table" then fixId = appid.fixId; appid = appid.appid end
+    appid = tonumber(appid)
+    if not appid then return json_err("invalid appid") end
+    local completed = lua_tools_fix_state.complete(appid, tostring(fixId or ""))
+    if not completed then
+        return json_ok({ success = false, errorCode = "not_ready",
+            error = "The selected fix has not finished applying." })
+    end
+    return json_ok({ success = true, appliedFix = lua_tools_fix_state.get_applied(appid) })
 end
 
 function GetRyuuAuthStatus()
@@ -750,6 +1126,26 @@ function GetApplyFixStatus(appid)
     if type(appid) == "table" then appid = appid.appid end
     local ok, res = pcall(fixes.get_apply_status, tonumber(appid))
     if not ok then return json_err(res) end
+    if type(res) == "table" and type(res.state) == "table" then
+        if res.state.status == "done" then
+            local pending = lua_tools_fix_state.get_pending(tonumber(appid))
+            if pending then
+                local installed, install_error = lua_tools_fix_state.install_staged_manifest(
+                    tonumber(appid), steam_utils.detect_steam_install_path())
+                if not installed then
+                    pcall(lua_tools_fix_state.abort, tonumber(appid))
+                    return json_ok({ success = true, state = {
+                        status = "failed", errorCode = install_error,
+                        error = "The fix files were extracted, but the Lua manifest could not be installed.",
+                    } })
+                end
+                res.state.fixId = pending.fixId
+                res.state.category = pending.category
+            end
+        elseif res.state.status == "failed" or res.state.status == "cancelled" then
+            pcall(lua_tools_fix_state.abort, tonumber(appid))
+        end
+    end
     return json_ok(res)
 end
 
@@ -839,6 +1235,16 @@ function UnFixGame(appid, installPath, fixDate)
         if ok_sls and sls and sls.unset_fake_appid then
             pcall(sls.unset_fake_appid, appid)
         end
+        local applied_receipt = lua_tools_fix_state.get_applied(appid)
+        if type(applied_receipt) == "table"
+            and tostring(applied_receipt.manifestFilename or "") ~= "" then
+            local steam_root = steam_utils.detect_steam_install_path()
+            if steam_root and steam_root ~= "" then
+                pcall(fs.remove, fs.join(steam_root, "config", "stplug-in",
+                    tostring(appid) .. ".lua"))
+            end
+        end
+        pcall(lua_tools_fix_state.clear, appid)
         -- Defensive: remove orphan Unsteam files from an older file-based apply.
         local path = tostring(installPath or "")
         if path ~= "" then
@@ -941,15 +1347,13 @@ function GetFixLaunchOptions(appid, compatToolName, contentScriptQuery, currentL
         -- Play button to it via a Proton launch option. Only a launcher the
         -- crack SHIPPED (recorded in .slssteam_fix_launchers by downloader.sh)
         -- is used, never a game's own pre-existing launcher.exe.
-        local launcher = launcherfix.launcher_for_install_dir(install)
+        local launcher, launcher_rel = launcherfix.launcher_for_install_dir(install)
         logger.log("GetFixLaunchOptions: appid=" .. tostring(appid)
             .. " compat=" .. tostring(compatToolName)
             .. " installPath=" .. tostring(installPath)
             .. " overrides=" .. tostring(overrides)
-            .. " launcher=" .. tostring(launcher))
-        if not overrides and not launcher then
-            return { success = true, apply = false }
-        end
+            .. " launcher=" .. tostring(launcher)
+            .. " launcherRel=" .. tostring(launcher_rel))
         -- Merge into the user's EXISTING launch options so wrappers like
         -- mangohud/gamemoderun survive. The frontend can't read them (no
         -- SteamClient on the store page; appDetailsStore reads back empty), so
@@ -959,21 +1363,35 @@ function GetFixLaunchOptions(appid, compatToolName, contentScriptQuery, currentL
             local ok_lo, lo = pcall(require, "launchopts")
             if ok_lo and lo and lo.read then current = lo.read(tonumber(appid)) or "" end
         end
+        -- A newer inference pass can legitimately decide that a previously
+        -- generated override is unnecessary (for example OnlineFix+steam_api,
+        -- which Wine already loads natively). Reapplying must remove that stale
+        -- block instead of returning early and leaving the old launch options.
+        if not overrides and not launcher then
+            local cleaned = fix_overlays.remove_overrides
+                and fix_overlays.remove_overrides(current) or current
+            if cleaned ~= current then
+                return { success = true, apply = true, launchOptions = cleaned }
+            end
+            return { success = true, apply = false }
+        end
         -- When the crack ships a launcher, it IS the entry point: it starts the
-        -- game the correct way itself. Point Play straight at it (the
-        -- "<launcher>" %command% form) and do NOT add WINEDLLOVERRIDES -- the
-        -- launcher handles the crack, and forcing those DLLs native can
-        -- conflict. Strip any override a prior apply left behind. Otherwise (no
-        -- launcher) keep the WINEDLLOVERRIDES merge for the bare DLL crack.
+        -- game the correct way itself. Preserve Proton's generated argv and
+        -- replace only its final executable with the game-relative launcher.
+        -- Do NOT add WINEDLLOVERRIDES: the launcher handles the fix, and forcing
+        -- those DLLs native can conflict. Strip any override a prior apply left
+        -- behind. Otherwise keep the override merge for the bare DLL fix.
         local merged
         if launcher then
             local base = current
             if fix_overlays.remove_overrides then base = fix_overlays.remove_overrides(base) end
-            merged = launcherfix.merge_launch_options(base, launcher)
+            merged = launcherfix.merge_launch_options(base, launcher_rel)
         else
             merged = fix_overlays.merge_launch_options(current, overrides)
         end
-        return { success = true, apply = true, launchOptions = merged, overrides = overrides, launcher = launcher }
+        return { success = true, apply = true, launchOptions = merged,
+            overrides = overrides, launcher = launcher,
+            launcherRelative = launcher_rel }
     end)
     if not ok then return json_err(res) end
     return json_ok(res)
@@ -1165,4 +1583,5 @@ return {
     on_load            = on_load,
     on_unload          = on_unload,
     on_frontend_loaded = on_frontend_loaded,
+    on_tick            = on_tick,
 }

@@ -75,6 +75,7 @@ preload("api_manifest", {
 })
 preload("settings.manager", { get_hubcap_api_key = function() return "" end })
 preload("smart_merge", dofile("plugin/backend/smart_merge.lua"))
+preload("lua_tools_manifest", {})
 preload("json", { -- decode the fields downloads.lua reads from the state file
   decode = function(s)
     local status = s:match('"status"%s*:%s*"([^"]*)"')
@@ -140,12 +141,12 @@ local candidate_data = candidate and candidate:read("*a") or ""
 if candidate then candidate:close() end
 local fields = {}
 for field in candidate_data:gmatch("([^%z]*)%z") do fields[#fields + 1] = field end
-check(#fields == 8, "(D2) two usable APIs produce two four-field NUL records")
+check(#fields == 10, "(D2) two usable APIs produce two five-field NUL records")
 check(fields[1] == "0" and fields[2] == "Hubcap"
   and fields[3] == "https://example.test/" .. APPID and fields[4] == "200",
   "(D3) first API preserves priority, URL substitution, and success code")
-check(fields[5] == "1" and fields[6] == "custom/name\tline\nbreak"
-  and fields[7] == "https://custom.test/" .. APPID and fields[8] == "201",
+check(fields[6] == "1" and fields[7] == "custom/name\tline\nbreak"
+  and fields[8] == "https://custom.test/" .. APPID and fields[9] == "201",
   "(D4) arbitrary custom API name survives NUL handoff")
 check(not candidate_data:find("Missing Key", 1, true),
   "(D5) API with a blank required key is skipped")

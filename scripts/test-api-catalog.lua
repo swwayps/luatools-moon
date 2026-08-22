@@ -7,6 +7,7 @@ local USER_PATH = "/plugin/backend/data/api.json"
 local remote_manifest
 local write_count = 0
 local hubcap_api_key = "configured"
+local lua_tools_logged_in = false
 
 local function copy(value)
     if type(value) ~= "table" then return value end
@@ -34,6 +35,14 @@ local files = {
                 url = "http://167.235.229.108/<appid>",
                 success_code = 200,
                 unavailable_code = 404,
+                enabled = true,
+            },
+            {
+                builtin_id = "luie",
+                name = "Luie",
+                provider = "lua.tools",
+                source_name = "Luie",
+                managed = true,
                 enabled = true,
             },
             {
@@ -144,6 +153,11 @@ package.loaded.plugin_utils = {
 package.loaded["settings.manager"] = {
     get_hubcap_api_key = function() return hubcap_api_key end,
 }
+package.loaded.lua_tools_auth = {
+    status = function()
+        return { success = true, configured = lua_tools_logged_in }
+    end,
+}
 
 local api_manifest = dofile("plugin/backend/api_manifest.lua")
 local failures = 0
@@ -164,7 +178,7 @@ local function find_api(list, name)
 end
 
 local all = api_manifest.get_all_apis().apis
-check(#all == 5, "live defaults and custom APIs are visible")
+check(#all == 6, "live defaults and custom APIs are visible")
 check(find_api(all, "TwentyTwo Cloud") == nil, "retired TwentyTwo default is removed")
 check(find_api(all, "Sadie (Hubcap)") ~= nil, "legacy Morrenus source adopts the current upstream name")
 check(find_api(all, "Morrenus") == nil, "obsolete source name is not kept as a user-visible rename")
@@ -176,6 +190,10 @@ check(migrated_ryuu and migrated_ryuu.enabled == false, "disabled built-in stays
 check(find_api(all, "API da comunidade") ~= nil, "custom API survives reconciliation")
 check(find_api(all, "Minha SkyAPI") ~= nil,
     "non-default SkyAPI is preserved instead of treated as retired")
+local luie = find_api(all, "Luie")
+check(luie and luie.managed == true and luie.needsLogin == true
+    and luie.locked == true and luie.url == "",
+    "Luie is always visible as a managed source without exposing an endpoint")
 
 local active = api_manifest.load_api_manifest()
 check(find_api(active, "Minha Ryuu") == nil, "disabled API is excluded from downloads")
@@ -204,6 +222,16 @@ check(hubcap_status and hubcap_status.api_key == nil,
     "source status never exposes the configured credential")
 check(keyless_status and keyless_status.needsKey == false and keyless_status.locked == false,
     "sources without credentials retain their normal waiting state")
+local luie_status = find_api(source_status, "Luie")
+check(luie_status and luie_status.needsLogin == true and luie_status.locked == true,
+    "Luie reports Needs login while signed out")
+
+lua_tools_logged_in = true
+source_status = api_manifest.get_api_list().apis
+luie_status = find_api(source_status, "Luie")
+check(luie_status and luie_status.locked == false,
+    "Luie unlocks automatically with the shared lua.tools session")
+lua_tools_logged_in = false
 
 hubcap_api_key = "configured"
 for _, api in ipairs(files[USER_PATH].api_list) do
@@ -230,6 +258,45 @@ api_manifest.add_custom_api({
 })
 all = api_manifest.get_all_apis().apis
 check(find_api(all, "Outra custom") ~= nil, "new custom API is stored in the persistent catalog")
+check(api_manifest.add_custom_api({
+    name = "luie", url = "https://example.invalid/<appid>",
+}).success == false, "custom sources cannot replace the reserved Luie identity")
+check(api_manifest.rename_api("Luie", "Changed").success == false,
+    "managed Luie cannot be renamed")
+check(api_manifest.remove_api("Luie").success == false,
+    "managed Luie cannot be removed")
+
+local luie_before_order
+for index, api in ipairs(files[USER_PATH].api_list) do
+    if api.builtin_id == "luie" then luie_before_order = index end
+end
+local reorder_names = {}
+for index = #files[USER_PATH].api_list, 1, -1 do
+    local api = files[USER_PATH].api_list[index]
+    if api.name ~= "Luie" and api.removed ~= true then
+        reorder_names[#reorder_names + 1] = api.name
+    end
+end
+check(api_manifest.set_api_order(reorder_names).success == true,
+    "other sources can be reordered around managed Luie")
+local luie_after_order
+for index, api in ipairs(files[USER_PATH].api_list) do
+    if api.builtin_id == "luie" then luie_after_order = index end
+end
+check(luie_after_order == luie_before_order,
+    "managed Luie keeps its pinned catalog position")
+
+local toggled_luie = api_manifest.toggle_api("Luie")
+check(toggled_luie.success and toggled_luie.enabled == false,
+    "managed Luie still allows its enable toggle")
+lua_tools_logged_in = true
+all = api_manifest.get_all_apis().apis
+check(find_api(all, "Luie").enabled == false and find_api(all, "Luie").locked == false,
+    "login unlocks Luie without overriding an explicit disabled preference")
+lua_tools_logged_in = false
+all = api_manifest.get_all_apis().apis
+check(find_api(all, "Luie").enabled == false and find_api(all, "Luie").locked == true,
+    "logout relocks Luie without changing its toggle preference")
 
 api_manifest.remove_api("Sadie (Hubcap)")
 all = api_manifest.get_all_apis().apis

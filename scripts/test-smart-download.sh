@@ -19,7 +19,7 @@ print(data.get(sys.argv[2], ""))
 PY
 }
 write_candidate() {
-  printf '%s\0%s\0%s\0%s\0' "$2" "$3" "$4" "$5" >> "$1"
+  printf '%s\0%s\0%s\0%s\0%s\0' "$2" "$3" "$4" "$5" "${6:-}" >> "$1"
 }
 make_zip() {
   local zipfile="$1" manifest="${2:-}"
@@ -49,6 +49,7 @@ printf 'addappid(1134710)\n' > "$KEYLESS_DIR/1134710.lua"
 ( cd "$KEYLESS_DIR" && zip -qr "$TMP/keyless.zip" . )
 rm -rf "$KEYLESS_DIR"
 printf 'ORIGINAL\n' > "$TMP/symlink-victim"
+printf 'addappid(1134710)\naddappid(1134710,1,"%064d")\n' 0 > "$TMP/luie.lua"
 python3 - "$TMP/symlink.zip" "$TMP/symlink-victim" <<'PY'
 import stat, sys, zipfile
 archive, victim = sys.argv[1:]
@@ -85,6 +86,8 @@ class H(http.server.BaseHTTPRequestHandler):
   def log_message(self,*args): pass
   def do_GET(self):
     name=self.path.lstrip('/')
+    if name == 'luie.lua' and self.headers.get('Authorization') != 'Bearer test-secret':
+      data=b'unauthorized\n'; self.send_response(401); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
     if name == 'dead.zip':
       self.send_response(200); self.send_header('Content-Length','999999'); self.end_headers(); time.sleep(10); return
     if name == 'late.zip':
@@ -121,6 +124,16 @@ PORT=""
 for _ in $(seq 1 50); do PORT="$(head -1 "$TMP/port" 2>/dev/null)"; [[ -n "$PORT" ]] && break; sleep 0.1; done
 [[ -n "$PORT" ]] || { echo "server failed"; exit 1; }
 : > "$TMP/no-coverage"
+
+# Luie is an authenticated official source and may return a bare .lua instead
+# of a ZIP. The credential must reach curl without becoming part of the URL.
+DL="$TMP/dl"; mkdir -p "$DL"; CL="$TMP/cl.bin"; : > "$CL"
+write_candidate "$CL" 0 "Luie" "http://127.0.0.1:$PORT/luie.lua" 200 "test-secret"
+"$SCRIPT" 1134710 "$DL/state.json" "$DL" "$CL" "$TMP/no-coverage" >/dev/null 2>&1 || true
+check "authenticated bare Lua source is collected" \
+  '[[ -f "$DL/extracted_1134710/source_0000/1134710.lua" ]]'
+check "bare Lua source never embeds its bearer in the request URL" \
+  '! grep -aFq "test-secret" "$DL/state.json"'
 
 # Before any source succeeds, the shared fast-path deadline must never turn a
 # slow but healthy connection into a total failure.

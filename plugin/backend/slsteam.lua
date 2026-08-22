@@ -235,6 +235,22 @@ local function scan_map_block(lines, header_idx)
   return entries, last_entry_idx, indent
 end
 
+-- Read the effective fake AppID without mutating the config. This is the
+-- source of truth for the persistent Spacewar applied indicator.
+function slsteam.get_fake_appid(appid)
+  appid = tonumber(appid)
+  if not appid then return nil end
+  local path = config_path()
+  if not path then return nil end
+  local lines = read_lines(path)
+  if not lines then return nil end
+  local header_idx = fakeappids_header(lines)
+  if not header_idx or fakeappids_is_inline(lines, header_idx) then return nil end
+  local entries = scan_map_block(lines, header_idx)
+  local existing = entries[appid]
+  return existing and tonumber(existing.value) or nil
+end
+
 -- Map appid -> fake (default 480 / Spacewar). Returns true,"added" |
 -- true,"updated" | true,"already_present" | false,error.
 function slsteam.set_fake_appid(appid, fake)

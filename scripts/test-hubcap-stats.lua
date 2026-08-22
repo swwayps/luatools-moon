@@ -51,10 +51,17 @@ preload("api_manifest", {
 preload("downloads", {})
 preload("fixes", {})
 preload("ryuu_auth", {})
+preload("lua_tools_auth", {})
+preload("lua_tools_fixes", {})
+preload("lua_tools_fix_state", {})
+preload("lua_tools_fix_index", {})
+preload("lua_tools_recommended_add", {})
+preload("lua_tools_auto_fix", { tick = function() return { success = true } end })
 preload("settings.manager", { get_hubcap_api_key = function() return "" end, init_settings = function() end })
 preload("auto_update", {})
 
-local ok_load = pcall(dofile, "dist/luatools/backend/main.lua")
+local ok_load, load_error = pcall(dofile, "dist/luatools/backend/main.lua")
+if not ok_load then io.stderr:write("dist main.lua load failed: " .. tostring(load_error) .. "\n") end
 local fails = 0
 local function check(cond, msg) if cond then print("ok   " .. msg) else print("FAIL " .. msg); fails = fails + 1 end end
 

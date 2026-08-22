@@ -5,10 +5,10 @@
 -- an EA/Denuvo unlocker, ...) that must be run INSTEAD of the game's default
 -- exe. On Linux/Proton the proven way to point Steam's Play button at a
 -- different exe (without knowing the game's default exe name) is a launch
--- option that wraps %command% with a bash exec that swaps the last argument
+-- option that expands %command% into a bash array and swaps its last element
 -- (the exe Proton runs) for the launcher:
 --
---   bash -c 'exec "${@:1:$#-1}" "<launcher>"' -- %command%
+--   bash -c "cmd=(%command%)"'; cmd[-1]="$PWD/Launcher.exe"; "${cmd[@]}"'
 --
 -- launcherfix is PURE (no Millennium deps) so it can be unit-tested with a
 -- stock lua interpreter. It:
@@ -33,10 +33,13 @@ end
 
 local lf = dofile("plugin/backend/launcherfix.lua")
 
--- The redirect simply points Steam at the launcher exe (in quotes) followed by
--- %command%. Steam runs the leading exe through the game's Proton; the launcher
--- then starts the game itself. Proven manually: '"<path>" %command%'.
-local function redir(p) return string.format([["%s" %%command%%]], p) end
+-- Steam expands %command% into Proton's argv. The bash snippet captures that
+-- argv as an array, replaces only its final element (the Windows executable),
+-- and launches the resulting command unchanged. $PWD is Steam's game install
+-- directory, so the launcher recorded by the fix remains game-relative.
+local function redir(p)
+  return string.format([[bash -c "cmd=(%%command%%)"'; cmd[-1]="$PWD/%s"; "${cmd[@]}"']], p)
+end
 
 -- ---------------------------------------------------------------------------
 -- is_launcher: launcher.exe / launcher_*.exe / *_launcher.exe (case-insens.)
@@ -71,24 +74,25 @@ do
 end
 
 -- ---------------------------------------------------------------------------
--- build_redirect: the launch-option fragment '"<path>" %command%'.
+-- build_redirect: the Proton argv-preserving bash wrapper.
 -- ---------------------------------------------------------------------------
 do
   check("C1 basic redirect",
-        lf.build_redirect("/games/FIFA 23/Launcher.exe")
-          == redir("/games/FIFA 23/Launcher.exe"))
-  check("C2 nil/empty -> nil",
+        lf.build_redirect("Launcher.exe") == redir("Launcher.exe"))
+  check("C2 nested launcher with spaces stays relative to game cwd",
+        lf.build_redirect("tools/EA Launcher.exe") == redir("tools/EA Launcher.exe"))
+  check("C3 nil/empty -> nil",
         lf.build_redirect(nil) == nil and lf.build_redirect("") == nil)
-  -- a single quote in the path is fine inside the double quotes (no escaping).
-  check("C3 single quote passes through",
-        lf.build_redirect("/g/it's/L.exe") == [["/g/it's/L.exe" %command%]])
+  check("C4 paths escape shell-sensitive characters",
+        lf.build_redirect([[it's/$pecial/"Launcher".exe]])
+          == [[bash -c "cmd=(%command%)"'; cmd[-1]="$PWD/it'\''s/\$pecial/\"Launcher\".exe"; "${cmd[@]}"']])
 end
 
 -- ---------------------------------------------------------------------------
 -- merge_launch_options: compose redirect into current options.
 -- ---------------------------------------------------------------------------
-local L1 = "/games/FIFA 23/Launcher.exe"
-local L2 = "/games/FIFA 23/Other_launcher.exe"
+local L1 = "Launcher.exe"
+local L2 = "bin/Other launcher.exe"
 do
   check("D1 empty -> redirect alone", lf.merge_launch_options("", L1) == redir(L1))
   check("D2 bare %command% -> redirect alone",
@@ -122,6 +126,9 @@ do
   check("E4 no redirect -> unchanged",
         lf.remove_redirect("mangohud %command%") == "mangohud %command%")
   check("E5 empty -> empty", lf.remove_redirect("") == "")
+  check("E6 legacy quoted redirect is still removed",
+        lf.remove_redirect('WINEDLLOVERRIDES="x=n" "/games/FIFA 23/Launcher.exe" %command%')
+          == 'WINEDLLOVERRIDES="x=n" %command%')
 end
 
 -- ---------------------------------------------------------------------------
@@ -135,21 +142,22 @@ do
       return nil
     end
   end
-  check("F1 resolves abs path from manifest",
-        lf.launcher_for_install_dir("/games/FIFA 23", reader_with("Launcher.exe\n"))
-          == "/games/FIFA 23/Launcher.exe")
-  check("F2 trailing slash on install path tolerated",
+  local f1_abs, f1_rel = lf.launcher_for_install_dir(
+      "/games/FIFA 23", reader_with("Launcher.exe\n"))
+  check("F1 resolves abs path from manifest", f1_abs == "/games/FIFA 23/Launcher.exe")
+  check("F2 also returns the game-relative launcher", f1_rel == "Launcher.exe")
+  check("F3 trailing slash on install path tolerated",
         lf.launcher_for_install_dir("/games/FIFA 23/", reader_with("Launcher.exe\n"))
           == "/games/FIFA 23/Launcher.exe")
-  check("F3 picks best of several",
+  check("F4 picks best of several",
         lf.launcher_for_install_dir("/games/FIFA 23",
             reader_with("tools/a_launcher.exe\nLauncher.exe\n"))
           == "/games/FIFA 23/Launcher.exe")
-  check("F4 no manifest -> nil",
+  check("F5 no manifest -> nil",
         lf.launcher_for_install_dir("/games/FIFA 23", function(_) return nil end) == nil)
-  check("F5 empty install path -> nil",
+  check("F6 empty install path -> nil",
         lf.launcher_for_install_dir("", reader_with("Launcher.exe\n")) == nil)
-  check("F6 manifest with no launcher entry -> nil",
+  check("F7 manifest with no launcher entry -> nil",
         lf.launcher_for_install_dir("/games/FIFA 23", reader_with("# nothing\n")) == nil)
 end
 
