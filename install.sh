@@ -2662,14 +2662,14 @@ do_autolaunch() {
 # channel, records the first invalid argument in OPT_BAD_ARG and returns 1.
 # Resets its output vars each call so it's safe to invoke repeatedly.
 parse_args() {
-	OPT_NOPLUGIN=0
-	OPT_NOLAUNCH=0
-	OPT_KEEP_MILLENNIUM=0
-	OPT_HELP=0
+	OPT_NOPLUGIN=${LUATOOLS_MOON_NOPLUGIN:-0}
+	OPT_NOLAUNCH=${LUATOOLS_MOON_NOLAUNCH:-0}
+	OPT_KEEP_MILLENNIUM=${LUATOOLS_MOON_KEEP_MILLENNIUM:-0}
+	OPT_HELP=${LUATOOLS_MOON_HELP:-0}
+	OPT_SLS_CHANNEL="${LUATOOLS_MOON_SLS_CHANNEL:-stable}"
+	OPT_PLUGIN_CHANNEL="${LUATOOLS_MOON_PLUGIN_CHANNEL:-stable}"
+	OPT_LUMEN_CHANNEL="${LUATOOLS_MOON_LUMEN_CHANNEL:-stable}"
 	OPT_BAD_ARG=""
-	OPT_SLS_CHANNEL="stable"
-	OPT_PLUGIN_CHANNEL="stable"
-	OPT_LUMEN_CHANNEL="stable"
 	while [ "$#" -gt 0 ]; do
 		case "$1" in
 			--noplugin) OPT_NOPLUGIN=1 ;;
