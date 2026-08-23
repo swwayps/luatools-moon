@@ -1571,28 +1571,33 @@ uninstall_millennium() {
 # ============================================================================
 # Step: Game Mode (gamescope session) launcher hook
 # ============================================================================
-# Remove the sessions.d/steam override the installer drops in Game Mode, but
-# ONLY when it is ours (sentinel-guarded) so we never delete a user's own
-# session config. Distro-agnostic: checks both known config base names. A
-# complete no-op on hosts that never had the hook.
+# Remove the sessions.d/<client> overrides the installer drops in Game Mode, but
+# ONLY those that are ours (sentinel-guarded) so we never delete a user's own
+# session config. Distro-agnostic: checks both known config base names, and
+# sweeps EVERY client file in the dir rather than just "steam" — the installer
+# writes one per Steam-ish gamescope client (Bazzite 44 boots "ogui-steam", not
+# "steam"). A complete no-op on hosts that never had the hook.
 remove_gamemode_hook() {
-	local base hook removed=0
+	local base dir hook bak removed=0
 	for base in gamescope-session-plus gamescope-session; do
-		hook="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d/steam"
-		if [ -f "$hook" ] && grep -qF "managed-by: slsteammoon" "$hook" 2>/dev/null; then
+		dir="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d"
+		for hook in "$dir"/*; do
+			[ -f "$hook" ] || continue
+			case "$hook" in *.bak.*) continue ;; esac
+			grep -qF "managed-by: slsteammoon" "$hook" 2>/dev/null || continue
+
 			log_step "$(L "Removing Game Mode launcher hook: $hook" \
 			             "Removendo hook do Game Mode: $hook")"
 			rm -f "$hook" 2>/dev/null || true
 			removed=1
 			# Restore a foreign backup we may have stashed on install.
-			local bak
 			bak="$(ls -1t "$hook".bak.* 2>/dev/null | head -n1)"
 			if [ -n "$bak" ] && [ -f "$bak" ]; then
 				log_step "$(L "Restoring previous $hook from $bak" \
 				             "Restaurando $hook a partir de $bak")"
 				mv -- "$bak" "$hook" 2>/dev/null || true
 			fi
-		fi
+		done
 	done
 	[ "$removed" = 1 ] && log_success "$(L "Game Mode hook removed" "Hook do Game Mode removido")"
 

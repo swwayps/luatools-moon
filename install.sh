@@ -400,6 +400,54 @@ gamescope_session_base() {
 	printf ''
 }
 
+# Echo the gamescope client-config names ($1 = config base) that lead to Steam,
+# newest-discovered last, "steam" always first.
+#
+# WHY this is not just "steam": the session is instantiated PER CLIENT
+# (gamescope-session-plus@<client>.service) and sources ONLY sessions.d/<client>
+# — the system copy, then /etc, then ours. Bazzite 44 moved its Game Mode
+# autologin from the "steam" client to "ogui-steam" (OpenGamepadUI quick-access
+# on top of Steam). "ogui-steam" sources the SYSTEM "steam" config but never our
+# user override for it, so a hook written only for "steam" is dead weight and
+# Game Mode comes up silently un-injected. Covering every installed Steam-ish
+# client keeps us correct whichever one the image (or the user) boots, now and
+# after the next rename.
+gamescope_session_clients() {
+	local base="$1" root f name
+	{
+		printf 'steam\n'
+		for root in $GAMESCOPE_SHARE_DIRS; do
+			for f in "$root/$base/sessions.d/"*; do
+				[ -f "$f" ] || continue
+				name="${f##*/}"
+				# Skip package-manager and our own leftovers.
+				case "$name" in
+					*.bak.*|*.rpmnew|*.rpmsave|*.dpkg-*|*~) continue ;;
+				esac
+				# Only clients that actually launch Steam.
+				grep -qi steam "$f" 2>/dev/null || continue
+				printf '%s\n' "$name"
+			done
+		done
+	} | awk '!seen[$0]++'
+}
+
+# True when a Game Mode hook of ours is already installed (either mechanism).
+# Used to treat a re-run as "already opted in" so the hook set can be refreshed
+# after a distro upgrade without re-asking an invasive question.
+gamemode_hook_present() {
+	local cfg="${XDG_CONFIG_HOME:-$HOME/.config}" base f
+	for base in gamescope-session-plus gamescope-session; do
+		for f in "$cfg/$base/sessions.d/"*; do
+			[ -f "$f" ] || continue
+			grep -qF "$GAMEMODE_HOOK_SENTINEL" "$f" 2>/dev/null && return 0
+		done
+	done
+	f="$cfg/systemd/user/steam-launcher.service.d/slsteammoon.conf"
+	[ -f "$f" ] && grep -qF "$GAMEMODE_HOOK_SENTINEL" "$f" 2>/dev/null && return 0
+	return 1
+}
+
 # True when this host can launch Steam in a gamescope Game Mode session.
 has_gamescope_session() {
 	[ -n "$(gamescope_session_base)" ] && return 0
@@ -1989,20 +2037,56 @@ install_plugin() {
 # touches anything when there is no gamescope session.
 GAMEMODE_HOOK_SENTINEL="# managed-by: slsteammoon (game-mode launcher hook)"
 
-# Echo the body of the sessions.d/steam override. Kept as its own function so
-# the flag-preservation logic can be unit-tested (scripts/test-gamemode-hook.sh)
+# Echo the body of the sessions.d/<client> override. Kept as its own function so
+# the command-rewrite logic can be unit-tested (scripts/test-gamemode-hook.sh)
 # without driving the full installer. $HOME / $CLIENTCMD are intentionally left
 # UNEXPANDED here so they resolve when the gamescope session sources the file
 # (CLIENTCMD is set by the system sessions.d/steam, sourced before this user
 # override).
+#
+# The rewrite is TOKEN-based, not "first word + rest": a session may put its own
+# wrapper in FRONT of Steam. Bazzite's "ogui-steam" client, for example, ends up
+# with CLIENTCMD="opengamepadui --overlay-mode -- steam -gamepadui ..." on
+# handheld hardware. Splitting on the first space there would hand Steam's flags
+# to OpenGamepadUI and lose Steam entirely. So we swap ONLY the first bare
+# `steam` token and leave every other token byte-identical.
+#
+# Two safety rails, both aimed at the same failure mode — a Game Mode session
+# that can no longer start Steam is very hard to escape from (no desktop, no
+# terminal):
+#   * we do nothing unless the wrapper is actually present and executable, so an
+#     orphaned hook (payload removed, hook left behind) cannot brick Game Mode;
+#   * we do nothing when the client command contains no steam token at all, so a
+#     non-Steam gamescope client (kodi, retroarch, ...) is never hijacked.
 gamemode_hook_content() {
 	cat <<EOF
 $GAMEMODE_HOOK_SENTINEL
 # Re-point the Game Mode launcher at the slsteam-moon wrapper, preserving the
-# distro's own client flags. Sourced after the system config, so CLIENTCMD is
-# already set. Remove this file (or run the uninstaller) to revert.
-_lt_args="\${CLIENTCMD#* }"; [ "\$_lt_args" = "\${CLIENTCMD:-}" ] && _lt_args=""
-export STEAMCMD="\$HOME/.local/share/SLSsteam/path/steam\${_lt_args:+ \$_lt_args}"
+# distro's own client flags and any wrapper it placed in front of Steam. Sourced
+# after the system config, so CLIENTCMD is already set. This file is sourced
+# under 'set -a', hence the explicit unsets at the end.
+# Remove this file (or run the uninstaller) to revert.
+_lt_wrapper="\$HOME/.local/share/SLSsteam/path/steam"
+if [ -x "\$_lt_wrapper" ]; then
+	_lt_cmd=""
+	_lt_hit=0
+	set -f   # the word split below must not glob
+	for _lt_tok in \${STEAMCMD:-\${CLIENTCMD:-}}; do
+		if [ "\$_lt_hit" = 0 ] && [ "\${_lt_tok##*/}" = steam ]; then
+			_lt_tok="\$_lt_wrapper"
+			_lt_hit=1
+		fi
+		_lt_cmd="\${_lt_cmd:+\$_lt_cmd }\$_lt_tok"
+	done
+	set +f
+	if [ "\$_lt_hit" = 1 ]; then
+		export STEAMCMD="\$_lt_cmd"
+	elif [ -z "\${STEAMCMD:-}\${CLIENTCMD:-}" ]; then
+		export STEAMCMD="\$_lt_wrapper"
+	fi
+	unset _lt_cmd _lt_hit _lt_tok
+fi
+unset _lt_wrapper
 EOF
 }
 
@@ -2036,7 +2120,16 @@ install_gamemode_hook() {
 
 	# Opt-in. Default NO; non-interactive (curl|bash with no tty) => NO. On a
 	# Deck this was answered up front (preask_prompts) while Steam was still up.
-	if ! resolve_yesno PREASK_GAMEMODE "$Q_GAMEMODE_EN" "$Q_GAMEMODE_PT" "n"; then
+	#
+	# Exception: when a hook of ours is ALREADY installed the user opted in on
+	# this machine before, so we refresh it instead of asking again. That matters
+	# because a distro upgrade can rename the session client out from under an
+	# existing hook (Bazzite 44 -> "ogui-steam"), and the repair has to be
+	# reachable by simply re-running the installer.
+	if gamemode_hook_present; then
+		log_step "$(L "Game Mode support already enabled here; refreshing the launcher hook." \
+		             "Suporte ao Game Mode já ativado aqui; atualizando o hook do launcher.")"
+	elif ! resolve_yesno PREASK_GAMEMODE "$Q_GAMEMODE_EN" "$Q_GAMEMODE_PT" "n"; then
 		log_step "$(L "Skipping Game Mode setup. You can re-run the installer to enable it later." \
 		             "Pulando a configuração do Game Mode. Rode o instalador de novo para ativar depois.")"
 		return 0
@@ -2057,12 +2150,14 @@ install_gamemode_hook() {
 	install_sessionsd_gamemode_hook "$base"
 }
 
-# ChimeraOS/Bazzite: drop a user sessions.d/steam override that re-points the
-# Game Mode launcher (CLIENTCMD/STEAMCMD) at the slsteam-moon wrapper.
+# ChimeraOS/Bazzite: drop a user sessions.d/<client> override that re-points the
+# Game Mode launcher (CLIENTCMD/STEAMCMD) at the slsteam-moon wrapper. Written
+# for EVERY installed Steam-ish client (see gamescope_session_clients) because
+# only the client the session was instantiated with gets sourced.
 install_sessionsd_gamemode_hook() {
 	local base="$1"
 	local dir="${XDG_CONFIG_HOME:-$HOME/.config}/$base/sessions.d"
-	local hook="$dir/steam"
+	local client hook bak wrote=0
 
 	mkdir -p "$dir" || {
 		log_warn "$(L "Could not create $dir; skipping Game Mode setup." \
@@ -2070,18 +2165,29 @@ install_sessionsd_gamemode_hook() {
 		return 0
 	}
 
-	# Preserve a pre-existing FOREIGN file (not ours) before overwriting.
-	if [ -f "$hook" ] && ! grep -qF "$GAMEMODE_HOOK_SENTINEL" "$hook" 2>/dev/null; then
-		local bak="$hook.bak.$(date +%s)"
-		log_step "$(L "Backing up existing $hook -> $bak" \
-		             "Fazendo backup de $hook -> $bak")"
-		mv -- "$hook" "$bak" 2>/dev/null || true
+	for client in $(gamescope_session_clients "$base"); do
+		hook="$dir/$client"
+
+		# Preserve a pre-existing FOREIGN file (not ours) before overwriting.
+		if [ -f "$hook" ] && ! grep -qF "$GAMEMODE_HOOK_SENTINEL" "$hook" 2>/dev/null; then
+			bak="$hook.bak.$(date +%s)"
+			log_step "$(L "Backing up existing $hook -> $bak" \
+			             "Fazendo backup de $hook -> $bak")"
+			mv -- "$hook" "$bak" 2>/dev/null || true
+		fi
+
+		if gamemode_hook_content > "$hook" 2>/dev/null; then
+			wrote=1
+			log_step "$(L "Game Mode hook: $hook" "Hook do Game Mode: $hook")"
+		else
+			log_warn "$(L "Could not write $hook" "Não foi possível escrever $hook")"
+		fi
+	done
+
+	if [ "$wrote" = 1 ]; then
+		log_success "$(L "Game Mode enabled (session config: $dir)" \
+		             "Game Mode ativado (config da sessão: $dir)")"
 	fi
-
-	gamemode_hook_content > "$hook"
-
-	log_success "$(L "Game Mode enabled (hook: $hook)" \
-	             "Game Mode ativado (hook: $hook)")"
 }
 
 # SteamOS: drop a systemd user drop-in for steam-launcher.service that prepends
