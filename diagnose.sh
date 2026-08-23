@@ -138,6 +138,8 @@ DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-94371840}" # 90 MiB safety ceiling; catbox/ugu
 DIAG_GUARDIAN_CAP="${DIAG_GUARDIAN_CAP:-262144}"
 # How many abnormal-client-exit lines to distil out of the Steam console logs.
 DIAG_CRASH_LINES="${DIAG_CRASH_LINES:-60}"
+# Cap for the coredump-directory filename fallback (newest first).
+DIAG_CORE_FILES_MAX="${DIAG_CORE_FILES_MAX:-40}"
 
 # Crash-dump bounds: stage at most the newest DIAG_DUMP_MAX minidumps, each at
 # most DIAG_DUMP_MAX_BYTES (12 MiB), so a bundle can't blow past the safety
@@ -626,11 +628,21 @@ _collect_client_coredumps() { # $1 stage-dir
 	fi
 
 	# Filename-only fallback for images without systemd-coredump journalling.
-	# Names encode exe, uid, pid and timestamp — no body is read.
+	# Names encode exe, uid, pid and timestamp — no body is read. Skipped when
+	# coredumpctl already answered, since it lists the same cores with more
+	# detail (and repeating them once per file made this the largest text file in
+	# the bundle for no added signal).
+	#
+	# systemd names cores core.<comm>.<uid>.<boot-id>.<pid>.<usec>; the boot id is
+	# masked because it correlates bundles to one machine session, and the guard
+	# report deliberately withholds the same value. Bounded so a never-vacuumed
+	# coredump dir cannot dominate the bundle.
 	dumpdir="${DIAG_COREDUMP_DIR:-/var/lib/systemd/coredump}"
-	if [ -d "$dumpdir" ] && [ -r "$dumpdir" ]; then
-		find "$dumpdir" -maxdepth 1 -name 'core.steam*' -printf 'coredump file: %f (%s bytes)\n' \
-			2>/dev/null | sort >> "$raw" || true
+	if [ "$found" -eq 0 ] && [ -d "$dumpdir" ] && [ -r "$dumpdir" ]; then
+		find "$dumpdir" -maxdepth 1 -name 'core.steam*' -printf '%T@ %f %s\n' 2>/dev/null \
+			| sort -rn | head -n "$DIAG_CORE_FILES_MAX" \
+			| sed -E 's/^[0-9.]+ (\S+) ([0-9]+)$/coredump file: \1 (\2 bytes)/; s/\.[0-9a-f]{32}\./.BOOTID./' \
+			>> "$raw" || true
 	fi
 
 	[ -s "$raw" ] && scrub < "$raw" > "$stage/steam-coredumps.txt"
