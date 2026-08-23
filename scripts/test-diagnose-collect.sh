@@ -109,6 +109,58 @@ ln -sfn steam.orig "$SHIM_MIRROR/steam"
 export DIAG_LAUNCHER_DIRS="$FAKE/system/bin:$FAKE/system/games"
 export DIAG_LAUNCHER_BACKUP_ROOT="$FAKE/.local/share/SLSsteam/system-launcher-backup"
 export SLSM_COVERAGE_POLICY=launcher
+# The wrapper itself, plus Steam's own bootstrap script: together they let the
+# report state which launcher each entry point would actually exec.
+mkdir -p "$FAKE/.local/share/SLSsteam/path"
+printf '#!/bin/sh\n# slsteam-moon wrapper\n' > "$FAKE/.local/share/SLSsteam/path/steam"
+printf '#!/bin/bash\n# steam.sh\n' > "$FAKE/.local/share/Steam/steam.sh"
+chmod 0755 "$FAKE/.local/share/SLSsteam/path/steam" "$FAKE/.local/share/Steam/steam.sh"
+export DIAG_WRAPPER="$FAKE/.local/share/SLSsteam/path/steam"
+
+# crash-loop guard state: latched safe mode, a stale session, and a guard log
+# carrying PII that must be scrubbed. guardian.log is oversized so the cap is
+# exercised.
+GUARD="$FAKE/.local/state/slsteam-moon"
+mkdir -p "$GUARD"
+printf 'safe mode active -> launching Steam without injection for /home/diaguser\n' \
+	> "$GUARD/guard.log"
+head -c 400000 /dev/zero | tr '\0' 'g' > "$GUARD/guardian.log"
+: > "$GUARD/safe_mode"
+: > "$GUARD/safe_mode_fingerprint"
+printf '3' > "$GUARD/boot_fail_count"
+printf 'BOOT-ID-RECORDED' > "$GUARD/session_id"
+printf 'BOOT-ID-CURRENT' > "$FAKE/boot_id"
+printf '4096:1750000000' > "$GUARD/last_client"
+printf '4096:1740000000' > "$GUARD/good_client"
+printf '1' > "$GUARD/last_launch_display"
+: > "$GUARD/last_launch"
+export DIAG_GUARD_DIR="$GUARD"
+export DIAG_BOOT_ID_FILE="$FAKE/boot_id"
+export DIAG_GUARDIAN_CAP=65536
+
+# Steam-client core dumps: a stub coredumpctl (so the check does not depend on
+# the host having systemd-coredump) plus a filename-only dump directory. Bodies
+# must never be archived.
+mkdir -p "$FAKE/bin" "$FAKE/coredump"
+cat > "$FAKE/bin/coredumpctl" <<'STUB'
+#!/bin/sh
+printf 'TIME PID UID GID SIG COREFILE EXE\n'
+printf 'Sun 2026-08-23 13:59:22 -03 217272 1000 1000 SIGABRT present /home/diaguser/.local/share/Steam/ubuntu12_32/steam\n'
+printf 'Sun 2026-08-23 11:00:00 -03 4242 1000 1000 SIGSEGV present /usr/bin/some-other-app\n'
+STUB
+chmod 0755 "$FAKE/bin/coredumpctl"
+printf 'CORE_BODY_CANARY_DO_NOT_ARCHIVE' > "$FAKE/coredump/core.steam.1000.abc.217272.zst"
+export DIAG_COREDUMPCTL="$FAKE/bin/coredumpctl"
+export DIAG_COREDUMP_DIR="$FAKE/coredump"
+
+# Abnormal client exits: the steam.sh job-status line is localized (pt-BR here),
+# so the collector must match the literal command text instead of the signal
+# word, and must not pick up steam.sh's own debugger-echo line.
+{
+	printf '[2026-08-23 13:59:22] steam.sh[216862]: requirements are satisfied\n'
+	printf '/home/diaguser/.local/share/Steam/steam.sh, linha 966: 217272 Abortado                   (imagem do núcleo gravada) "$STEAMROOT/$STEAMEXEPATH" "$@"\n'
+	printf 'echo $STEAM_DEBUGGER -x /tmp/args --args "$STEAMROOT/$STEAMEXEPATH" "$@"\n'
+} >> "$FAKE/.local/share/Steam/logs/console-linux.txt"
 # secrets that must NEVER be collected
 printf 'ya29.SUPER_SECRET_OAUTH\n' > "$FAKE/.config/CloudRedirect/tokens_gdrive.json"
 printf '{"token":"LUMEN_RPC_SECRET"}\n' > "$FAKE/.local/share/Lumen/session.json"
@@ -152,6 +204,11 @@ echo "$entries" | grep -q 'steam-logs/content_log\.txt'; check "contains steam c
 echo "$entries" | grep -q 'cloudredirect-cr_debug\.log'; check "contains cloudredirect log" $?
 echo "$entries" | grep -q 'steam-desktops\.txt'; check "contains steam-desktops.txt" $?
 echo "$entries" | grep -q 'launch-coverage\.txt'; check "contains launch-coverage.txt" $?
+echo "$entries" | grep -q 'slsteam-guard\.txt'; check "contains slsteam-guard.txt" $?
+echo "$entries" | grep -q 'slsteam-guard\.log'; check "contains slsteam-guard.log" $?
+echo "$entries" | grep -q 'slsteam-desktop-guardian\.log'; check "contains desktop guardian log" $?
+echo "$entries" | grep -q 'steam-coredumps\.txt'; check "contains steam-coredumps.txt" $?
+echo "$entries" | grep -q 'steam-client-crashes\.txt'; check "contains steam-client-crashes.txt" $?
 echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250706_120000_1000\.dmp'; check "contains newest crash dump" $?
 echo "$entries" | grep -q 'steam-dumps/dumps/crash_20250705_120000_1000\.dmp'; check "contains 4th-newest dump (slot 4 of 4)" $?
 if echo "$entries" | grep -q 'steam-dumps/dumps/crash_2025070[1-4]_120000_1000\.dmp'; then check "dump cap: 5th+ newest excluded" 1
@@ -188,6 +245,78 @@ in_coverage "coverage: shim exec alias state" 'shim exec: '
 in_coverage "coverage: shim exec alias is ready" 'status=ready'
 in_coverage "coverage: mirrored backup paths" 'backup: mirrored '
 in_coverage "coverage: legacy backup paths" 'backup: legacy '
+# Which launcher each entry point actually reaches, and whether they disagree.
+# In this fixture the wrapper's direct resolution skips the shim and lands on the
+# vanilla package launcher, while the shim hands over its captured original — so
+# the two targets differ and the divergence must be reported as such.
+in_coverage "coverage: wrapper present" 'wrapper: '
+in_coverage "coverage: direct launch target" 'launch target (desktop entry -> wrapper): '
+in_coverage "coverage: direct target skips the shim" 'via=system-launcher'
+in_coverage "coverage: shim launch target" 'via=shim-backup'
+in_coverage "coverage: divergence reported" 'launch target divergence: yes'
+
+# The reported failure shape: the shim is the ONLY system launcher (Arch/CachyOS
+# has no /usr/games/steam), so a wrapper entered directly finds nothing but its
+# own shim and falls through to Steam's steam.sh. Run with a sanitized PATH so a
+# stray `steam` on the host cannot change the outcome.
+SANEBIN="$FAKE/sanebin"; mkdir -p "$SANEBIN"
+for u in readlink head grep; do
+	p="$(command -v "$u" 2>/dev/null)" && ln -sf "$p" "$SANEBIN/$u"
+done
+shim_only="$(PATH="$SANEBIN" DIAG_LAUNCHER_DIRS="$FAKE/system/bin" \
+	_diag_wrapper_direct_target "$DIAG_WRAPPER")"
+check "shim-only host falls through to steam.sh" \
+	"$([ "$(printf '%s' "$shim_only" | cut -f2)" = steam-sh-fallback ] && echo 0 || echo 1)"
+check "shim-only fallback names steam.sh" \
+	"$([ "$(printf '%s' "$shim_only" | cut -f1)" = "$FAKE/.local/share/Steam/steam.sh" ] && echo 0 || echo 1)"
+
+# Regression: both fields must be non-empty. A leading tab is IFS whitespace, so
+# `read` would drop the empty path field and shift via into it, mislabelling an
+# unavailable target as a real launcher path.
+no_shim="$(DIAG_LAUNCHER_DIRS="$FAKE/system/games" _diag_wrapper_shim_target "$DIAG_LAUNCHER_BACKUP_ROOT")"
+check "no-shim target keeps both fields" \
+	"$([ "$(printf '%s' "$no_shim" | cut -f1)" = none ] \
+	   && [ "$(printf '%s' "$no_shim" | cut -f2)" = unavailable ] && echo 0 || echo 1)"
+IFS=$'\t' read -r nsp nsv <<<"$no_shim"
+check "no-shim target survives tab read" \
+	"$([ "$nsp" = none ] && [ "$nsv" = unavailable ] && echo 0 || echo 1)"
+
+# ── crash-loop guard state ──────────────────────────────────────────────────
+guard="$(cat "$EXTRACT/slsteam-guard.txt" 2>/dev/null)"
+in_guard() { if grep -qF "$2" <<<"$guard"; then check "$1" 0; else check "$1" 1; fi; }
+in_guard "guard: safe mode latched"     'safe_mode: latched'
+in_guard "guard: fingerprint present"   'safe_mode_fingerprint: present'
+in_guard "guard: fail count"            'boot_fail_count: 3'
+in_guard "guard: stale session"         'guard_session: stale'
+in_guard "guard: last client id"        'last_client: 4096:1750000000'
+in_guard "guard: good client id"        'good_client: 4096:1740000000'
+in_guard "guard: display flag"          'last_launch_display: 1'
+in_guard "guard: last launch age"       'seconds ago'
+# The boot id is a per-boot machine identifier; only the current/stale verdict
+# may leave the machine.
+if grep -qF 'BOOT-ID' <<<"$guard"; then check "guard: boot id not archived" 1
+else check "guard: boot id not archived" 0; fi
+gd_sz="$(wc -c < "$EXTRACT/slsteam-desktop-guardian.log" 2>/dev/null || echo 999999999)"
+[ "$gd_sz" -le 70000 ]; check "guardian log tail-capped (got ${gd_sz}B)" $?
+
+# ── core dumps: inventory only ──────────────────────────────────────────────
+cores="$(cat "$EXTRACT/steam-coredumps.txt" 2>/dev/null)"
+in_cores() { if grep -qF "$2" <<<"$cores"; then check "$1" 0; else check "$1" 1; fi; }
+out_cores() { if grep -qF "$2" <<<"$cores"; then check "$1" 1; else check "$1" 0; fi; }
+in_cores  "cores: steam client entry"       'ubuntu12_32/steam'
+in_cores  "cores: pid retained for triage"  '217272'
+out_cores "cores: unrelated exe filtered"   'some-other-app'
+in_cores  "cores: dump dir filename listed" 'core.steam.1000.abc.217272.zst'
+
+# ── abnormal client exits ───────────────────────────────────────────────────
+crash="$(cat "$EXTRACT/steam-client-crashes.txt" 2>/dev/null)"
+in_crash()  { if grep -qF "$2" <<<"$crash"; then check "$1" 0; else check "$1" 1; fi; }
+out_crash() { if grep -qF "$2" <<<"$crash"; then check "$1" 1; else check "$1" 0; fi; }
+in_crash  "crashes: localized abort line kept" 'Abortado'
+in_crash  "crashes: source file header"        '===== '
+out_crash "crashes: debugger echo excluded"    'STEAM_DEBUGGER'
+grep -q 'client_abnormal_exits: [1-9]' "$EXTRACT/summary.txt" 2>/dev/null
+check "summary counts abnormal client exits" $?
 # NB: the .dmp minidumps are binary and archived AS-IS by design — they are
 # deliberately excluded from the scrub-leak sweep above (byte-shifting sed
 # edits would corrupt them; see the header note in diagnose.sh).
@@ -207,6 +336,7 @@ no_leak "no OAuth token leak"  'SUPER_SECRET_OAUTH'
 no_leak "no RPC token leak"    'LUMEN_RPC_SECRET'
 no_leak "no .desktop home leak" 'diaguser'
 no_leak "no launcher backup contents" 'TOP_SECRET_BACKUP_CANARY'
+no_leak "no coredump body contents" 'CORE_BODY_CANARY_DO_NOT_ARCHIVE'
 # dump stdout specifically: username, home and IP scrubbed, content kept
 dumpout="$(cat "$EXTRACT/steam-dumps/dumps/stdout.txt" 2>/dev/null)"
 in_dumpout()  { if grep -qF "$2" <<<"$dumpout"; then check "$1" 0; else check "$1" 1; fi; }
