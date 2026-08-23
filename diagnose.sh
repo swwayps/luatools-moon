@@ -32,6 +32,20 @@
 #  - Secrets are NEVER collected: OAuth tokens in ~/.config/CloudRedirect, the
 #    Lumen per-boot RPC token (session.json), etc. Only explicit log files are
 #    read.
+#  - Crash triage artifacts (added because a client that aborts BEFORE breakpad
+#    installs leaves no minidump at all, so steam-dumps/ is empty and the crash
+#    is otherwise only findable by hand in a multi-MB console log):
+#      * slsteam-guard.txt / slsteam-guard.log — the wrapper's crash-loop
+#        fail-safe state and log; tells whether safe mode latched and why not.
+#      * steam-client-crashes.txt — the steam.sh job-status lines for abnormal
+#        client exits, matched on the literal "$STEAMROOT/$STEAMEXEPATH" so the
+#        signal survives localization (pt-BR says "Abortado", not "Aborted").
+#      * steam-coredumps.txt — coredumpctl/coredump-dir INVENTORY for the Steam
+#        client only. Core bodies are never collected: they are whole-process
+#        memory snapshots and can be hundreds of MB.
+#      * launch-coverage.txt now also reports which launcher the wrapper would
+#        actually exec, for BOTH entry points (a .desktop calling the wrapper
+#        directly vs. the system-launcher shim), plus whether they diverge.
 #  - Logs are archived COMPLETE, except cef_log (Chromium noise) which is
 #    tail-capped so a multi-MB file can't bloat the upload.
 #  - The paste link is treated as inert: validated against a strict regex,
@@ -118,6 +132,12 @@ validate_paste_url() {
 # ----------------------------------------------------------------------------
 DIAG_CEF_CAP="${DIAG_CEF_CAP:-262144}"   # tail cap for cef_log (Chromium noise)
 DIAG_MAX_BYTES="${DIAG_MAX_BYTES:-94371840}" # 90 MiB safety ceiling; catbox/uguu handle large files, so logs stay complete
+
+# The desktop-coverage guardian appends on every launch and every re-assert, so
+# its log grows without bound (~1 MB after a few weeks). Always tail-capped.
+DIAG_GUARDIAN_CAP="${DIAG_GUARDIAN_CAP:-262144}"
+# How many abnormal-client-exit lines to distil out of the Steam console logs.
+DIAG_CRASH_LINES="${DIAG_CRASH_LINES:-60}"
 
 # Crash-dump bounds: stage at most the newest DIAG_DUMP_MAX minidumps, each at
 # most DIAG_DUMP_MAX_BYTES (12 MiB), so a bundle can't blow past the safety
@@ -266,16 +286,137 @@ _diag_launcher_dirs() {
 	done
 }
 
+# The wrapper walks its candidate launchers in a FIXED order and takes the first
+# hit, so the order decides which launcher a launch actually gets. Mirror the
+# wrapper's order here (it differs from the inventory order above, where order is
+# irrelevant). Tests drive both through the same DIAG_LAUNCHER_DIRS knob.
+_diag_wrapper_launcher_dirs() {
+	if [ -n "${DIAG_LAUNCHER_DIRS:-}" ]; then
+		_diag_launcher_dirs
+		return 0
+	fi
+	printf '/usr/games\n/usr/bin\n/usr/local/bin\n'
+}
+
+# Read the first 3 lines only — enough for the shim tag, and it keeps launcher
+# bodies (package scripts, possibly with tokens) out of the collector.
+_diag_is_shim() {
+	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -qF '# slsteam-moon system launcher shim'
+}
+
+_diag_is_wrapper() {
+	[ -f "$1" ] && head -3 "$1" 2>/dev/null | grep -qF '# slsteam-moon wrapper'
+}
+
+# Valve's launcher refuses to run as anything but `steam`, so a shim is only
+# fully operational when a `steam`-named alias for the captured original exists.
+# Derived from paths (never by reading a launcher body). Echoes "<alias>\t<status>";
+# status is ready or missing.
+_diag_shim_exec_alias() { # $1 backup-root  $2 launcher-path
+	local backup_root="$1" launcher="$2" alias candidate target
+	alias="${backup_root%/}/${launcher#/}"
+	alias="${alias%/*}/steam"
+	for candidate in "$alias" "${backup_root%/}/steam"; do
+		[ -x "$candidate" ] || continue
+		target="$(readlink -f "$candidate" 2>/dev/null || true)"
+		case "$target" in
+			"${backup_root%/}"/*.orig)
+				printf '%s\tready' "$candidate"
+				return 0
+				;;
+		esac
+	done
+	printf '%s\tmissing' "$alias"
+}
+
+# Steam's own bootstrap script, the wrapper's last-resort launcher.
+_diag_steam_sh_fallback() {
+	local c
+	for c in "$HOME/.local/share/Steam/steam.sh" \
+	         "$HOME/.steam/steam/steam.sh" \
+	         "$HOME/.steam/debian-installation/steam.sh"; do
+		[ -x "$c" ] && { printf '%s' "$c"; return 0; }
+	done
+	printf ''
+}
+
+# What the wrapper would exec when it is entered DIRECTLY (every patched
+# .desktop does that). Read-only mirror of the wrapper's own resolution: it
+# skips itself and skips our shim, so where the shim is the only system launcher
+# the chain falls through to steam.sh — a different launcher than the shim path
+# hands over. Echoes "<path>\t<via>"; via is system-launcher, path,
+# path-wrapper-loop, steam-sh-fallback or none. Fields are tab-separated and
+# never empty ('none' is the placeholder): a leading tab would be eaten by
+# `read`, silently shifting via into path.
+_diag_wrapper_direct_target() { # $1 wrapper-path
+	local wrapper="$1" self d c p ifs_save
+	self="$(readlink -f "$wrapper" 2>/dev/null || printf '%s' "$wrapper")"
+
+	while IFS= read -r d; do
+		[ -n "$d" ] || continue
+		c="${d%/}/steam"
+		[ -x "$c" ] || continue
+		[ "$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")" = "$self" ] && continue
+		_diag_is_shim "$c" && continue
+		printf '%s\tsystem-launcher' "$c"
+		return 0
+	done < <(_diag_wrapper_launcher_dirs)
+
+	ifs_save="$IFS"
+	IFS=:
+	for p in ${PATH:-}; do
+		IFS="$ifs_save"
+		[ -n "$p" ] || continue
+		c="$p/steam"
+		[ -x "$c" ] || continue
+		[ "$(readlink -f "$c" 2>/dev/null || printf '%s' "$c")" = "$self" ] && continue
+		_diag_is_shim "$c" && continue
+		# The wrapper only skips ITSELF, so a second wrapper on PATH (a stale or
+		# duplicate install) is a launcher it would really exec — reported as a
+		# distinct verdict rather than presented as a normal target.
+		if _diag_is_wrapper "$c"; then
+			printf '%s\tpath-wrapper-loop' "$c"
+		else
+			printf '%s\tpath' "$c"
+		fi
+		return 0
+	done
+	IFS="$ifs_save"
+
+	c="$(_diag_steam_sh_fallback)"
+	[ -n "$c" ] && { printf '%s\tsteam-sh-fallback' "$c"; return 0; }
+	printf 'none\tnone'
+}
+
+# What the wrapper would exec when the system-launcher SHIM invoked it: the shim
+# exports SLSM_STEAM_BIN pointing at its captured original's `steam`-named alias.
+# Echoes "<path>\t<via>"; via is shim-backup or unavailable.
+_diag_wrapper_shim_target() { # $1 backup-root
+	local backup_root="$1" d c alias status
+	while IFS= read -r d; do
+		[ -n "$d" ] || continue
+		c="${d%/}/steam"
+		_diag_is_shim "$c" || continue
+		IFS=$'\t' read -r alias status <<<"$(_diag_shim_exec_alias "$backup_root" "$c")"
+		[ "$status" = ready ] || continue
+		printf '%s\tshim-backup' "$alias"
+		return 0
+	done < <(_diag_wrapper_launcher_dirs)
+	printf 'none\tunavailable'
+}
+
 # Inventory system launchers and backup paths only. The collector never reads a
 # launcher or backup body, so package scripts and any accidental tokens in those
 # files cannot enter the diagnostic archive.
 _collect_launch_coverage() {
 	local stage="$1" dest="$stage/launch-coverage.txt" raw
 	local dir launcher status found=0 backup_root backup found_backup=0
-	local exec_alias exec_status exec_candidate exec_target
+	local exec_alias exec_status
+	local wrapper direct_path direct_via shim_path shim_via
 	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-coverage.XXXXXX" 2>/dev/null || true)"
 	[ -n "$raw" ] || return 0
 	backup_root="${DIAG_LAUNCHER_BACKUP_ROOT:-$HOME/.local/share/SLSsteam/system-launcher-backup}"
+	wrapper="${DIAG_WRAPPER:-$HOME/.local/share/SLSsteam/path/steam}"
 	{
 		printf 'effective policy: %s\n' "$(_diag_effective_policy)"
 		while IFS= read -r dir; do
@@ -290,27 +431,10 @@ _collect_launch_coverage() {
 			fi
 			printf 'system launcher: %s status=%s\n' "$launcher" "$status"
 			[ "$status" = shim ] || continue
-			# Valve's launcher refuses to run as anything but `steam`, so a shim
-			# is only fully operational when a `steam`-named alias for the
-			# captured original exists. Derived from paths (never by reading a
-			# launcher body) and reported because its absence is invisible
-			# otherwise: the launch then dies before Steam writes any log.
-			exec_alias="${backup_root%/}/${launcher#/}"
-			exec_alias="${exec_alias%/*}/steam"
-			exec_status=missing
-			for exec_candidate in "$exec_alias" "${backup_root%/}/steam"; do
-				[ -x "$exec_candidate" ] || continue
-				exec_target="$(readlink -f "$exec_candidate" 2>/dev/null || true)"
-				case "$exec_target" in
-					"${backup_root%/}"/*.orig)
-						exec_alias="$exec_candidate"
-						exec_status=ready
-						;;
-				esac
-				if [ "$exec_status" = ready ]; then
-					break
-				fi
-			done
+			# Reported because the alias's absence is invisible otherwise: the
+			# launch then dies before Steam writes any log.
+			IFS=$'\t' read -r exec_alias exec_status \
+				<<<"$(_diag_shim_exec_alias "$backup_root" "$launcher")"
 			printf 'shim exec: %s status=%s\n' "$exec_alias" "$exec_status"
 		done < <(_diag_launcher_dirs)
 		[ "$found" -eq 1 ] || printf 'system launcher: none detected\n'
@@ -326,8 +450,190 @@ _collect_launch_coverage() {
 			done < <(find "$backup_root" -type f -name '*.orig' -print0 2>/dev/null | sort -z)
 		fi
 		[ "$found_backup" -eq 1 ] || printf 'backup: none detected\n'
+
+		# Which launcher a launch actually reaches. The two entry points do not
+		# have to agree: a patched .desktop calls the wrapper directly, whereas
+		# the shim hands the wrapper its captured original in SLSM_STEAM_BIN. A
+		# divergence here means "works from the terminal, dies from the icon"
+		# class bugs, so it is stated explicitly instead of being inferred.
+		if [ -x "$wrapper" ]; then
+			printf 'wrapper: %s status=present\n' "$wrapper"
+		else
+			printf 'wrapper: %s status=missing\n' "$wrapper"
+		fi
+		IFS=$'\t' read -r direct_path direct_via <<<"$(_diag_wrapper_direct_target "$wrapper")"
+		IFS=$'\t' read -r shim_path shim_via <<<"$(_diag_wrapper_shim_target "$backup_root")"
+		printf 'launch target (desktop entry -> wrapper): %s via=%s\n' \
+			"$direct_path" "$direct_via"
+		printf 'launch target (system launcher shim -> wrapper): %s via=%s\n' \
+			"$shim_path" "$shim_via"
+		case "$direct_via" in
+			path|path-wrapper-loop)
+				printf 'launch target note: PATH-resolved with this shell PATH; a desktop-session launch can differ\n' ;;
+		esac
+		# Only comparable when BOTH entry points resolve to a real launcher.
+		if [ "$direct_path" = none ] || [ "$shim_path" = none ]; then
+			printf 'launch target divergence: unknown\n'
+		elif [ "$(readlink -f "$direct_path" 2>/dev/null || printf '%s' "$direct_path")" \
+		    = "$(readlink -f "$shim_path" 2>/dev/null || printf '%s' "$shim_path")" ]; then
+			printf 'launch target divergence: no\n'
+		else
+			printf 'launch target divergence: yes\n'
+		fi
 	} > "$raw"
 	scrub < "$raw" > "$dest"
+	rm -f "$raw"
+}
+
+# ----------------------------------------------------------------------------
+# Crash-loop fail-safe state (the wrapper's guard) + the desktop-coverage
+# guardian log. The guard decides whether injection is paused for the session;
+# when a crash class is invisible to it (e.g. an abort before breakpad installs,
+# so no minidump is ever written) the user loops forever with no notice, and this
+# is the only artifact that shows it.
+# ----------------------------------------------------------------------------
+_diag_guard_dir() {
+	if [ -n "${DIAG_GUARD_DIR:-}" ]; then
+		printf '%s\n' "$DIAG_GUARD_DIR"
+		return 0
+	fi
+	printf '%s/slsteam-moon\n' "$(_diag_state_home)"
+}
+
+_collect_guard_state() { # $1 stage-dir  $2 cap(bytes,0=full)
+	local stage="$1" cap="${2:-0}" gd raw now then_ts
+	gd="$(_diag_guard_dir)"
+	[ -d "$gd" ] || return 0
+
+	# Logs. guardian.log is append-only and unbounded, so it is always capped.
+	_stage_file "$stage" "slsteam-guard.log" "$gd/guard.log" "$cap"
+	local gcap="$DIAG_GUARDIAN_CAP"
+	[ "$cap" -gt 0 ] && [ "$cap" -lt "$gcap" ] && gcap="$cap"
+	_stage_file "$stage" "slsteam-desktop-guardian.log" "$gd/guardian.log" "$gcap"
+
+	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-guard.XXXXXX" 2>/dev/null || true)"
+	[ -n "$raw" ] || return 0
+	{
+		if [ -e "$gd/safe_mode" ]; then
+			printf 'safe_mode: latched\n'
+		else
+			printf 'safe_mode: not latched\n'
+		fi
+		printf 'safe_mode_fingerprint: %s\n' \
+			"$([ -e "$gd/safe_mode_fingerprint" ] && echo present || echo absent)"
+		printf 'boot_fail_count: %s\n' "$(cat "$gd/boot_fail_count" 2>/dev/null || echo absent)"
+
+		# The guard resets its state when the machine session changes. Report
+		# only whether the recorded session is the current one — the boot id
+		# itself is a per-boot machine identifier and is never archived.
+		local recorded current='' sid_file
+		recorded="$(cat "$gd/session_id" 2>/dev/null || true)"
+		sid_file="${DIAG_BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}"
+		current="$(cat "$sid_file" 2>/dev/null || true)"
+		if [ -z "$recorded" ]; then printf 'guard_session: absent\n'
+		elif [ -z "$current" ]; then printf 'guard_session: unknown\n'
+		elif [ "$recorded" = "$current" ]; then printf 'guard_session: current\n'
+		else printf 'guard_session: stale (state will reset on next launch)\n'; fi
+
+		# steamclient.so identity (size:mtime) of the last boot vs. the last one
+		# that started cleanly. A mismatch is how the guard decides a startup
+		# crash is a client-update compatibility break. Not person-identifying.
+		printf 'last_client: %s\n' "$(cat "$gd/last_client" 2>/dev/null || echo absent)"
+		printf 'good_client: %s\n' "$(cat "$gd/good_client" 2>/dev/null || echo absent)"
+		printf 'last_launch_display: %s\n' \
+			"$(cat "$gd/last_launch_display" 2>/dev/null || echo absent)"
+		if [ -e "$gd/last_launch" ]; then
+			now="$(date +%s 2>/dev/null || echo 0)"
+			then_ts="$(stat -c %Y "$gd/last_launch" 2>/dev/null || echo 0)"
+			if [ "$now" -gt 0 ] && [ "$then_ts" -gt 0 ]; then
+				printf 'last_launch: %s seconds ago\n' "$(( now - then_ts ))"
+			else
+				printf 'last_launch: present (age unknown)\n'
+			fi
+		else
+			printf 'last_launch: absent\n'
+		fi
+	} > "$raw"
+	scrub < "$raw" > "$stage/slsteam-guard.txt"
+	rm -f "$raw"
+}
+
+# ----------------------------------------------------------------------------
+# Abnormal Steam-client exits, distilled from Steam's own console logs.
+#
+# steam.sh reports the client's death as a shell job-status line. The signal
+# word is LOCALIZED ("Abortado (imagem do núcleo gravada)" in pt-BR), so the
+# match is anchored on the literal command text bash echoes back —
+# "$STEAMROOT/$STEAMEXEPATH" — plus steam.sh, which is locale-independent and
+# excludes steam.sh's own debugger-echo lines.
+#
+# This matters because a client that dies before installing breakpad writes NO
+# minidump: steam-dumps/ is empty and the only evidence is one line buried in a
+# multi-MB console log.
+# ----------------------------------------------------------------------------
+_collect_client_crashes() { # $1 stage-dir  $2 steam-root -> echoes match count
+	local stage="$1" sr="$2" raw f total=0 n
+	[ -n "$sr" ] && [ -d "$sr/logs" ] || { printf 0; return 0; }
+	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-crash.XXXXXX" 2>/dev/null || true)"
+	[ -n "$raw" ] || { printf 0; return 0; }
+
+	for f in "$sr/logs/console-linux.txt" "$sr/logs/console_log.txt" \
+	         "$sr/logs/bootstrap_log.txt"; do
+		[ -f "$f" ] && [ -r "$f" ] || continue
+		n="$(grep -c -F -e '"$STEAMROOT/$STEAMEXEPATH"' -- "$f" 2>/dev/null || true)"
+		case "$n" in ''|*[!0-9]*) n=0 ;; esac
+		[ "$n" -eq 0 ] && continue
+		{
+			printf '===== %s =====\n' "$f"
+			grep -F -e '"$STEAMROOT/$STEAMEXEPATH"' -- "$f" 2>/dev/null \
+				| grep -F 'steam.sh' 2>/dev/null \
+				| tail -n "$DIAG_CRASH_LINES" || true
+			printf '\n'
+		} >> "$raw"
+		total=$(( total + n ))
+	done
+
+	[ -s "$raw" ] && scrub < "$raw" > "$stage/steam-client-crashes.txt"
+	rm -f "$raw"
+	printf '%s' "$total"
+}
+
+# ----------------------------------------------------------------------------
+# Core-dump INVENTORY for the Steam client (ubuntu12_32/steam and friends).
+#
+# Bodies are never collected: a core is a whole-process memory snapshot, easily
+# hundreds of MB, and would carry arbitrary Steam process memory off the machine.
+# The inventory is what the triage needs — it proves a real fault happened and
+# gives the pid to hand to `coredumpctl info`, which the user runs locally.
+# ----------------------------------------------------------------------------
+_collect_client_coredumps() { # $1 stage-dir
+	local stage="$1" raw cdctl dumpdir found=0
+	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-core.XXXXXX" 2>/dev/null || true)"
+	[ -n "$raw" ] || return 0
+
+	cdctl="${DIAG_COREDUMPCTL:-$(command -v coredumpctl 2>/dev/null || true)}"
+	if [ -n "$cdctl" ] && [ -x "$cdctl" ]; then
+		# COLUMNS must be wide or systemd ellipsizes the EXE column and the
+		# filter below stops matching. Pager/colour off for a parseable stream.
+		if COLUMNS=1000 SYSTEMD_COLORS=0 SYSTEMD_PAGER=cat \
+			"$cdctl" list --no-pager 2>/dev/null \
+			| grep -F 'ubuntu12_' >> "$raw"; then
+			found=1
+		fi
+		[ "$found" -eq 1 ] || printf 'coredumpctl: no Steam client coredumps recorded\n' >> "$raw"
+	else
+		printf 'coredumpctl: not available\n' >> "$raw"
+	fi
+
+	# Filename-only fallback for images without systemd-coredump journalling.
+	# Names encode exe, uid, pid and timestamp — no body is read.
+	dumpdir="${DIAG_COREDUMP_DIR:-/var/lib/systemd/coredump}"
+	if [ -d "$dumpdir" ] && [ -r "$dumpdir" ]; then
+		find "$dumpdir" -maxdepth 1 -name 'core.steam*' -printf 'coredump file: %f (%s bytes)\n' \
+			2>/dev/null | sort >> "$raw" || true
+	fi
+
+	[ -s "$raw" ] && scrub < "$raw" > "$stage/steam-coredumps.txt"
 	rm -f "$raw"
 }
 
@@ -354,7 +660,12 @@ collect() {
 		printf 'components:'
 		{ [ -d "$HOME/.local/share/Lumen" ] || [ -f "$HOME/.lumen.log" ]; } && printf ' lumen'
 		{ [ -d "$HOME/.millennium" ] || [ -d "$HOME/.local/share/millennium" ]; } && printf ' millennium'
-		[ -d "$HOME/.config/CloudRedirect" ] && printf ' cloudredirect'
+		# Detect the PAYLOAD too, not just its config dir: the hook is installed
+		# under ~/.local/share and only writes ~/.config/CloudRedirect once it has
+		# been set up, so a config-only probe reports an installed hook as absent.
+		{ [ -d "$HOME/.config/CloudRedirect" ] \
+			|| [ -f "$HOME/.local/share/CloudRedirect/cloud_redirect.so" ]; } \
+			&& printf ' cloudredirect'
 		[ -f "$HOME/.SLSsteam.log" ] && printf ' slsteam'
 		printf '\n'
 		[ "$cap" -gt 0 ] && printf 'note: logs tail-capped to %d bytes to fit the upload limit\n' "$cap"
@@ -370,6 +681,8 @@ collect() {
 	# issues), bundled into one scrubbed file with per-file BEGIN/END separators.
 	_collect_desktops "$stage" "$cap"
 	_collect_launch_coverage "$stage"
+	_collect_guard_state "$stage" "$cap"
+	_collect_client_coredumps "$stage"
 	_stage_file "$stage" "cloudredirect-cr_debug.log"     "$HOME/.config/CloudRedirect/cr_debug.log"     "$cap"
 	_stage_file "$stage" "cloudredirect-cloud_redirect.log" "$HOME/.config/CloudRedirect/cloud_redirect.log" "$cap"
 
@@ -434,6 +747,14 @@ collect() {
 	done
 	# Surface dump availability in the summary so it's visible without unpacking.
 	printf 'crash_dumps: %d file(s) staged under steam-dumps/\n' "$dumps_found" >> "$stage/summary.txt"
+
+	# Abnormal client exits are counted in the summary too: a non-zero count with
+	# crash_dumps: 0 is precisely the case the minidump-based crash guard cannot
+	# see, and reading it off the summary saves a console-log dig.
+	local crashes
+	crashes="$(_collect_client_crashes "$stage" "$sr")"
+	printf 'client_abnormal_exits: %s (see steam-client-crashes.txt)\n' \
+		"${crashes:-0}" >> "$stage/summary.txt"
 
 	# Millennium line (fallback branch) — best-effort glob of its log dirs.
 	local g
