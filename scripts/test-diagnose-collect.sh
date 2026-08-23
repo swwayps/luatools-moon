@@ -306,7 +306,25 @@ out_cores() { if grep -qF "$2" <<<"$cores"; then check "$1" 1; else check "$1" 0
 in_cores  "cores: steam client entry"       'ubuntu12_32/steam'
 in_cores  "cores: pid retained for triage"  '217272'
 out_cores "cores: unrelated exe filtered"   'some-other-app'
-in_cores  "cores: dump dir filename listed" 'core.steam.1000.abc.217272.zst'
+# coredumpctl answered here, so the filename fallback must stay silent instead of
+# repeating the same cores.
+out_cores "cores: filename fallback skipped when journalled" 'coredump file:'
+
+# Without coredumpctl the filename listing takes over, and the boot-id field in
+# systemd's core.<comm>.<uid>.<boot-id>.<pid>.<usec> name must be masked — it
+# correlates bundles to one machine session, which slsteam-guard.txt withholds.
+nocore="$(mktemp -d)"
+printf 'x' > "$nocore/core.steam.1000.c5d5ed54a6214dfbbe4ace2c1bd43994.217272.1787504362000000.zst"
+DIAG_COREDUMPCTL=/nonexistent/coredumpctl DIAG_COREDUMP_DIR="$nocore" \
+	_collect_client_coredumps "$nocore" 2>/dev/null
+fb="$(cat "$nocore/steam-coredumps.txt" 2>/dev/null)"
+in_fb()  { if grep -qF "$2" <<<"$fb"; then check "$1" 0; else check "$1" 1; fi; }
+out_fb() { if grep -qF "$2" <<<"$fb"; then check "$1" 1; else check "$1" 0; fi; }
+in_fb  "cores: fallback lists the file"   'core.steam.1000.BOOTID.217272'
+in_fb  "cores: fallback reports size"     '(1 bytes)'
+out_fb "cores: boot id masked"            'c5d5ed54a6214dfbbe4ace2c1bd43994'
+in_fb  "cores: notes coredumpctl absent"  'coredumpctl: not available'
+rm -rf "$nocore"
 
 # ── abnormal client exits ───────────────────────────────────────────────────
 crash="$(cat "$EXTRACT/steam-client-crashes.txt" 2>/dev/null)"
