@@ -1443,7 +1443,11 @@ cleanup_previous_install() {
 	# CLOSED — and Lumen attaches via that port. So a pre-existing Millennium
 	# install would BLOCK Lumen. Remove the whole framework here (not just the
 	# old plugin dir handled above) so 8080 is free for Lumen.
-	remove_millennium_framework
+	# Keep it as user's request if arguement --keep-millennium is passed. 
+	if [ "${OPT_KEEP_MILLENNIUM:-0}" != 1 ]; then
+		remove_millennium_framework
+	fi
+	
 
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
 }
@@ -2610,6 +2614,9 @@ $(L "Options" "Opções"):
                   "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
   --nolaunch   $(L "Do not auto-start Steam at the end of install." \
                   "Não inicia a Steam automaticamente ao final da instalação.")
+# TODO: BR translation 
+  --keep-millennium $(L "Do not remove millennium's config/data (Old luatools plugin is still removed)." \
+                  "Do not remove millennium's config/data (Old luatools plugin is still removed).")
   --slsteam-channel stable|beta
                $(L "Select the slsteam-moon update channel (default: stable)." \
                   "Seleciona o canal de atualização do slsteam-moon (padrão: stable).")
@@ -2657,6 +2664,7 @@ do_autolaunch() {
 parse_args() {
 	OPT_NOPLUGIN=0
 	OPT_NOLAUNCH=0
+	OPT_KEEP_MILLENNIUM=0
 	OPT_HELP=0
 	OPT_BAD_ARG=""
 	OPT_SLS_CHANNEL="stable"
@@ -2666,6 +2674,7 @@ parse_args() {
 		case "$1" in
 			--noplugin) OPT_NOPLUGIN=1 ;;
 			--nolaunch) OPT_NOLAUNCH=1 ;;
+			--keep-millennium) OPT_KEEP_MILLENNIUM=1 ;;
 			--slsteam-channel|--plugin-channel|--lumen-channel)
 				local option="$1"
 				if [ "$#" -lt 2 ]; then
