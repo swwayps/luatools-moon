@@ -1841,10 +1841,10 @@ install_lumen() {
 			"steam-run not found. It ships automatically with programs.steam.enable on NixOS — make sure Steam is enabled and re-run this installer." \
 			"steam-run não encontrado. Ele vem automaticamente com programs.steam.enable no NixOS — confira se a Steam está habilitada e rode o instalador de novo.")"
 		mv -f "$dest/lumen" "$dest/lumen.bin"
-		cat >"$dest/lumen" <<-'WRAP'
-			#!/usr/bin/env bash
-			exec steam-run "$(dirname "$0")/lumen.bin" "$@"
-		WRAP
+		printf '%s\n' \
+			'#!/usr/bin/env bash' \
+			'exec steam-run "$(dirname "$0")/lumen.bin" "$@"' \
+			> "$dest/lumen"
 		chmod +x "$dest/lumen"
 		log_info "$(L "Wrapped Lumen with steam-run for NixOS" \
 		             "Lumen encapsulado com steam-run para o NixOS")"
