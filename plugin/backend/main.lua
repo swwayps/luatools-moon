@@ -424,13 +424,11 @@ function SearchSteamGames(language, query)
     if query == "" then return json_err("Search query is required") end
     if #query > 160 then query = query:sub(1, 160) end
 
-    language = tostring(language or "english")
-    if language ~= "english" and language ~= "brazilian" then
-        language = "english"
-    end
-    local endpoint = "https://store.steampowered.com/api/storesearch/?term="
-        .. url_encode(query) .. "&l=" .. language .. "&cc=BR"
-    local ok_request, response = pcall(http_client.get, endpoint, { timeout = 8 })
+    local endpoint = "https://steamcommunity.com/actions/SearchApps/"
+        .. url_encode(query)
+    local ok_request, response = pcall(http_client.get, endpoint, {
+        timeout = 8, max_bytes = 512 * 1024,
+    })
     if not ok_request or type(response) ~= "table" or response.status ~= 200
         or type(response.body) ~= "string" then
         return json_err("Steam catalog is unavailable")
@@ -441,20 +439,94 @@ function SearchSteamGames(language, query)
     end
 
     local items = {}
-    for _, item in ipairs(type(payload.items) == "table" and payload.items or {}) do
-        local id = tonumber(type(item) == "table" and item.id or nil)
-        if type(item) == "table" and item.type == "app" and id and id > 0
-            and id % 1 == 0 then
+    for _, item in ipairs(payload) do
+        local id = tonumber(type(item) == "table" and item.appid or nil)
+        if type(item) == "table" and id and id > 0 and id % 1 == 0 then
             items[#items + 1] = {
                 id = id,
                 name = trim(item.name) ~= "" and trim(item.name) or ("App " .. tostring(id)),
-                tiny_image = type(item.tiny_image) == "string" and item.tiny_image or "",
+                tiny_image = type(item.logo) == "string" and item.logo
+                    or (type(item.icon) == "string" and item.icon or ""),
                 type = "app",
             }
             if #items >= 8 then break end
         end
     end
     return json_ok_array({ success = true, items = items }, "items")
+end
+
+local function unavailable_app_details(appid)
+    return json_ok_array({
+        success = true,
+        appid = appid,
+        metadataAvailable = false,
+        dlc = {},
+    }, "dlc")
+end
+
+local function fetch_global_appinfo(endpoint)
+    for _ = 1, 2 do
+        local ok_request, response = pcall(http_client.get, endpoint, {
+            timeout = 8, max_bytes = 4 * 1024 * 1024,
+        })
+        if ok_request and type(response) == "table" and response.status == 200
+            and type(response.body) == "string" then
+            return response
+        end
+        if ok_request and type(response) == "table"
+            and tonumber(response.status) and response.status >= 400
+            and response.status < 500 then
+            break
+        end
+    end
+    return nil
+end
+
+function GetSteamAppDetails(params)
+    local appid = type(params) == "table" and params.appid or params
+    appid = tonumber(appid)
+    if not appid or appid <= 0 or appid % 1 ~= 0 then
+        return json_err("Invalid appid")
+    end
+
+    local endpoint = "https://api.steamcmd.net/v1/info/" .. tostring(appid)
+    local response = fetch_global_appinfo(endpoint)
+    if not response then return unavailable_app_details(appid) end
+    local ok_decode, payload = pcall(cjson.decode, response.body)
+    if not ok_decode or type(payload) ~= "table" then
+        return unavailable_app_details(appid)
+    end
+
+    local data = type(payload.data) == "table" and payload.data[tostring(appid)] or nil
+    local common = type(data) == "table" and data.common or nil
+    if type(common) ~= "table" then return unavailable_app_details(appid) end
+
+    if type(common.type) ~= "string" then return unavailable_app_details(appid) end
+    local app_type = trim(common.type):lower()
+    if app_type == "" then return unavailable_app_details(appid) end
+    local parent = tonumber(common.parent)
+    if not parent or parent <= 0 or parent % 1 ~= 0 or parent == appid then parent = nil end
+
+    local dlc, seen = {}, {}
+    local extended = type(data.extended) == "table" and data.extended or {}
+    for raw_id in tostring(extended.listofdlc or ""):gmatch("[^,%s]+") do
+        local id = tonumber(raw_id)
+        if id and id > 0 and id % 1 == 0 and id ~= appid and not seen[id] then
+            dlc[#dlc + 1], seen[id] = id, true
+        end
+    end
+    table.sort(dlc)
+
+    return json_ok_array({
+        success = true,
+        appid = appid,
+        name = type(common.name) == "string" and trim(common.name) ~= ""
+            and trim(common.name) or ("App " .. tostring(appid)),
+        type = app_type,
+        fullgameAppid = parent,
+        metadataAvailable = true,
+        dlc = dlc,
+    }, "dlc")
 end
 
 function GetApiList()
