@@ -136,8 +136,10 @@ function makeHarness(rpcResult) {
   };
   vm.runInNewContext(source.slice(start, end)
     + "\nthis.showModal=showLuaToolsVersionChoiceModal;"
+    + "\nthis.showUnavailable=showLuaToolsRecommendedUnavailableModal;"
     + "\nthis.chooseFlow=chooseLuaToolsAddFlow;", context);
-  return { document, nav, showModal: context.showModal, chooseFlow: context.chooseFlow };
+  return { document, nav, showModal: context.showModal,
+    showUnavailable: context.showUnavailable, chooseFlow: context.chooseFlow };
 }
 
 (async function () {
@@ -221,6 +223,30 @@ function makeHarness(rpcResult) {
     /background:\s*transparent\s*;/.test(declarations)
       && /border:\s*0\s*;/.test(declarations)
       && /padding:\s*0\s*;/.test(declarations));
+
+  const fallback = makeHarness();
+  const fallbackChoice = fallback.showUnavailable(10, null);
+  const fallbackOverlay = fallback.document.querySelector(".luatools-version-choice-overlay");
+  const fallbackLatest = fallbackOverlay.querySelector('[data-version-action="latest"]');
+  check("M14 unavailable recommended builds offer only Latest or cancel",
+    fallbackLatest && fallbackLatest.classList.contains("primary")
+      && fallbackOverlay.querySelector('[data-version-action="recommended"]') === null
+      && fallbackOverlay.querySelector("input") === null);
+  check("M15 unavailable copy explicitly disables automatic fix",
+    fallbackOverlay.querySelector("p").textContent.includes("automatic fix will not be applied"));
+  fallbackLatest.click();
+  check("M16 unavailable fallback can only continue as Latest without auto-fix",
+    (await fallbackChoice).choice === "latest" && (await fallbackChoice).autoApply === false);
+
+  const pt = JSON.parse(fs.readFileSync("plugin/backend/locales/pt-BR.json", "utf8"));
+  const approved = "Não foi possível preparar a versão recomendada devido à indisponibilidade do servidor de manifest. O jogo poderá ser adicionado usando a versão mais recente, o fix automático não será aplicado e o jogo pode não funcionar corretamente.";
+  check("M17 Portuguese fallback copy matches the approved warning",
+    Object.values(pt).some((section) => section && typeof section === "object"
+      && Object.values(section).includes(approved)));
+
+  check("M18 backend unavailability is routed back into the Latest/cancel modal",
+    source.includes('payload.errorCode === "manifest_server_unavailable"')
+      && source.includes("showLuaToolsRecommendedUnavailableModal"));
 
   process.exitCode = failures ? 1 : 0;
 })();

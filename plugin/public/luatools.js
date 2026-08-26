@@ -10051,10 +10051,11 @@
   }
 
   // LUATOOLS RECOMMENDED VERSION MODAL START
-  function showLuaToolsVersionChoiceModal(appid, recommendation, trigger) {
+  function showLuaToolsVersionChoiceModal(appid, recommendation, trigger, options) {
     return new Promise(function (resolve) {
       ensureLuaToolsStyles();
       ensureFontAwesome();
+      const unavailable = options && options.unavailable === true;
 
       const existing = document.querySelector(
         ".luatools-version-choice-overlay",
@@ -10089,16 +10090,18 @@
       icon.setAttribute("aria-hidden", "true");
       const title = document.createElement("div");
       title.id = "lt-version-choice-title";
-      title.textContent = lt("Recommended version available");
+      title.textContent = lt(unavailable
+        ? "Recommended version unavailable"
+        : "Recommended version available");
       heading.appendChild(icon);
       heading.appendChild(title);
 
       const copy = document.createElement("p");
       copy.id = "lt-version-choice-copy";
       copy.className = "luatools-version-choice-copy";
-      copy.textContent = lt(
-        "This game may need a specific version to work correctly because it contains additional protections already handled by the recommended version. How would you like to proceed?",
-      );
+      copy.textContent = lt(unavailable
+        ? "Could not prepare the recommended version because the manifest server is unavailable. The game can be added using the latest version, the automatic fix will not be applied, and the game may not work correctly."
+        : "This game may need a specific version to work correctly because it contains additional protections already handled by the recommended version. How would you like to proceed?");
 
       const checkRow = document.createElement("label");
       checkRow.className = "luatools-version-choice-check";
@@ -10120,7 +10123,7 @@
       actions.className = "luatools-version-choice-actions";
       const latest = document.createElement("button");
       latest.type = "button";
-      latest.className = "luatools-btn focusable";
+      latest.className = "luatools-btn" + (unavailable ? " primary" : "") + " focusable";
       latest.setAttribute("data-version-action", "latest");
       latest.textContent = lt("Use latest version");
       const recommended = document.createElement("button");
@@ -10134,12 +10137,12 @@
       cancel.setAttribute("data-version-action", "cancel");
       cancel.textContent = lt("Cancel");
       actions.appendChild(latest);
-      actions.appendChild(recommended);
+      if (!unavailable) actions.appendChild(recommended);
       actions.appendChild(cancel);
 
       modal.appendChild(heading);
       modal.appendChild(copy);
-      modal.appendChild(checkRow);
+      if (!unavailable) modal.appendChild(checkRow);
       modal.appendChild(actions);
       overlay.appendChild(modal);
       document.body.appendChild(overlay);
@@ -10191,7 +10194,13 @@
         window.GamepadNav.setBackHandler(cancelModal);
         window.GamepadNav.scanElements();
       }
-      setTimeout(function () { recommended.focus(); }, 0);
+      setTimeout(function () { (unavailable ? latest : recommended).focus(); }, 0);
+    });
+  }
+
+  function showLuaToolsRecommendedUnavailableModal(appid, trigger) {
+    return showLuaToolsVersionChoiceModal(appid, null, trigger, {
+      unavailable: true,
     });
   }
 
@@ -10436,6 +10445,20 @@
               ).then(function (raw) {
                 const payload = typeof raw === "string" ? JSON.parse(raw) : raw;
                 if (!(payload && payload.success === true)) {
+                  if (payload && payload.errorCode === "manifest_server_unavailable"
+                      && payload.fallbackLatest === true) {
+                    if (progressOverlay) progressOverlay.remove();
+                    runState.inProgress = false;
+                    runState.appid = null;
+                    return showLuaToolsRecommendedUnavailableModal(
+                      appid,
+                      anchor,
+                    ).then(function (fallback) {
+                      if (fallback && fallback.choice === "latest") {
+                        continueWithAdd();
+                      }
+                    });
+                  }
                   const error = new Error(
                     (payload && payload.error) ||
                       lt("The recommended version could not be added."),

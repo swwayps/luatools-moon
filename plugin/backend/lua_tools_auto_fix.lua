@@ -239,30 +239,42 @@ function auto_fix.tick(now, callbacks, deps)
         end
         if ok_install and type(install) == "table" and install.complete == true
             and install.postInstallBusy ~= true then
-          if job.seenInstallActivity == true then
-            job.stablePolls = (tonumber(job.stablePolls) or 0) + 1
+          local build_ready = true
+          if type(callbacks.recommended_build_ready) == "function" then
+            local checked, ready = pcall(
+              callbacks.recommended_build_ready, appid)
+            build_ready = checked and ready == true
+          end
+          if not build_ready then
+            job.stablePolls = 0
+            job.nextAttempt = now + 5
             changed = true
           else
-            job.stablePolls = 0
-          end
-          if job.seenInstallActivity == true and job.stablePolls >= 2 then
-            if not configured(callbacks) then
-              job.phase = "needs_login"
-            elseif type(callbacks.is_busy) == "function"
-                and callbacks.is_busy(appid) == true then
-              job.nextAttempt = now + 5
+            if job.seenInstallActivity == true then
+              job.stablePolls = (tonumber(job.stablePolls) or 0) + 1
+              changed = true
             else
-              local ok_start, result = pcall(callbacks.start_fix, appid, job.fixId)
-              if ok_start and type(result) == "table" and result.success == true then
-                job.phase = "applying"
-                job.retries = 0
-                job.nextAttempt = 0
-                job.error = nil
-                job.errorCode = nil
+              job.stablePolls = 0
+            end
+            if job.seenInstallActivity == true and job.stablePolls >= 2 then
+              if not configured(callbacks) then
+                job.phase = "needs_login"
+              elseif type(callbacks.is_busy) == "function"
+                  and callbacks.is_busy(appid) == true then
+                job.nextAttempt = now + 5
               else
-                set_failure(job, ok_start and result or {
-                  errorCode = "start_failed", error = tostring(result),
-                }, now)
+                local ok_start, result = pcall(callbacks.start_fix, appid, job.fixId)
+                if ok_start and type(result) == "table" and result.success == true then
+                  job.phase = "applying"
+                  job.retries = 0
+                  job.nextAttempt = 0
+                  job.error = nil
+                  job.errorCode = nil
+                else
+                  set_failure(job, ok_start and result or {
+                    errorCode = "start_failed", error = tostring(result),
+                  }, now)
+                end
               end
             end
           end

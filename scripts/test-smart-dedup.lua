@@ -107,6 +107,27 @@ end
 local fails = 0
 local function check(cond, msg) if cond then print("ok   " .. msg) else print("FAIL " .. msg); fails = fails + 1 end end
 
+local function u32(value)
+  return string.char(value % 256, math.floor(value / 256) % 256,
+    math.floor(value / 65536) % 256, math.floor(value / 16777216) % 256)
+end
+local function varint(value)
+  local bytes = {}
+  repeat
+    local byte = value % 128
+    value = math.floor(value / 128)
+    bytes[#bytes + 1] = string.char(byte + (value > 0 and 128 or 0))
+  until value == 0
+  return table.concat(bytes)
+end
+local function valid_manifest(depot, gid, created)
+  local metadata = string.char(8) .. varint(depot)
+    .. string.char(16) .. varint(gid)
+    .. string.char(24) .. varint(created)
+  return u32(0x71F617D0) .. u32(0)
+    .. u32(0x1F4812BE) .. u32(#metadata) .. metadata
+end
+
 -- ── dedup guard (start_add_via_luatools_smart) ──────────────────────────────
 -- (A) fresh in-flight state present -> must SKIP (no relaunch)
 os.execute("printf '%s' '{\"status\":\"downloading\"}' > " .. SF)
@@ -274,6 +295,9 @@ df = assert(io.open(draft_source .. "/" .. APPID .. ".lua", "w"))
 df:write("addappid(" .. APPID .. ")\naddappid(" .. (APPID + 1)
   .. ",1,\"" .. string.rep("d", 64) .. "\")\n")
 df:close()
+local draft_manifest = valid_manifest(APPID + 1, 9001, 1700000000)
+df = assert(io.open(draft_source .. "/" .. (APPID + 1) .. "_9001.manifest", "wb"))
+df:write(draft_manifest); df:close()
 os.execute("printf '%s' '{\"status\":\"collected\"}' > '" .. draft_root .. "/state.json'")
 
 local draft_status = downloads.get_game_draft_status(APPID, started.session)
@@ -291,6 +315,13 @@ check(draft_dlcs[400000] and draft_dlcs[400001] and draft_dlcs[4093670],
   "(F3a) draft combines all official product-info DLC appids")
 check(virtual_row and virtual_row.virtualDepot == true and virtual_row.requiresKey == false,
   "(F3b) public draft marks virtual DLC as keyless")
+local draft_snapshot = downloads.get_game_draft_snapshot(APPID, started.session)
+check(draft_snapshot and draft_snapshot.success and draft_snapshot.lua
+    and draft_snapshot.lua:find(string.rep("d", 64), 1, true) ~= nil,
+  "(F3c) private draft snapshot exposes the selected source Lua server-side")
+check(draft_snapshot and #draft_snapshot.manifests == 1
+    and draft_snapshot.manifests[1].data == draft_manifest,
+  "(F3d) private draft snapshot preserves validated manifest bytes")
 local before_commit = io.open(TMP .. "/steam/config/stplug-in/" .. APPID .. ".lua", "r")
 check(before_commit == nil, "(F4) preview publishes no game Lua")
 if before_commit then before_commit:close() end

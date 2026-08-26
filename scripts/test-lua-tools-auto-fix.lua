@@ -197,6 +197,31 @@ check("J16 removed indexed fixes stop permanently instead of looping",
   database.jobs["3321460"].phase == "failed"
     and database.jobs["3321460"].errorCode == "unavailable")
 
+database.jobs = {}
+auto_fix.queue(3321460, FIX_ID, deps)
+database.jobs["3321460"].seenInstallActivity = true
+database.jobs["3321460"].stablePolls = 1
+local guarded_starts, pinned_build_ready = 0, false
+callbacks.auth_status = function() return { configured = true } end
+callbacks.install_state = function()
+  return { complete = true, installPath = "/game", gameName = "Crimson Desert" }
+end
+callbacks.is_busy = function() return false end
+callbacks.recommended_build_ready = function() return pinned_build_ready end
+callbacks.start_fix = function()
+  guarded_starts = guarded_starts + 1
+  return { success = true }
+end
+auto_fix.tick(210, callbacks, deps)
+check("J17 a fallback/latest install cannot receive the build-specific automatic fix",
+  guarded_starts == 0 and database.jobs["3321460"].phase == "waiting_install"
+    and database.jobs["3321460"].stablePolls == 0)
+pinned_build_ready = true
+auto_fix.tick(215, callbacks, deps)
+auto_fix.tick(220, callbacks, deps)
+check("J18 the fix resumes only after every installed depot matches its exact pin",
+  guarded_starts == 1 and database.jobs["3321460"].phase == "applying")
+
 local cancel_db = { version = 1, jobs = {} }
 local cancel_deps = {
   load = function() return cancel_db end,
@@ -206,13 +231,13 @@ local cancel_deps = {
 auto_fix.queue(990080, FIX_ID, cancel_deps)
 local cancelled = type(auto_fix.cancel) == "function"
   and auto_fix.cancel(990080, cancel_deps) or { success = false }
-check("J17 launch-without-fix can cancel work before file application starts",
+check("J19 launch-without-fix can cancel work before file application starts",
   cancelled.success == true and cancel_db.jobs["990080"] == nil)
 auto_fix.queue(990080, FIX_ID, cancel_deps)
 cancel_db.jobs["990080"].phase = "applying"
 local unsafe_cancel = type(auto_fix.cancel) == "function"
   and auto_fix.cancel(990080, cancel_deps) or { success = false }
-check("J18 active file application cannot be skipped unsafely",
+check("J20 active file application cannot be skipped unsafely",
   unsafe_cancel.success == false and unsafe_cancel.errorCode == "already_applying"
     and cancel_db.jobs["990080"].phase == "applying")
 

@@ -46,6 +46,8 @@
         "Adding recommended version": "Adding recommended version",
         "Downloading the recommended manifest…": "Downloading the recommended manifest…",
         "The recommended version could not be added.": "The recommended version could not be added.",
+        "Recommended version unavailable": "Recommended version unavailable",
+        "Could not prepare the recommended version because the manifest server is unavailable. The game can be added using the latest version, the automatic fix will not be applied, and the game may not work correctly.": "Could not prepare the recommended version because the manifest server is unavailable. The game can be added using the latest version, the automatic fix will not be applied, and the game may not work correctly.",
         "Recommended version added. Restart Steam now?": "Recommended version added. Restart Steam now?",
         "Recommended version added. The fix will be applied automatically after installation. Restart Steam now?": "Recommended version added. The fix will be applied automatically after installation. Restart Steam now?",
         "Cancel": "Cancel",

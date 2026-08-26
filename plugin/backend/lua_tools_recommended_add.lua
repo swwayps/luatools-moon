@@ -67,6 +67,25 @@ function recommended_add.start(appid, fix_id, auto_apply, deps)
     return failure("steam_path_unavailable", "Steam's install path is unavailable.")
   end
 
+  if type(deps.availability) == "function" then
+    local checked, availability = pcall(
+      deps.availability, appid, response.body, root)
+    if not checked or type(availability) ~= "table" then
+      return failure("manifest_readiness_unavailable",
+        "The recommended version could not be prepared safely.", {
+          fallbackLatest = true, autoApplyQueued = false,
+        })
+    end
+    if availability.offline == true and availability.ready ~= true
+        and (tonumber(availability.missing) or 0) > 0 then
+      return failure("manifest_server_unavailable",
+        "The recommended version is unavailable because the manifest server cannot be reached.", {
+          fallbackLatest = true, autoApplyQueued = false,
+          missingManifests = tonumber(availability.missing) or 0,
+        })
+    end
+  end
+
   local publish = deps.publish
   if type(publish) ~= "function" then
     return failure("manifest_pin_unavailable",

@@ -165,6 +165,15 @@ local function on_tick(now, controls)
             end
             return state
         end,
+        recommended_build_ready = function(appid)
+            local ok_module, manifestpins = pcall(require, "manifestpins")
+            if not ok_module or type(manifestpins) ~= "table"
+                or type(manifestpins.app_at_pinned_gids) ~= "function" then
+                return false
+            end
+            return manifestpins.app_at_pinned_gids(
+                manifestpins.default_ctx(), appid) == true
+        end,
         is_busy = function(appid)
             return lua_tools_fix_state.get_pending(appid) ~= nil
         end,
@@ -336,6 +345,43 @@ function GetGameDraftStatus(params, session)
         tonumber(appid), tostring(session or ""))
     if not ok then return json_err(res) end
     return json_ok(res)
+end
+
+-- Keep source manifests inside the local backend process. The browser passes
+-- only two private session identifiers; LuaTools reads its validated draft and
+-- Lumen attaches the full snapshot to the staged import transaction.
+function EnrichGameImportFromDraft(params, import_session, draft_session)
+    local appid = params
+    if type(params) == "table" then
+        appid = params.appid
+        import_session = params.importSession or params.import_session
+        draft_session = params.draftSession or params.draft_session
+    end
+    appid = tonumber(appid)
+    if not appid or type(import_session) ~= "string"
+        or type(draft_session) ~= "string" then
+        return json_err("Invalid draft handoff")
+    end
+    local snapshot_ok, snapshot = pcall(
+        downloads.get_game_draft_snapshot, appid, draft_session)
+    if not snapshot_ok then return json_err(snapshot) end
+    if type(snapshot) ~= "table" or snapshot.success ~= true then
+        return json_err(type(snapshot) == "table" and snapshot.error
+            or "Draft is not ready")
+    end
+    local loaded, manifestpins = pcall(require, "manifestpins")
+    if not loaded or type(manifestpins) ~= "table"
+        or type(manifestpins.enrich_game_import_snapshot) ~= "function" then
+        return json_err("Lumen import handoff is unavailable")
+    end
+    local called, attached, result = pcall(
+        manifestpins.enrich_game_import_snapshot,
+        manifestpins.default_ctx(), import_session, appid, snapshot)
+    if not called then return json_err(attached) end
+    if not attached then return json_err(result) end
+    result = type(result) == "table" and result or {}
+    result.success = true
+    return json_ok(result)
 end
 
 -- Lumen/Millennium passes object values alphabetically: appid, editsJson,
@@ -923,6 +969,18 @@ function StartLuaToolsRecommendedAdd(appid, auto_apply, content_script_query, fi
     local ok, result = pcall(lua_tools_recommended_add.start,
         tonumber(payload.appid), tostring(payload.fixId or ""),
         payload.autoApply == true, {
+            availability = function(check_appid, lua_body, steam_root)
+                local ok_module, manifestpins = pcall(require, "manifestpins")
+                if not ok_module or type(manifestpins) ~= "table"
+                    or type(manifestpins.recommended_manifest_availability)
+                        ~= "function" then
+                    return nil
+                end
+                local ctx = manifestpins.default_ctx()
+                ctx.steam_root = steam_root
+                return manifestpins.recommended_manifest_availability(
+                    ctx, check_appid, lua_body, steam_root)
+            end,
             publish = function(publish_appid, lua_body, steam_root)
                 local ok_module, manifestpins = pcall(require, "manifestpins")
                 if not ok_module or type(manifestpins) ~= "table"

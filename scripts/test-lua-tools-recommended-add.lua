@@ -46,6 +46,9 @@ local function base_deps()
       return { status = 200, body = VALID_LUA }
     end,
     steam_root = function() return "/steam" end,
+    availability = function()
+      return { ready = false, offline = false, missing = 1, targets = 1 }
+    end,
     publish = function(appid, body, root)
       calls.publish = calls.publish + 1
       return appid == APPID and body == VALID_LUA and root == "/steam"
@@ -97,6 +100,20 @@ local queue_failed = recommended.start(APPID, FIX_ID, true, queue_failed_deps)
 check("A8 a queue failure reports that the manifest was already installed",
   queue_failed.success == false and queue_failed.manifestInstalled == true
     and queue_failed.errorCode == "state_write_failed")
+
+local publish_before, queue_before_offline = calls.publish, calls.queue
+local offline_missing_deps = base_deps()
+offline_missing_deps.availability = function()
+  return { ready = false, offline = true, missing = 1, targets = 1 }
+end
+local unavailable = recommended.start(APPID, FIX_ID, true, offline_missing_deps)
+check("A9 offline missing pins offer Latest before publishing recommended state",
+  unavailable.success == false
+    and unavailable.errorCode == "manifest_server_unavailable"
+    and unavailable.fallbackLatest == true
+    and calls.publish == publish_before)
+check("A10 unavailable recommended builds never queue the automatic fix",
+  unavailable.autoApplyQueued == false and calls.queue == queue_before_offline)
 
 if failures > 0 then os.exit(1) end
 print("ALL LUA.TOOLS RECOMMENDED ADD CHECKS PASSED")

@@ -43,6 +43,8 @@ package.preload.lua_tools_recommended_add = function()
         hasQueue = type(deps) == "table" and type(deps.queue) == "function",
         hasAtomicPublish = type(deps) == "table"
           and type(deps.publish) == "function",
+        hasAvailability = type(deps) == "table"
+          and type(deps.availability) == "function",
       }
       return { success = true }
     end,
@@ -60,6 +62,32 @@ for _, name in ipairs({
   "lua_tools_fix_state", "settings.manager", "auto_update",
 }) do
   package.preload[name] = function() return {} end
+end
+
+local handoff
+package.preload.downloads = function()
+  return {
+    get_game_draft_snapshot = function(appid, session)
+      return {
+        success = true, appid = appid, lua = "addappid(" .. appid .. ")\n",
+        manifests = { { name = "1_2.manifest", data = "\0binary" } },
+        draftSession = session,
+      }
+    end,
+  }
+end
+package.preload.manifestpins = function()
+  return {
+    default_ctx = function() return { private = true } end,
+    enrich_game_import_snapshot = function(ctx, import_session, appid, snapshot)
+      handoff = {
+        ctx = ctx, importSession = import_session, appid = appid,
+        draftSession = snapshot.draftSession,
+        binary = snapshot.manifests[1].data,
+      }
+      return true, { appid = appid, manifests = #snapshot.manifests }
+    end,
+  }
 end
 
 local lifecycle = dofile("plugin/backend/main.lua")
@@ -85,5 +113,16 @@ check("R5 the RPC still supplies the private queue callback",
   captured and captured.hasQueue == true)
 check("R6 the RPC supplies the atomic Lua + ManifestPins publisher",
   captured and captured.hasAtomicPublish == true)
+check("R6b the RPC preflights exact manifest availability",
+  captured and captured.hasAvailability == true)
+
+local handoff_result = EnrichGameImportFromDraft({
+  appid = 1671210, importSession = "import123", draftSession = "draft456",
+})
+check("R7 draft handoff stays inside the backend and preserves both sessions",
+  type(handoff_result) == "string" and handoff
+    and handoff.importSession == "import123" and handoff.draftSession == "draft456")
+check("R8 draft handoff preserves binary manifest bytes without browser JSON",
+  handoff and handoff.appid == 1671210 and handoff.binary == "\0binary")
 
 if failures > 0 then os.exit(1) end

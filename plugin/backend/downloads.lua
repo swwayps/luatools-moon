@@ -789,6 +789,36 @@ function downloads.get_game_draft_status(appid, session)
     return { success = true, state = _copy_table(memory) }
 end
 
+-- Return the complete validated draft to another local backend module. This is
+-- intentionally not sent through JSON/CDP: callers receive binary manifest
+-- bytes only inside the Lumen process and can attach them to a private import
+-- transaction without exposing or base64-copying them through the browser.
+function downloads.get_game_draft_snapshot(appid, session)
+    appid = _positive_appid(appid)
+    local job = appid and _draft_job_paths(appid, session) or nil
+    local memory = type(session) == "string" and DRAFT_STATE[session] or nil
+    if not job or not memory or memory.appid ~= appid or memory.status ~= "ready" then
+        return { success = false, error = "Draft is not ready" }
+    end
+    local preview, preview_error = smart_merge.preview(
+        appid, job.collection, _merge_options(appid))
+    if not preview then return { success = false, error = tostring(preview_error) } end
+    local manifests = {}
+    for _, item in ipairs(preview.manifests or {}) do
+        if type(item.content) == "string" then
+            manifests[#manifests + 1] = {
+                name = tostring(item.depot) .. "_" .. tostring(item.gid) .. ".manifest",
+                data = item.content,
+            }
+        end
+    end
+    table.sort(manifests, function(left, right) return left.name < right.name end)
+    return {
+        success = true, appid = appid, lua = preview.lua_text,
+        manifests = manifests,
+    }
+end
+
 function downloads.commit_game_draft(appid, session, edits)
     appid = _positive_appid(appid)
     local job = appid and _draft_job_paths(appid, session) or nil
