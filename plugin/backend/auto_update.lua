@@ -6,8 +6,19 @@ local logger = require("plugin_logger")
 local paths = require("paths")
 local utils = require("plugin_utils")
 local steam_utils = require("steam_utils")
+local guard = require("guard")
 
 local auto_update = {}
+
+-- Hosts that may serve a plugin update archive: GitHub's release asset CDN and
+-- the project's own redirect endpoint. Everything else is refused even if the
+-- release API response asks for it.
+auto_update.ALLOWED_UPDATE_HOSTS = {
+    ["github.com"] = true,
+    ["objects.githubusercontent.com"] = true,
+    ["release-assets.githubusercontent.com"] = true,
+    ["luatools.vercel.app"] = true,
+}
 
 function auto_update.check_for_updates_now()
     local cfg_path = paths.backend_path(config.UPDATE_CONFIG_FILE)
@@ -18,14 +29,23 @@ function auto_update.check_for_updates_now()
 
     local gh_cfg = cfg.github
     if gh_cfg then
-        local owner = gh_cfg.owner or ""
-        local repo = gh_cfg.repo or ""
+        -- owner/repo/tag come from backend/update.json on disk. Anything that can
+        -- write that file could otherwise point the self-update at its own
+        -- repository, or inject path segments into the API endpoint.
+        local owner = guard.repo_segment(gh_cfg.owner)
+        local repo = guard.repo_segment(gh_cfg.repo)
         local asset_name = gh_cfg.asset_name or "ltsteamplugin.zip"
-        local tag = gh_cfg.tag or ""
+        local tag = gh_cfg.tag and guard.tag_name(gh_cfg.tag) or nil
         local tag_prefix = gh_cfg.tag_prefix or ""
+        if not owner or not repo then
+            return { success = false, error = "Update source is misconfigured" }
+        end
+        if gh_cfg.tag and gh_cfg.tag ~= "" and not tag then
+            return { success = false, error = "Update source tag is invalid" }
+        end
 
         local endpoint = "https://api.github.com/repos/" .. owner .. "/" .. repo .. "/releases/latest"
-        if tag ~= "" then
+        if tag then
             endpoint = "https://api.github.com/repos/" .. owner .. "/" .. repo .. "/releases/tags/" .. tag
         end
 
@@ -50,7 +70,7 @@ function auto_update.check_for_updates_now()
                     break
                 end
             end
-            if zip_url == "" and tag_name ~= "" then
+            if zip_url == "" and guard.tag_name(tag_name) then
                 zip_url = "https://luatools.vercel.app/api/get-plugin/" .. tag_name
             end
         end
@@ -59,6 +79,16 @@ function auto_update.check_for_updates_now()
     if latest_version == "" or zip_url == "" then
         return { success = false, error = "Manifest missing version or zip_url" }
     end
+    -- The download URL arrives in an API response body. Constrain it to the hosts
+    -- that actually serve our releases: a compromised or redirected response must
+    -- not be able to point the self-update at an arbitrary archive.
+    local checked_zip_url = guard.https_url(zip_url,
+        { hosts = auto_update.ALLOWED_UPDATE_HOSTS })
+    if not checked_zip_url then
+        logger.warn("LuaTools: refused self-update download URL " .. tostring(zip_url))
+        return { success = false, error = "Update download source is not allowed" }
+    end
+    zip_url = checked_zip_url
 
     local current_version = utils.get_plugin_version()
 
@@ -92,7 +122,15 @@ function auto_update.check_for_updates_now()
         cmd = string.format('powershell -ExecutionPolicy Bypass -Command "& \'%s\' -Url \'%s\' -DestPath \'%s\' -ExtractDir \'%s\'"', temp_ps1, zip_url, pending_zip, paths.get_plugin_dir())
     else
         logger.log("LuaTools: self-update downloading " .. tostring(zip_url))
-        cmd = string.format('unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; { curl -L -o "%s" "%s" && unzip -o -q "%s" -d "%s"; } >> "${HOME:-/tmp}/.lumen.log" 2>&1', pending_zip, zip_url, pending_zip, paths.get_plugin_dir())
+        -- Single-quoted, and curl is pinned to https for the request and for any
+        -- redirect it follows, so a 302 cannot downgrade the update channel.
+        cmd = string.format(
+            'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; '
+            .. "{ curl --proto '=https' --proto-redir '=https' -fL -o %s %s "
+            .. '&& unzip -o -q %s -d %s; } >> "${HOME:-/tmp}/.lumen.log" 2>&1',
+            guard.shell_quote(pending_zip), guard.shell_quote(zip_url),
+            guard.shell_quote(pending_zip),
+            guard.shell_quote(paths.get_plugin_dir()))
     end
 
     m_utils.exec(cmd)

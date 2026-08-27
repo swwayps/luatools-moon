@@ -4,6 +4,7 @@ local http_client = require("http_client")
 local logger = require("plugin_logger")
 local utils = require("plugin_utils")
 local paths = require("paths")
+local guard = require("guard")
 
 local api_manifest = {}
 
@@ -361,20 +362,49 @@ function api_manifest.load_api_manifest()
     return apis
 end
 
-function api_manifest.add_custom_api(payload)
-    if not payload or type(payload.name) ~= "string" or type(payload.url) ~= "string"
-        or payload.name == "" or payload.url == "" then
+-- validate_source_url(url) -> url, or nil + error message.
+-- A custom source is fetched by the download worker and its payload becomes the
+-- game's Lua script and depot manifests. The endpoint used to accept any
+-- non-empty string, which meant "file:///..." was a usable source and a plain
+-- http mirror was accepted silently. A source must be https, must carry the
+-- <appid> placeholder (otherwise it is not a per-app source at all), and must
+-- not smuggle a different authority past the reader through userinfo.
+function api_manifest.validate_source_url(url)
+    if type(url) ~= "string" or url == "" then
+        return nil, "Invalid payload: name and url are required"
+    end
+    local checked, reason = guard.https_url(url)
+    if not checked then
+        return nil, "Source URL rejected (" .. tostring(reason)
+            .. "): it must be an https URL"
+    end
+    if not checked:find("<appid>", 1, true) then
+        return nil, "Source URL must contain the <appid> placeholder"
+    end
+    return checked
+end
+
+function api_manifest.add_custom_api(payload, deps)
+    if not payload or type(payload.name) ~= "string" or payload.name == "" then
         return { success = false, error = "Invalid payload: name and url are required" }
     end
     if payload.name:lower():match("^%s*luie%s*$") then
         return { success = false, error = "Luie is a managed lua.tools source" }
     end
+    local url, url_error = api_manifest.validate_source_url(payload.url)
+    if not url then return { success = false, error = url_error } end
 
-    local data, err = ensure_user_catalog()
+    deps = deps or {}
+    local data, err
+    if deps.catalog then
+        data = deps.catalog()
+    else
+        data, err = ensure_user_catalog()
+    end
     if not data then return { success = false, error = err } end
     local new_api = {
         name = payload.name,
-        url = payload.url,
+        url = url,
         success_code = payload.success_code or 200,
         unavailable_code = payload.unavailable_code or 404,
         enabled = true,
@@ -385,7 +415,8 @@ function api_manifest.add_custom_api(payload)
     end
 
     table.insert(data.api_list, new_api)
-    if not write_user_catalog(data) then
+    local save = deps.save or write_user_catalog
+    if not save(data) then
         return { success = false, error = "Failed to save API catalog" }
     end
     logger.log("LuaTools: Added custom API: " .. payload.name)

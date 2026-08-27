@@ -1,6 +1,9 @@
 #!/usr/bin/env luajit
 -- Regression test for the split between shipped API defaults and user state.
 
+-- guard.lua is a pure validation module with no side effects, so it is
+-- required for real rather than stubbed.
+package.path = "plugin/backend/?.lua;" .. package.path
 local DEFAULT_PATH = "/plugin/backend/api.defaults.json"
 local LEGACY_PATH = "/plugin/backend/api.json"
 local USER_PATH = "/plugin/backend/data/api.json"

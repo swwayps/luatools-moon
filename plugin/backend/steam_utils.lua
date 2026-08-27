@@ -3,6 +3,7 @@ local millennium = require("millennium")
 local fs = require("fs")
 local logger = require("plugin_logger")
 local paths = require("paths")
+local guard = require("guard")
 
 local steam_utils = {}
 
@@ -141,23 +142,83 @@ function steam_utils.get_game_install_path_response(appid)
     }
 end
 
-function steam_utils.open_game_folder(path)
-    if not path or path == "" or not fs.exists(path) then return false end
+-- game_library_path(path, deps) -> the canonical path when it lies inside a
+-- Steam library's steamapps/common directory, else nil.
+-- The frontend passes this path in, so it is untrusted. Containment to the
+-- known libraries is what keeps "open this folder" from being "open (and, when
+-- chained with a fix apply, create) any path the user can write".
+function steam_utils.game_library_path(path, deps)
+    local canonical = guard.normalize_path(path)
+    if not canonical then return nil end
+    local steam_path = dependency_steam_path(deps)
+    if steam_path == "" then return nil end
+    for _, library_path in ipairs(library_paths(steam_path, deps)) do
+        local root = guard.normalize_path(
+            fs.join(library_path, "steamapps", "common"))
+        if root and (canonical == root
+            or canonical:sub(1, #root + 1) == root .. "/") then
+            return canonical
+        end
+    end
+    return nil
+end
 
-    local is_win = (m_utils.getenv("OS") or ""):find("Windows") ~= nil
+-- open_external_url(url, deps) -> boolean.
+-- Hands a web URL to the desktop browser. The URL comes from the frontend, so it
+-- is validated (guard.external_url refuses anything that is not a plain http/https
+-- URL, and refuses shell metacharacters outright) and then single-quoted. It used
+-- to be interpolated into `xdg-open "<url>"`, and double quotes do not stop the
+-- shell from expanding $(...) or `...`, so "http://x$(cmd)" ran cmd.
+function steam_utils.open_external_url(url, deps)
+    local checked, reason = guard.external_url(url)
+    if not checked then
+        logger.warn("LuaTools: refused to open an external URL (" ..
+            tostring(reason) .. ")")
+        return false
+    end
+    local exec = deps and deps.exec or m_utils.exec
+    local getenv = deps and deps.getenv or m_utils.getenv
+    local is_win = (getenv("OS") or ""):find("Windows") ~= nil
+    if is_win then
+        exec('start "" ' .. guard.shell_quote(checked))
+    else
+        -- slsteammoon: reset the Steam runtime env and detach so the system
+        -- browser launches with system libs (Steam exports a 32-bit runtime
+        -- LD_LIBRARY_PATH/LD_AUDIT that crashes spawned GUI binaries otherwise).
+        exec(
+            'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; ' ..
+            'setsid xdg-open ' .. guard.shell_quote(checked) .. ' >/dev/null 2>&1 &')
+    end
+    return true
+end
+
+function steam_utils.open_game_folder(path, deps)
+    local canonical = steam_utils.game_library_path(path, deps)
+    if not canonical then
+        logger.warn("LuaTools: refused to open a path outside the Steam libraries")
+        return false
+    end
+    local exists = deps and deps.exists or fs.exists
+    if not exists(canonical) then return false end
+
+    local exec = deps and deps.exec or m_utils.exec
+    local getenv = deps and deps.getenv or m_utils.getenv
+    local is_win = (getenv("OS") or ""):find("Windows") ~= nil
     if is_win then
         -- In Windows, explorer accepts backslashes
-        path = path:gsub("/", "\\")
-        m_utils.exec('explorer "' .. path .. '"')
+        exec('explorer "' .. canonical:gsub("/", "\\") .. '"')
     else
         -- slsteammoon: open in the system file manager. Reset the Steam
         -- runtime env (LD_LIBRARY_PATH/LD_AUDIT/LD_PRELOAD point at the
         -- 32-bit Steam runtime and crash spawned GUI binaries) and
         -- detach via setsid so the manager uses system libs and outlives
         -- the Steam session.
-        m_utils.exec(
+        --
+        -- Single-quoted: inside the double quotes this used, the shell still
+        -- expands $(...) and `...`, so a path containing either ran it.
+        exec(
             'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; ' ..
-            'setsid xdg-open "' .. path .. '" >/dev/null 2>&1 &')
+            'setsid xdg-open ' .. guard.shell_quote(canonical) .. ' >/dev/null 2>&1 &')
     end
     return true
 end

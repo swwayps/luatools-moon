@@ -1,5 +1,8 @@
 #!/usr/bin/env luajit
 
+-- guard.lua is a pure validation module with no side effects, so it is
+-- required for real rather than stubbed.
+package.path = "plugin/backend/?.lua;" .. package.path
 local json_store = {}
 package.loaded.json = {
   encode = function(value) json_store.encoded = value; return "encoded" end,

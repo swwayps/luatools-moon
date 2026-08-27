@@ -10,6 +10,9 @@
 -- BOTH files (plus the Steam root).
 --
 -- Run from the repo root AFTER a build: lua5.4 scripts/test-steam-utils-libs.lua
+-- guard.lua is a pure validation module with no side effects, so it is
+-- required for real rather than stubbed.
+package.path = "dist/luatools/backend/?.lua;plugin/backend/?.lua;" .. package.path
 local TMP = "/tmp/lt-steamutils-test"
 os.execute("rm -rf " .. TMP)
 

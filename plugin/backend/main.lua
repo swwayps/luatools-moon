@@ -1565,22 +1565,10 @@ function OpenExternalUrl(contentScriptQuery, url)
             url = contentScriptQuery
         end
     end
-    url = tostring(url or "")
-    if not (url:sub(1, 7) == "http://" or url:sub(1, 8) == "https://") then
-        return json_err("Invalid URL")
-    end
-    local is_win = (m_utils.getenv("OS") or ""):find("Windows") ~= nil
-    if is_win then
-        pcall(m_utils.exec, 'start "" "' .. url .. '"')
-    else
-        -- slsteammoon: reset the Steam runtime env and detach so the
-        -- system browser launches with system libs (Steam exports a
-        -- 32-bit runtime LD_LIBRARY_PATH/LD_AUDIT that crashes spawned
-        -- GUI binaries otherwise).
-        pcall(m_utils.exec,
-            'unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENITY; ' ..
-            'setsid xdg-open "' .. url .. '" >/dev/null 2>&1 &')
-    end
+    -- Validation and quoting live in steam_utils.open_external_url so they are
+    -- unit-testable (scripts/test-endpoint-guards.lua).
+    local ok, opened = pcall(steam_utils.open_external_url, tostring(url or ""))
+    if not (ok and opened) then return json_err("Invalid URL") end
     return json_ok({ success = true })
 end
 

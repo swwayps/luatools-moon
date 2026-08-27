@@ -1,6 +1,9 @@
 #!/usr/bin/env luajit
 -- Contract between ApplyGameFix and downloader.sh for authenticated Ryuu fixes.
 
+-- guard.lua is a pure validation module with no side effects, so it is
+-- required for real rather than stubbed.
+package.path = "plugin/backend/?.lua;" .. package.path
 local writes, commands = {}, {}
 
 package.loaded.utils = {
@@ -38,7 +41,24 @@ local function check(name, cond)
   if cond then print("ok " .. name) else print("FAIL " .. name); failures = failures + 1 end
 end
 
-local ryuu = fixes.apply_game_fix(12100,
+-- apply_game_fix now checks the destination against the install path the
+-- backend derives for that AppID, so the tests supply that resolver.
+local INSTALLED = {
+  [12100] = "/games/GTA3",
+  [285900] = "/games/Gang",
+  [285901] = "/games/Gang",
+}
+local function apply(appid, url, path, kind, name)
+  return fixes.apply_game_fix(appid, url, path, kind, name, {
+    install_state = function(id)
+      local install = INSTALLED[tonumber(id)]
+      if not install then return { found = false, error = "notInstalled" } end
+      return { found = true, installPath = install, directoryExists = true }
+    end,
+  })
+end
+
+local ryuu = apply(12100,
   "https://generator.ryuu.lol/fixes/GTA%20III.zip", "/games/GTA3", "Crack", "GTA III")
 local header_path = "/tmp/luatools/fix_12100_headers.txt"
 check("A1 authenticated Ryuu apply starts", ryuu.success == true)
@@ -61,26 +81,33 @@ check("A4 never exposes the key on the process command line",
   ryuu_worker and ryuu_worker:find("test-session", 1, true) == nil)
 
 local before = #commands
-local online = fixes.apply_game_fix(285900,
-  "http://api.perondepot.xyz/all/Gang%20Beasts.rar", "/games/Gang", "Online", "Gang Beasts")
+local online = apply(285900,
+  "https://api.perondepot.xyz/all/Gang%20Beasts.rar", "/games/Gang", "Online", "Gang Beasts")
 check("A5 non-Ryuu apply starts without auth", online.success == true)
 check("A6 non-Ryuu command has no Ryuu header file",
   #commands == before + 2 and commands[#commands]:find("headers.txt", 1, true) == nil)
 
+-- A hostile URL and a hostile destination are now refused outright rather than
+-- merely quoted: the source host is not one we publish, and the destination is
+-- not the game's install directory. (Quoting is still asserted, on the values
+-- that DO pass validation, by scripts/test-endpoint-guards.lua.)
+local hostile_before = #commands
 local hostile = "https://files.test/fix.zip';touch /tmp/lt-fix-injected;#"
-fixes.apply_game_fix(285901, hostile, "/games/Gang';touch /tmp/lt-path-injected;#",
-  "Online", "Gang Beasts")
-local hostile_worker = commands[#commands] or ""
-check("A6b user-controlled fix arguments are single-quoted shell data",
-  hostile_worker:find("'https://files.test/fix.zip'\\'';touch /tmp/lt-fix-injected;#'", 1, true) ~= nil
-    and hostile_worker:find("'/games/Gang'\\'';touch /tmp/lt-path-injected;#'", 1, true) ~= nil)
+local hostile_result = apply(285901, hostile,
+  "/games/Gang';touch /tmp/lt-path-injected;#", "Online", "Gang Beasts")
+check("A6b a hostile source and destination are refused",
+  hostile_result.success == false)
+check("A6c a refused apply starts no worker", #commands == hostile_before)
 
 package.loaded.ryuu_auth.get_header_line = function() return nil end
 package.loaded.ryuu_auth = package.loaded.ryuu_auth
 local no_key_fixes = dofile("plugin/backend/fixes.lua")
 local no_key_before = #commands
 local denied = no_key_fixes.apply_game_fix(12100,
-  "https://generator.ryuu.lol/fixes/GTA%20III.zip", "/games/GTA3", "Crack", "GTA III")
+  "https://generator.ryuu.lol/fixes/GTA%20III.zip", "/games/GTA3", "Crack", "GTA III",
+  { install_state = function()
+      return { found = true, installPath = "/games/GTA3", directoryExists = true }
+    end })
 check("A7 missing Ryuu key is rejected before launch",
   denied.success == false and tostring(denied.error):lower():find("auth", 1, true) ~= nil)
 check("A8 missing Ryuu key launches no worker", #commands == no_key_before)

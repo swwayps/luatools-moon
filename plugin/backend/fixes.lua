@@ -6,12 +6,31 @@ local utils = require("plugin_utils")
 local paths = require("paths")
 local cjson = require("json")
 local ryuu_auth = require("ryuu_auth")
+local guard = require("guard")
 
 local fixes = {}
 
-local function shell_quote(value)
-    return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
+-- steam_utils pulls in the millennium shim, which is not available in every
+-- context that loads this module (and not needed unless a fix is applied), so it
+-- is resolved on first use rather than at load time.
+local function default_install_state(appid)
+    return require("steam_utils").get_game_install_state(appid)
 end
+
+local shell_quote = guard.shell_quote
+
+-- Mirrors a fix archive may come from. Every URL the frontend can pass to
+-- apply_game_fix was produced by one of this backend's own RPCs
+-- (check_for_fixes -> files.luatools.work, onlinefix.resolve -> the online-fix
+-- mirror, and the authenticated Ryuu generator), so the set is closed. Without
+-- this, the endpoint accepted any URL and wrote its contents into a directory
+-- the caller also chose — file write to anywhere the user can write.
+fixes.ALLOWED_FIX_HOSTS = {
+    ["files.luatools.work"] = true,
+    ["index.luatools.work"] = true,
+    ["generator.ryuu.lol"] = true,
+    ["api.perondepot.xyz"] = true,
+}
 
 function fixes.check_for_fixes(appid)
     if type(appid) == "string" then appid = tonumber(appid) end
@@ -56,7 +75,47 @@ function fixes.check_for_fixes(appid)
     return result
 end
 
-function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_name)
+-- validate_apply_target(appid, download_url, install_path, deps)
+--   -> url, path   or   nil, error table
+-- Both values arrive from the frontend bridge and neither used to be checked.
+-- The download URL must be an https mirror we published ourselves; the
+-- destination must be exactly the install directory the backend derives for that
+-- AppID from libraryfolders.vdf + appmanifest_<appid>.acf, so the caller cannot
+-- redirect the extraction to an autostart directory, a shell rc file, or the
+-- plugin's own backend/ (which is loaded at the next boot).
+function fixes.validate_apply_target(appid, download_url, install_path, deps)
+    deps = deps or {}
+    local url = guard.https_url(tostring(download_url or ""),
+        { hosts = fixes.ALLOWED_FIX_HOSTS })
+    if not url then
+        return nil, { success = false, errorCode = "invalid_source",
+            error = "This fix download source is not allowed." }
+    end
+    local install_state = deps.install_state or default_install_state
+    local ok_state, state = pcall(install_state, appid)
+    if not ok_state or type(state) ~= "table" or not state.found
+        or type(state.installPath) ~= "string" then
+        return nil, { success = false, errorCode = "not_installed",
+            error = "menu.error.notInstalled" }
+    end
+    if not guard.same_path(install_path, state.installPath) then
+        return nil, { success = false, errorCode = "invalid_destination",
+            error = "The install path does not belong to this game." }
+    end
+    -- Use the path the backend derived, not the caller's spelling of it.
+    return url, nil, guard.normalize_path(state.installPath)
+end
+
+function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_name, deps)
+    local checked_url, reject, checked_path =
+        fixes.validate_apply_target(appid, download_url, install_path, deps)
+    if not checked_url then
+        logger.warn("LuaTools: refused fix apply for " .. tostring(appid)
+            .. ": " .. tostring(reject and reject.errorCode))
+        return reject
+    end
+    download_url, install_path = checked_url, checked_path
+
     local dest_root = utils.ensure_temp_download_dir()
     local dest_zip = fs.join(dest_root, "fix_" .. tostring(appid) .. ".zip")
     local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
