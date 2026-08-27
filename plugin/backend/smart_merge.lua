@@ -502,7 +502,19 @@ local function default_options(opts)
         local ok = f:write(data); f:close(); return ok and true or false
     end
     opts.exists = opts.exists or function(path) local f = io.open(path, "rb"); if f then f:close(); return true end return false end
-    opts.mkdir = opts.mkdir or function(path) return os.execute('mkdir -p "' .. path .. '"') == 0 end
+    -- lfs, not `mkdir -p "<path>"`: inside double quotes the shell still
+    -- expands $(...) and `...`, and a Steam library directory can legitimately
+    -- contain either (the user names it).
+    opts.mkdir = opts.mkdir or function(path)
+        local ok_lfs, lfs = pcall(require, "lfs")
+        if not ok_lfs then return false end
+        local accum = (path:sub(1, 1) == "/") and "" or "."
+        for seg in path:gmatch("[^/]+") do
+            accum = accum .. "/" .. seg
+            if lfs.attributes(accum, "mode") == nil then lfs.mkdir(accum) end
+        end
+        return lfs.attributes(path, "mode") == "directory"
+    end
     opts.rename = opts.rename or os.rename
     opts.remove = opts.remove or os.remove
     return opts

@@ -484,7 +484,18 @@ end
 -- state file every poll (~0.2s) while alive, so a fresh mtime means a live
 -- worker; a stale one means it crashed and a relaunch is safe.
 local function _smart_state_age(state_file)
-    local p = io.popen('stat -c %Y "' .. state_file .. '" 2>/dev/null')
+    -- Prefer lfs: no shell at all. This used to be
+    --   io.popen('stat -c %Y "' .. state_file .. '" ...')
+    -- and double quotes do not suppress $(...) or `...`, which a user-named Steam
+    -- library path can legitimately contain. Where lfs is unavailable (host test
+    -- tooling on LuaJIT), fall back to stat with the path single-quoted.
+    local ok_lfs, lfs = pcall(require, "lfs")
+    if ok_lfs then
+        local mtime = lfs.attributes(state_file, "modification")
+        if type(mtime) ~= "number" then return 1 / 0 end
+        return os.time() - mtime
+    end
+    local p = io.popen("stat -c %Y -- " .. _shell_quote(state_file) .. " 2>/dev/null")
     if not p then return 1 / 0 end
     local out = p:read("*a") or ""
     p:close()

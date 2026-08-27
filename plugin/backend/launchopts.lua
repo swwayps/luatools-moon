@@ -109,17 +109,29 @@ end
 
 -- read(appid) -> current launch options string (""). Scans the Steam userdata
 -- localconfig.vdf files (there may be several Steam roots / user ids) and
--- returns the first non-empty match. `list`/`read_file` are injectable for tests.
-function launchopts.read(appid, home, list, read_file)
+-- returns the first non-empty match. `list_dir`/`read_file` are injectable for
+-- tests; `list_dir` receives a DIRECTORY and returns its entry names.
+--
+-- This used to enumerate the files with io.popen("ls -1 " .. glob) where the glob
+-- was built from $HOME with no quoting whatsoever, so a home or library path
+-- containing a space or a quote broke the listing and one containing $(...) ran
+-- it. Reading the directory directly needs no shell and no quoting.
+function launchopts.read(appid, home, list_dir, read_file)
   home = home or os.getenv("HOME") or ""
   if home == "" then return "" end
   read_file = read_file or default_reader
-  list = list or function(glob)
-    local p = io.popen("ls -1 " .. glob .. " 2>/dev/null")
-    if not p then return {} end
+  list_dir = list_dir or function(dir)
+    local ok_lfs, lfs = pcall(require, "lfs")
+    if not ok_lfs then return {} end
+    local ok_iter, iter, dir_obj = pcall(lfs.dir, dir)
+    if not ok_iter then return {} end
     local out = {}
-    for line in p:lines() do out[#out + 1] = line end
-    p:close()
+    for entry in iter, dir_obj do
+      if entry ~= "." and entry ~= ".." then out[#out + 1] = entry end
+    end
+    -- lfs only closes the directory object on full iteration; this loop always
+    -- runs to the end, but close defensively so a future early exit cannot leak.
+    if dir_obj then pcall(function() dir_obj:close() end) end
     return out
   end
 
@@ -130,7 +142,8 @@ function launchopts.read(appid, home, list, read_file)
     home .. "/.steam/root",
   }
   for _, root in ipairs(roots) do
-    for _, path in ipairs(list(root .. "/userdata/*/config/localconfig.vdf")) do
+    for _, user_id in ipairs(list_dir(root .. "/userdata")) do
+      local path = root .. "/userdata/" .. user_id .. "/config/localconfig.vdf"
       local raw = read_file(path)
       if raw and raw ~= "" then
         local v = launchopts.for_app(raw, appid)
