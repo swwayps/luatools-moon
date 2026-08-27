@@ -382,7 +382,7 @@ package.preload["paths"] = function()
 end
 for _, module in ipairs({
   "utils", "plugin_utils", "http_client", "locales.manager", "api_manifest",
-  "downloads", "fixes", "ryuu_auth", "settings.manager", "auto_update",
+  "downloads", "fixes", "settings.manager", "auto_update",
   "lua_tools_auth", "lua_tools_fixes",
 }) do
   package.preload[module] = function() return {} end

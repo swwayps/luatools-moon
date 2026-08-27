@@ -22,6 +22,8 @@ check("fast branch starts aggregation directly",
 check("manual branch retains API availability check", apiCheck >= 0);
 check("manual branch retains source selection modal", source.includes("showSourceSelectionModal(appid, selectable)"));
 check("smart RPC remains wired", source.includes('"StartAddViaLuaToolsSmart"'));
+check("worker progress survives unknown response sizes",
+  source.includes("Number.isFinite(Number(st.progress))"));
 check("draft commit matches Millennium alphabetical argument order",
   /function CommitGameDraft\(params, edits, session\)/.test(backend));
 check("Steam catalog search is exposed through the plugin backend",

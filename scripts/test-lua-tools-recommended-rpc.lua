@@ -58,7 +58,7 @@ end
 for _, name in ipairs({
   "utils", "millennium", "fs", "http_client", "paths", "steam_utils",
   "plugin_utils", "locales.manager", "api_manifest", "downloads", "fixes",
-  "ryuu_auth", "lua_tools_auth", "lua_tools_fixes", "lua_tools_fix_index",
+  "lua_tools_auth", "lua_tools_fixes", "lua_tools_fix_index",
   "lua_tools_fix_state", "settings.manager", "auto_update",
 }) do
   package.preload[name] = function() return {} end

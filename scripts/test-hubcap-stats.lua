@@ -50,7 +50,6 @@ preload("api_manifest", {
 })
 preload("downloads", {})
 preload("fixes", {})
-preload("ryuu_auth", {})
 preload("lua_tools_auth", {})
 preload("lua_tools_fixes", {})
 preload("lua_tools_fix_state", {})

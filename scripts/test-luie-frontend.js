@@ -11,8 +11,10 @@ check("L1 source picker renders the Luie login gate in Lumen blue",
     && source.includes("#1a9fff"));
 check("L2 managed sources are explicitly identified in settings",
   source.includes("const isManaged = api.managed === true"));
-check("L3 managed Luie never receives drag behavior",
-  source.includes("if (!isManaged) {") && source.includes("row.addEventListener('dragstart'"));
+check("L3 managed Luie receives the same reorder behavior",
+  source.includes("const canReorder = true")
+    && source.includes("if (canReorder) {")
+    && source.includes("row.addEventListener('dragstart'"));
 check("L4 managed Luie name is not editable",
   source.includes("if (!isManaged) nameDisplay.onclick"));
 check("L5 managed Luie has no delete control",
@@ -22,5 +24,7 @@ check("L6 Luie retains the same enable toggle as other sources",
 check("L7 manual Luie downloads stay behind the managed-source RPC",
   source.includes('"StartAddViaLuaToolsSource"')
     && source.includes("source.managed === true"));
+check("L8 connected Luie has no lua.tools badge",
+  !source.includes("<span>lua.tools</span>"));
 
 process.exitCode = failures ? 1 : 0;

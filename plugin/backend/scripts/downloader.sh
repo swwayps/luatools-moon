@@ -86,9 +86,9 @@ fi
 slog "worker start: dest=$DEST_PATH extract=$EXTRACT_DIR"
 write_state "downloading" 0 0
 
-# Authenticated sources pass a chmod-600 curl header file. Keep credentials out
-# of the process command line and never send them to a source that did not ask
-# for them (the backend only creates this file for generator.ryuu.lol URLs).
+# An authenticated source may pass a chmod-600 curl header file. Keep credentials
+# out of the process command line and never send them to a source that did not
+# ask for them (no shipped source does today, so this is normally empty).
 CURL_HEADERS=()
 if [ -n "$HEADER_FILE" ] && [ -r "$HEADER_FILE" ]; then
   CURL_HEADERS=(--header "@$HEADER_FILE")
@@ -161,7 +161,7 @@ if [ "$rc" -ne 0 ]; then
     # both instead of sending the user to hunt for another mirror.
     write_failed "Download stalled. The transfer stopped making progress, which can be the source or your own connection. Try again, or pick another source." "stalled"
   elif [ "$rc" -eq 22 ] && { [ "$HTTP_CODE" = "401" ] || [ "$HTTP_CODE" = "403" ]; }; then
-    write_failed "Ryuu authentication was rejected or expired — update your session cookie or auth key." "authentication"
+    write_failed "The source refused this download: not signed in, or the sign-in expired. Check your lua.tools account and try again." "authentication"
   elif [ "$rc" -eq 22 ]; then
     write_failed "The source rejected the download request (HTTP ${HTTP_CODE:-error}). Try another source."
   else

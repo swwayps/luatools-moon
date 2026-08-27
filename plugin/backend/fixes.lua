@@ -5,7 +5,6 @@ local logger = require("plugin_logger")
 local utils = require("plugin_utils")
 local paths = require("paths")
 local cjson = require("json")
-local ryuu_auth = require("ryuu_auth")
 local guard = require("guard")
 
 local fixes = {}
@@ -17,12 +16,17 @@ local function default_install_state(appid)
     return require("steam_utils").get_game_install_state(appid)
 end
 
+-- Every user-controlled value handed to the worker command is single-quoted so a
+-- URL or install path can only ever be data, never shell syntax. guard.shell_quote
+-- is that quoting, shared with the other endpoints instead of re-implemented here.
+local shell_quote = guard.shell_quote
+
 local shell_quote = guard.shell_quote
 
 -- Mirrors a fix archive may come from when the FRONTEND supplies the URL. Every
 -- such URL was produced by one of this backend's own RPCs (check_for_fixes ->
--- files.luatools.work, onlinefix.resolve -> the online-fix mirror, and the
--- authenticated Ryuu generator), so that set is closed. Without it the endpoint
+-- files.luatools.work, onlinefix.resolve -> the online-fix mirror), so that set is
+-- closed. Without it the endpoint
 -- accepted any URL and wrote its contents into a directory the caller also chose
 -- — a file write to anywhere the user can write.
 --
@@ -33,7 +37,6 @@ local shell_quote = guard.shell_quote
 fixes.ALLOWED_FIX_HOSTS = {
     ["files.luatools.work"] = true,
     ["index.luatools.work"] = true,
-    ["generator.ryuu.lol"] = true,
     ["api.perondepot.xyz"] = true,
 }
 
@@ -150,23 +153,11 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
     local dest_root = utils.ensure_temp_download_dir()
     local dest_zip = fs.join(dest_root, "fix_" .. tostring(appid) .. ".zip")
     local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
+    -- No fix source needs a request credential: the official catalogue hands out
+    -- pre-signed URLs (lua_tools_fixes.resolve_download) and the online-fix
+    -- fallback is a public mirror. The downloader keeps its header-file argument
+    -- so an authenticated source can be wired back in without touching it.
     local header_file = ""
-
-    if tostring(download_url):match("^https://generator%.ryuu%.lol/fixes/") then
-        local auth_header = ryuu_auth.get_header_line()
-        if not auth_header then
-            return {
-                success = false,
-                errorCode = "authentication",
-                error = "Ryuu authentication is required. Add a current session cookie or auth key.",
-            }
-        end
-        header_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_headers.txt")
-        if m_utils.write_file(header_file, auth_header) == false then
-            return { success = false, error = "Could not prepare Ryuu authentication." }
-        end
-        m_utils.exec("chmod 600 -- " .. shell_quote(header_file))
-    end
 
     logger.log("LuaTools: Applying fix to " .. tostring(install_path))
     m_utils.write_file(state_file, '{"status": "downloading"}')
@@ -220,11 +211,6 @@ function fixes.get_apply_status(appid)
             elseif data.status == "failed" then
                 pcall(fs.remove, state_file)
                 pcall(fs.remove, header_file)
-                if data.errorCode == "authentication" then
-                    -- A rejected session is no longer useful. Clear it so the
-                    -- next card click opens the guided authentication modal.
-                    pcall(ryuu_auth.clear)
-                end
             end
             return { success = true, state = data }
         end

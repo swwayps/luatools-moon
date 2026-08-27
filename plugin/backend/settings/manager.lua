@@ -26,8 +26,10 @@ local function _migrate_legacy_values(values)
         general.morrenusApiKey = nil
         changed = true
     end
-    -- Ryuu sessions are bearer credentials. They now live in a dedicated
-    -- chmod-600 file and must never be returned through GetSettingsConfig.
+    -- A retired release stored a fix-download bearer credential here in plain
+    -- text. The feature is gone, but the field can still be sitting in an
+    -- existing settings file, so keep scrubbing it: it must never be returned
+    -- through GetSettingsConfig.
     if general.ryuuAuthKey ~= nil then
         general.ryuuAuthKey = nil
         changed = true

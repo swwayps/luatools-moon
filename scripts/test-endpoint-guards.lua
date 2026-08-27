@@ -159,16 +159,13 @@ end
 -- The allowlisted mirrors must all keep working.
 for _, url in ipairs({
   "https://files.luatools.work/OnlineFix1/238320.zip",
-  "https://generator.ryuu.lol/fixes/Outlast.zip",
   "https://api.perondepot.xyz/all/Outlast.rar",
 }) do
-  package.loaded.ryuu_auth.get_header_line = function() return "Cookie: s=1\n" end
   local res = fixes.apply_game_fix(238320, url, GAME_PATH, "Crack", "Outlast",
     fix_deps())
   check("G11 allowlisted mirror accepted: " .. url:match("^https://([^/]+)"),
     res.success == true)
 end
-package.loaded.ryuu_auth.get_header_line = function() return nil end
 
 -- ── ApplyGameFix: the worker command line ───────────────────────────────────
 do

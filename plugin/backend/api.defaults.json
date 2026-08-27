@@ -9,20 +9,20 @@
             "enabled": true
         },
         {
+            "builtin_id": "luie",
+            "name": "Luie",
+            "provider": "lua.tools",
+            "source_name": "Luie",
+            "managed": true,
+            "enabled": true
+        },
+        {
             "builtin_id": "ryuu",
             "name": "Ryuu",
             "url": "http://167.235.229.108/<appid>",
             "insecure": true,
             "success_code": 200,
             "unavailable_code": 404,
-            "enabled": true
-        },
-        {
-            "builtin_id": "luie",
-            "name": "Luie",
-            "provider": "lua.tools",
-            "source_name": "Luie",
-            "managed": true,
             "enabled": true
         },
         {

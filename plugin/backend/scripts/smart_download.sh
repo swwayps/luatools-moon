@@ -36,11 +36,12 @@ slog() { printf '%s INFO smart_download[%s pid %s]: %s\n' "$(date -u +%Y-%m-%dT%
 json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g'; }
 write_state() {
   local status="$1" current="$2" bytes="$3" total="$4" error="${5:-}"
-  local error_code="${6:-}" error_phase="${7:-}" tmp="${STATE_FILE}.tmp.$$"
-  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"apiErrors":{},"error":"%s","errorCode":"%s","errorPhase":"%s"}\n' \
-    "$status" "$(json_escape "$current")" "$bytes" "$total" \
+  local error_code="${6:-}" error_phase="${7:-}" error_source="${8:-}"
+  local tmp="${STATE_FILE}.tmp.$$"
+  printf '{"status":"%s","currentApi":"%s","bytesRead":%s,"totalBytes":%s,"progress":%s,"apiErrors":{},"error":"%s","errorCode":"%s","errorPhase":"%s","errorSource":"%s"}\n' \
+    "$status" "$(json_escape "$current")" "$bytes" "$total" "${progress_pct:-0}" \
     "$(json_escape "$error")" "$(json_escape "$error_code")" \
-    "$(json_escape "$error_phase")" > "$tmp"
+    "$(json_escape "$error_phase")" "$(json_escape "$error_source")" > "$tmp"
   mv -f "$tmp" "$STATE_FILE"
 }
 now_ms() { date +%s%3N; }
@@ -142,6 +143,37 @@ lua_is_safe_and_usable() {
 
 source_is_safe_and_usable() {
   zip_is_safe_and_usable "$1" || lua_is_safe_and_usable "$1"
+}
+
+source_limit_reason() {
+  local http="${1:-0}" file="$2" size daily_usage daily_limit
+  # 429 always means request throttling. Do not promote it to a daily limit
+  # even when a provider returns misleading daily-limit prose in the body.
+  [[ "$http" == "429" ]] && { printf 'rate_limited'; return; }
+  size="$(stat -c %s "$file" 2>/dev/null || echo 0)"
+  [[ "$size" =~ ^[0-9]+$ && "$size" -gt 0 && "$size" -le 1048576 ]] || return
+  LC_ALL=C grep -Iq . "$file" 2>/dev/null || return
+  daily_usage="$(grep -Eio '"?daily[_ -]*usage"?[[:space:]]*:[[:space:]]*[0-9]+' "$file" \
+    | grep -Eo '[0-9]+$' | head -n1)"
+  daily_limit="$(grep -Eio '"?daily[_ -]*limit"?[[:space:]]*:[[:space:]]*[0-9]+' "$file" \
+    | grep -Eo '[0-9]+$' | head -n1)"
+  if [[ "$daily_usage" =~ ^[0-9]+$ && "$daily_limit" =~ ^[0-9]+$ \
+      && "$daily_limit" -gt 0 && "$daily_usage" -ge "$daily_limit" ]]; then
+    printf 'daily_limit'; return
+  fi
+  if grep -Eiq 'daily([ _-]+download)?[ _-]+(limit|quota).*(reached|exceeded|exhausted|used[ _-]+up)' "$file"; then
+    printf 'daily_limit'; return
+  fi
+  if grep -Eiq '(too[ _-]+many[ _-]+requests|rate[ _-]+limit.*(reached|exceeded|exhausted))' "$file"; then
+    printf 'rate_limited'; return
+  fi
+  if grep -Eiq 'quota.*(reached|exceeded|exhausted|used[ _-]+up)' "$file"; then
+    printf 'quota_exhausted'; return
+  fi
+}
+
+safe_source_name() {
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//'
 }
 
 manifest_has_payload_magic() {
@@ -264,7 +296,7 @@ start_ms="$(now_ms)"
 quiet_ms="$(awk -v d="$COLLECTION_DEADLINE" 'BEGIN{printf "%.0f", d*1000}')"
 grace_ms="$(awk -v g="$COVERAGE_GRACE" 'BEGIN{printf "%.0f", g*1000}')"
 active_window_ms="$(awk -v s="$ACTIVE_PROGRESS_WINDOW" 'BEGIN{printf "%.0f", s*1000}')"
-coverage_at=""; usable_at=""; completed=0; progress_bytes=0; extension_logged=0; cancelled=0
+coverage_at=""; usable_at=""; completed=0; progress_bytes=0; progress_pct=0; extension_logged=0; cancelled=0
 for ((i=0; i<n; i++)); do
   C_SIZE[i]=0
   C_LAST_PROGRESS[i]="$start_ms"
@@ -296,7 +328,11 @@ while :; do
     wait "${C_PARSE_PID[i]}"; parse_rc=$?
     http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
       "${C_HEAD[i]}" 2>/dev/null)"
-    if [[ "$rc" -ne 0 || "$parse_rc" -ne 0 ]]; then
+    limit_reason="$(source_limit_reason "${http:-0}" "${C_ZIP[i]}")"
+    if [[ -n "$limit_reason" ]]; then
+      C_STATE[i]="failed"; C_REASON[i]="$limit_reason"
+      slog "source index=${C_INDEX[i]} failed reason=$limit_reason rc=$rc http=${http:-0}"
+    elif [[ "$rc" -ne 0 || "$parse_rc" -ne 0 ]]; then
       C_STATE[i]="failed"
       if [[ "$rc" -eq 28 ]]; then C_REASON[i]="timeout"; else C_REASON[i]="transfer"; fi
       slog "source index=${C_INDEX[i]} failed reason=${C_REASON[i]} rc=$rc http=${http:-0}"
@@ -337,6 +373,27 @@ while :; do
     fi
   done
   [[ "$totals_known" -eq 1 ]] || aggregate_total=0
+
+  # A provider such as Luie may stream a response without Content-Length. Keep
+  # byte totals honest, but calculate task progress per source so one unknown
+  # response cannot collapse the whole UI to its 1% indeterminate fallback.
+  progress_sum=0
+  for ((i=0; i<n; i++)); do
+    source_pct=0
+    source_http="$(awk '/^HTTP\// { code = $2 + 0 } END { if (code) print code }' \
+      "${C_HEAD[i]}" 2>/dev/null)"
+    if [[ "${C_STATE[i]}" != pending ]]; then
+      source_pct=100
+    elif [[ "${C_TOTAL[i]}" =~ ^[0-9]+$ && "${C_TOTAL[i]}" -gt 0 \
+        && "${source_http:-0}" == "${C_CODE[i]}" ]]; then
+      source_pct=$(( ${C_SIZE[i]:-0} * 100 / 10#${C_TOTAL[i]} ))
+      [[ "$source_pct" -gt 99 ]] && source_pct=99
+    elif [[ "${C_SIZE[i]:-0}" -gt 0 ]]; then
+      source_pct=1
+    fi
+    progress_sum=$((progress_sum + source_pct))
+  done
+  progress_pct="$(mono_pct "$progress_pct" "$((progress_sum / n))")"
   write_state downloading "" "$progress_bytes" "$aggregate_total"
   current_ms="$(now_ms)"
   if [[ -z "$usable_at" ]] && aggregate_is_usable; then
@@ -394,15 +451,41 @@ fi
 if [[ "$completed" -eq 0 ]]; then
   rm -rf "$EXTRACT_DIR"
   not_found=0; invalid=0; unavailable=0; rejected=0
+  daily=0; rate=0; quota=0
+  daily_source=""; rate_source=""; quota_source=""
   for ((i=0; i<n; i++)); do
     case "${C_REASON[i]:-}" in
       not_found) not_found=$((not_found + 1)) ;;
       invalid_package|extract) invalid=$((invalid + 1)) ;;
       rejected) rejected=$((rejected + 1)) ;;
+      daily_limit)
+        daily=$((daily + 1))
+        [[ -n "$daily_source" ]] || daily_source="$(safe_source_name "${C_NAME[i]}")"
+        ;;
+      rate_limited)
+        rate=$((rate + 1))
+        [[ -n "$rate_source" ]] || rate_source="$(safe_source_name "${C_NAME[i]}")"
+        ;;
+      quota_exhausted)
+        quota=$((quota + 1))
+        [[ -n "$quota_source" ]] || quota_source="$(safe_source_name "${C_NAME[i]}")"
+        ;;
       *) unavailable=$((unavailable + 1)) ;;
     esac
   done
-  if [[ "$not_found" -eq "$n" ]]; then
+  if [[ "$daily" -gt 0 ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "Daily download limit reached for $daily_source. Try again tomorrow or choose another source." \
+      daily_limit source "$daily_source"
+  elif [[ "$rate" -gt 0 ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "Too many requests to $rate_source. Wait a moment and try again." \
+      rate_limited source "$rate_source"
+  elif [[ "$quota" -gt 0 ]]; then
+    write_state failed "" "$progress_bytes" 0 \
+      "The quota for $quota_source has been exhausted. Try again later or choose another source." \
+      quota_exhausted source "$quota_source"
+  elif [[ "$not_found" -eq "$n" ]]; then
     write_state failed "" "$progress_bytes" 0 \
       "The configured sources do not have this app yet." not_found source
   elif [[ "$invalid" -gt 0 && "$unavailable" -eq 0 ]]; then

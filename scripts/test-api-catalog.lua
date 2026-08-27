@@ -33,19 +33,19 @@ local files = {
                 enabled = true,
             },
             {
-                builtin_id = "ryuu",
-                name = "Ryuu",
-                url = "http://167.235.229.108/<appid>",
-                success_code = 200,
-                unavailable_code = 404,
-                enabled = true,
-            },
-            {
                 builtin_id = "luie",
                 name = "Luie",
                 provider = "lua.tools",
                 source_name = "Luie",
                 managed = true,
+                enabled = true,
+            },
+            {
+                builtin_id = "ryuu",
+                name = "Ryuu",
+                url = "http://167.235.229.108/<appid>",
+                success_code = 200,
+                unavailable_code = 404,
                 enabled = true,
             },
             {
@@ -61,6 +61,7 @@ local files = {
     -- This is what install.sh migrates from an installation made before the
     -- persistent catalog existed.
     [USER_PATH] = {
+        schema_version = 1,
         api_list = {
             {
                 builtin_id = "morrenus",
@@ -180,6 +181,12 @@ local function find_api(list, name)
     end
 end
 
+local function index_of(list, name)
+    for index, api in ipairs(list or {}) do
+        if api.name == name then return index end
+    end
+end
+
 local all = api_manifest.get_all_apis().apis
 check(#all == 6, "live defaults and custom APIs are visible")
 check(find_api(all, "TwentyTwo Cloud") == nil, "retired TwentyTwo default is removed")
@@ -197,6 +204,10 @@ local luie = find_api(all, "Luie")
 check(luie and luie.managed == true and luie.needsLogin == true
     and luie.locked == true and luie.url == "",
     "Luie is always visible as a managed source without exposing an endpoint")
+check(index_of(all, "Luie") == index_of(all, "Sadie (Hubcap)") + 1,
+    "catalog v1 migration places Luie directly below Sadie")
+check(files[USER_PATH].schema_version == 2,
+    "the one-time Luie ordering migration advances the catalog schema")
 
 local active = api_manifest.load_api_manifest()
 check(find_api(active, "Minha Ryuu") == nil, "disabled API is excluded from downloads")
@@ -269,25 +280,28 @@ check(api_manifest.rename_api("Luie", "Changed").success == false,
 check(api_manifest.remove_api("Luie").success == false,
     "managed Luie cannot be removed")
 
-local luie_before_order
-for index, api in ipairs(files[USER_PATH].api_list) do
-    if api.builtin_id == "luie" then luie_before_order = index end
-end
 local reorder_names = {}
-for index = #files[USER_PATH].api_list, 1, -1 do
-    local api = files[USER_PATH].api_list[index]
+for _, api in ipairs(files[USER_PATH].api_list) do
     if api.name ~= "Luie" and api.removed ~= true then
         reorder_names[#reorder_names + 1] = api.name
     end
 end
+reorder_names[#reorder_names + 1] = "Luie"
 check(api_manifest.set_api_order(reorder_names).success == true,
-    "other sources can be reordered around managed Luie")
+    "all sources including managed Luie can be reordered")
 local luie_after_order
 for index, api in ipairs(files[USER_PATH].api_list) do
     if api.builtin_id == "luie" then luie_after_order = index end
 end
-check(luie_after_order == luie_before_order,
-    "managed Luie keeps its pinned catalog position")
+check(luie_after_order == #files[USER_PATH].api_list,
+    "managed Luie persists at the user-selected position")
+api_manifest.get_all_apis()
+local luie_after_reconcile
+for index, api in ipairs(files[USER_PATH].api_list) do
+    if api.builtin_id == "luie" then luie_after_reconcile = index end
+end
+check(luie_after_reconcile == luie_after_order,
+    "default placement does not override a later user reorder")
 
 local toggled_luie = api_manifest.toggle_api("Luie")
 check(toggled_luie.success and toggled_luie.enabled == false,
@@ -310,7 +324,7 @@ for _, api in ipairs(files[USER_PATH].api_list) do
 end
 check(hubcap_state and hubcap_state.removed == true, "built-in removal is saved as a tombstone")
 
-files[DEFAULT_PATH].api_list[2].url = "https://new-ryuu.invalid/<appid>"
+files[DEFAULT_PATH].api_list[3].url = "https://new-ryuu.invalid/<appid>"
 all = api_manifest.get_all_apis().apis
 local ryuu = find_api(all, "Minha Ryuu")
 check(ryuu and ryuu.url == "https://new-ryuu.invalid/<appid>", "updated built-in URL comes from shipped defaults")
@@ -320,7 +334,7 @@ remote_manifest = {
     api_list = {
         {
             name = "Ryuu",
-            url = files[DEFAULT_PATH].api_list[2].url,
+            url = files[DEFAULT_PATH].api_list[3].url,
             enabled = true,
         },
         {

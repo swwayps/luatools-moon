@@ -44,7 +44,7 @@ check "CheckForFixes derives Spacewar from FakeAppIds" \
   grep -qF 'sls.get_fake_appid(appid) == 480' "$MAIN"
 check "fallback downloads begin a durable receipt transaction" \
   grep -qF 'lua_tools_fix_state.begin_fallback_online(appid)' "$MAIN"
-check "Ryuu catalogue is no longer used by CheckForFixes" \
+check "CheckForFixes uses the official catalogue, not the retired one" \
   bash -c '! sed -n '\''600,740p'\'' "$1" | grep -qF '\''require("crackfix")'\''' _ "$MAIN"
 
 exit "$fail"

@@ -11,7 +11,7 @@ local api_manifest = {}
 local DEFAULT_API_PATH = paths.backend_path(config.API_DEFAULTS_FILE or config.API_JSON_FILE)
 local LEGACY_API_PATH = paths.backend_path(config.API_JSON_FILE)
 local USER_API_PATH = paths.backend_path("data/" .. config.API_JSON_FILE)
-local CATALOG_SCHEMA_VERSION = 1
+local CATALOG_SCHEMA_VERSION = 2
 
 local _APIS_INIT_DONE = false
 local _INIT_APIS_LAST_MESSAGE = ""
@@ -154,6 +154,23 @@ local function reconcile_catalog(defaults, user_data)
     for _, id in ipairs(default_order) do
         if not seen_builtins[id] then
             table.insert(reconciled.api_list, copy_table(default_by_id[id]))
+        end
+    end
+
+    -- Schema v2 gives the official Luie source a useful initial position while
+    -- keeping it freely reorderable afterwards. This migration runs once; a
+    -- v2 catalogue always preserves the user's saved order.
+    if (tonumber(user_data.schema_version) or 0) < 2 then
+        local hubcap_index, luie_index
+        for index, api in ipairs(reconciled.api_list) do
+            local id = builtin_id(api, false)
+            if id == "hubcap" then hubcap_index = index end
+            if id == "luie" then luie_index = index end
+        end
+        if hubcap_index and luie_index and luie_index ~= hubcap_index + 1 then
+            local luie = table.remove(reconciled.api_list, luie_index)
+            if luie_index < hubcap_index then hubcap_index = hubcap_index - 1 end
+            table.insert(reconciled.api_list, hubcap_index + 1, luie)
         end
     end
 
@@ -631,14 +648,14 @@ function api_manifest.set_api_order(ordered_names)
 
     local data, err = ensure_user_catalog()
     if not data then return { success = false, error = err } end
-    local reordered_mutable = {}
+    local reordered = {}
     local added = {}
 
     for _, name in ipairs(ordered_names) do
         for index, api in ipairs(data.api_list) do
-            if not is_managed_api(api) and api.name == name
+            if api.name == name
                 and api.removed ~= true and not added[index] then
-                table.insert(reordered_mutable, api)
+                table.insert(reordered, api)
                 added[index] = true
                 break
             end
@@ -646,22 +663,17 @@ function api_manifest.set_api_order(ordered_names)
     end
 
     for index, api in ipairs(data.api_list) do
-        if not is_managed_api(api) and not added[index] then
-            table.insert(reordered_mutable, api)
+        if api.removed ~= true and not added[index] then
+            table.insert(reordered, api)
+            added[index] = true
         end
     end
-
-    local new_list = {}
-    local mutable_index = 1
     for index, api in ipairs(data.api_list) do
-        if is_managed_api(api) then
-            new_list[index] = api
-        else
-            new_list[index] = reordered_mutable[mutable_index]
-            mutable_index = mutable_index + 1
+        if api.removed == true and not added[index] then
+            table.insert(reordered, api)
         end
     end
-    data.api_list = new_list
+    data.api_list = reordered
     if not write_user_catalog(data) then
         return { success = false, error = "Failed to save API catalog" }
     end
