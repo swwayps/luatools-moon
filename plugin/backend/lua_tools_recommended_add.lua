@@ -2,15 +2,10 @@ local fix_index = require("lua_tools_fix_index")
 local lua_tools_fixes = require("lua_tools_fixes")
 local http_client = require("http_client")
 local steam_utils = require("steam_utils")
+local domain = require("lua_tools_domain")
 
 local recommended_add = {}
 local MAX_MANIFEST_BYTES = 2 * 1024 * 1024
-
-local function positive_appid(value)
-  local number = tonumber(value)
-  if not number or number <= 0 or number ~= math.floor(number) then return nil end
-  return math.floor(number)
-end
 
 local function failure(code, message, extra)
   local result = {
@@ -25,7 +20,7 @@ local function failure(code, message, extra)
 end
 
 function recommended_add.start(appid, fix_id, auto_apply, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   fix_id = tostring(fix_id or ""):lower()
   if not appid then return failure("invalid_appid", "Invalid Steam app ID.") end
   deps = deps or {}

@@ -4,6 +4,8 @@
 -- 5xx, ...), so the UI can show the real problem instead of always blaming the
 -- key. Run from the repo root AFTER a build: lua5.4 scripts/test-hubcap-stats.lua
 
+package.path = "dist/luatools/backend/?.lua;plugin/backend/?.lua;" .. package.path
+
 -- Programmable HTTP result the stubbed http_client returns.
 local MOCK_RESP, MOCK_ERR = nil, nil
 

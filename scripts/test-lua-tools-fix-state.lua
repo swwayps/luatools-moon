@@ -1,5 +1,7 @@
 #!/usr/bin/env luajit
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 package.loaded.json = {
   encode = function() return "{}" end,
   decode = function() return {} end,

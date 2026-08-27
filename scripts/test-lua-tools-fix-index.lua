@@ -1,5 +1,7 @@
 #!/usr/bin/env luajit
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 package.loaded.json = { decode = function() return {} end }
 package.loaded.paths = { backend_path = function(name) return "/plugin/backend/" .. name end }
 package.loaded.utils = { read_file = function() return nil end }

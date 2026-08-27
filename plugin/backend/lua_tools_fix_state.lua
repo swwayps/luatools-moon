@@ -2,6 +2,7 @@ local cjson = require("json")
 local fs = require("fs")
 local m_utils = require("utils")
 local paths = require("paths")
+local domain = require("lua_tools_domain")
 
 local state = {}
 
@@ -12,12 +13,6 @@ local unpack_values = table.unpack or unpack
 
 local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
-end
-
-local function positive_appid(value)
-  local number = tonumber(value)
-  if not number or number <= 0 or number ~= math.floor(number) then return nil end
-  return math.floor(number)
 end
 
 local function path_join(...)
@@ -101,7 +96,7 @@ local function public_metadata(fix)
 end
 
 function state.validate_manifest(content, appid)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return false, "invalid_appid" end
   if type(content) ~= "string" or content == "" then
     return false, "invalid_manifest"
@@ -118,7 +113,7 @@ function state.validate_manifest(content, appid)
 end
 
 function state.get_applied(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return nil end
   local record = app_record(load(deps), appid, false)
   return type(record) == "table" and type(record.applied) == "table"
@@ -126,7 +121,7 @@ function state.get_applied(appid, deps)
 end
 
 function state.get_pending(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return nil end
   local record = app_record(load(deps), appid, false)
   return type(record) == "table" and type(record.pending) == "table"
@@ -134,7 +129,7 @@ function state.get_pending(appid, deps)
 end
 
 function state.begin(appid, fix, staged_manifest, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid or type(fix) ~= "table" then return false end
   local metadata = public_metadata(fix)
   if metadata.fixId == "" then return false end
@@ -156,7 +151,7 @@ function state.begin_fallback_online(appid, deps)
 end
 
 function state.stage_manifest(appid, content, stage_dir, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   local valid, validation_error = state.validate_manifest(content, appid)
   if not valid then return nil, validation_error end
   stage_dir = tostring(stage_dir or "")
@@ -182,7 +177,7 @@ function state.stage_manifest(appid, content, stage_dir, deps)
 end
 
 function state.publish_manifest(appid, content, steam_root, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return false, "invalid_appid" end
   local valid, validation_error = state.validate_manifest(content, appid)
   if not valid then return false, validation_error end
@@ -219,7 +214,7 @@ function state.publish_manifest(appid, content, steam_root, deps)
 end
 
 function state.install_staged_manifest(appid, steam_root, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return false, "invalid_appid" end
   local database = load(deps)
   local record = app_record(database, appid, false)
@@ -270,7 +265,7 @@ function state.install_staged_manifest(appid, steam_root, deps)
 end
 
 function state.complete(appid, fix_id, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   fix_id = tostring(fix_id or ""):lower()
   if not appid or fix_id == "" then return false end
   local database = load(deps)
@@ -286,7 +281,7 @@ function state.complete(appid, fix_id, deps)
 end
 
 function state.abort(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return false end
   local database = load(deps)
   local record, key = app_record(database, appid, false)
@@ -301,7 +296,7 @@ function state.abort(appid, deps)
 end
 
 function state.clear(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return false end
   local database = load(deps)
   local record, key = app_record(database, appid, false)

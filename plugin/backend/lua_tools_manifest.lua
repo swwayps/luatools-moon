@@ -1,6 +1,7 @@
 local cjson = require("json")
 local http_client = require("http_client")
 local lua_tools_auth = require("lua_tools_auth")
+local domain = require("lua_tools_domain")
 
 local manifests = {}
 
@@ -8,14 +9,8 @@ local API_BASE_URL = "https://lua.tools"
 local DISCOVERY_URL = "http://167.235.229.108/check_apis"
 local DISCOVERY_USER_AGENT = "secretgoonpoon"
 
-local function positive_appid(value)
-  local number = tonumber(value)
-  if not number or number <= 0 or number ~= math.floor(number) then return nil end
-  return math.floor(number)
-end
-
 function manifests.download_candidate(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then
     return nil, { code = "invalid_appid", message = "Invalid Steam app ID." }
   end
@@ -31,7 +26,7 @@ function manifests.download_candidate(appid, deps)
 end
 
 function manifests.check(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then
     return { available = false, status = "invalid_appid" }
   end

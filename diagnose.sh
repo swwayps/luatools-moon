@@ -574,29 +574,30 @@ _collect_guard_state() { # $1 stage-dir  $2 cap(bytes,0=full)
 # multi-MB console log.
 # ----------------------------------------------------------------------------
 _collect_client_crashes() { # $1 stage-dir  $2 steam-root -> echoes match count
-	local stage="$1" sr="$2" raw f total=0 n
+	local stage="$1" sr="$2" raw filtered f total=0 n
 	[ -n "$sr" ] && [ -d "$sr/logs" ] || { printf 0; return 0; }
 	raw="$(mktemp "${TMPDIR:-/tmp}/luatools-diag-crash.XXXXXX" 2>/dev/null || true)"
 	[ -n "$raw" ] || { printf 0; return 0; }
+	filtered="${raw}.matches"
 
 	for f in "$sr/logs/console-linux.txt" "$sr/logs/console_log.txt" \
 	         "$sr/logs/bootstrap_log.txt"; do
 		[ -f "$f" ] && [ -r "$f" ] || continue
-		n="$(grep -c -F -e '"$STEAMROOT/$STEAMEXEPATH"' -- "$f" 2>/dev/null || true)"
+		grep -F -e '"$STEAMROOT/$STEAMEXEPATH"' -- "$f" 2>/dev/null \
+			| grep -F 'steam.sh' 2>/dev/null > "$filtered" || true
+		n="$(wc -l < "$filtered" 2>/dev/null | tr -d '[:space:]')"
 		case "$n" in ''|*[!0-9]*) n=0 ;; esac
 		[ "$n" -eq 0 ] && continue
 		{
 			printf '===== %s =====\n' "$f"
-			grep -F -e '"$STEAMROOT/$STEAMEXEPATH"' -- "$f" 2>/dev/null \
-				| grep -F 'steam.sh' 2>/dev/null \
-				| tail -n "$DIAG_CRASH_LINES" || true
+			tail -n "$DIAG_CRASH_LINES" "$filtered" 2>/dev/null || true
 			printf '\n'
 		} >> "$raw"
 		total=$(( total + n ))
 	done
 
 	[ -s "$raw" ] && scrub < "$raw" > "$stage/steam-client-crashes.txt"
-	rm -f "$raw"
+	rm -f "$raw" "$filtered"
 	printf '%s' "$total"
 }
 

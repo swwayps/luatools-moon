@@ -2,6 +2,7 @@ local cjson = require("json")
 local fs = require("fs")
 local m_utils = require("utils")
 local paths = require("paths")
+local domain = require("lua_tools_domain")
 
 local auto_fix = {}
 local STATE_FILE = paths.backend_path("data/lua_tools_auto_fix.json")
@@ -10,25 +11,6 @@ local MAX_RETRIES = 3
 
 local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
-end
-
-local function positive_appid(value)
-  local number = tonumber(value)
-  if not number or number <= 0 or number ~= math.floor(number) then return nil end
-  return math.floor(number)
-end
-
-local function valid_fix_id(value)
-  value = tostring(value or ""):lower()
-  local namespace, uuid = value:match("^([a-z0-9][a-z0-9_%-]*):(.+)$")
-  if namespace then
-    if #namespace > 32 then return nil end
-    value = uuid
-  end
-  local a, b, c, d, e = value:match("^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
-  if not a or #a ~= 8 or #b ~= 4 or #c ~= 4 or #d ~= 4 or #e ~= 12 then return nil end
-  local normalized = value:lower()
-  return namespace and (namespace .. ":" .. normalized) or normalized
 end
 
 local function empty_database()
@@ -126,8 +108,8 @@ local function set_failure(job, result, now)
 end
 
 function auto_fix.queue(appid, fix_id, deps)
-  appid = positive_appid(appid)
-  fix_id = valid_fix_id(fix_id)
+  appid = domain.positive_appid(appid)
+  fix_id = domain.fix_id(fix_id)
   if not appid or not fix_id then return false, "invalid_job" end
   local database = load(deps)
   database.jobs[tostring(appid)] = {
@@ -144,13 +126,13 @@ function auto_fix.queue(appid, fix_id, deps)
 end
 
 function auto_fix.get(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return nil end
   return load(deps).jobs[tostring(appid)]
 end
 
 function auto_fix.cancel(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then
     return { success = false, errorCode = "invalid_appid", error = "Invalid Steam app ID." }
   end
@@ -225,7 +207,7 @@ function auto_fix.tick(now, callbacks, deps)
   local observed = {}
 
   for _, key in ipairs(keys) do
-    local appid = positive_appid(key)
+    local appid = domain.positive_appid(key)
     local job = database.jobs[key]
     if appid and type(job) == "table" and job.phase ~= "failed"
         and now >= (tonumber(job.nextAttempt) or 0) then
@@ -349,7 +331,7 @@ function auto_fix.tick(now, callbacks, deps)
   end
   local ui_jobs = {}
   for key, job in pairs(database.jobs) do
-    local view = ui_job(positive_appid(key), job, observed[key])
+    local view = ui_job(domain.positive_appid(key), job, observed[key])
     if view then ui_jobs[key] = view end
   end
   return { success = true, changed = changed, jobs = database.jobs, uiJobs = ui_jobs }

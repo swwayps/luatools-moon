@@ -1,6 +1,8 @@
 -- Contract test for the Steam catalog RPC used by Lumen's Add game typeahead.
 -- Run from the repository root: lua5.4 scripts/test-steam-search.lua
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 local MOCK_RESP, MOCK_RESPONSES, MOCK_DATA, LAST_URL, LAST_OPTIONS, REQUEST_COUNT
 local function preload(name, mod) package.preload[name] = function() return mod end end
 

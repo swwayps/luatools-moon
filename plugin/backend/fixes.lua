@@ -21,8 +21,6 @@ end
 -- is that quoting, shared with the other endpoints instead of re-implemented here.
 local shell_quote = guard.shell_quote
 
-local shell_quote = guard.shell_quote
-
 -- Mirrors a fix archive may come from when the FRONTEND supplies the URL. Every
 -- such URL was produced by one of this backend's own RPCs (check_for_fixes ->
 -- files.luatools.work, onlinefix.resolve -> the online-fix mirror), so that set is

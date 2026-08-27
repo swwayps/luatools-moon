@@ -333,8 +333,9 @@ out_crash() { if grep -qF "$2" <<<"$crash"; then check "$1" 1; else check "$1" 0
 in_crash  "crashes: localized abort line kept" 'Abortado'
 in_crash  "crashes: source file header"        '===== '
 out_crash "crashes: debugger echo excluded"    'STEAM_DEBUGGER'
-grep -q 'client_abnormal_exits: [1-9]' "$EXTRACT/summary.txt" 2>/dev/null
-check "summary counts abnormal client exits" $?
+grep -q '^client_abnormal_exits: 1 (see steam-client-crashes.txt)$' \
+	"$EXTRACT/summary.txt" 2>/dev/null
+check "summary counts only archived abnormal client exits" $?
 # NB: the .dmp minidumps are binary and archived AS-IS by design — they are
 # deliberately excluded from the scrub-leak sweep above (byte-shifting sed
 # edits would corrupt them; see the header note in diagnose.sh).

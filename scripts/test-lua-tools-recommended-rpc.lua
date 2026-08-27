@@ -116,6 +116,16 @@ check("R6 the RPC supplies the atomic Lua + ManifestPins publisher",
 check("R6b the RPC preflights exact manifest availability",
   captured and captured.hasAvailability == true)
 
+captured = nil
+rpc.dispatch(StartLuaToolsRecommendedAdd, {
+  appid = "1e3",
+  autoApply = true,
+  contentScriptQuery = "",
+  fixId = fix_id,
+})
+check("R6c non-decimal AppID aliases are rejected at the RPC boundary",
+  captured == nil)
+
 local handoff_result = EnrichGameImportFromDraft({
   appid = 1671210, importSession = "import123", draftSession = "draft456",
 })

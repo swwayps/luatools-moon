@@ -17,6 +17,7 @@ local api_manifest     = require("api_manifest")
 local downloads        = require("downloads")
 local fixes            = require("fixes")
 local lua_tools_auth   = require("lua_tools_auth")
+local lua_tools_domain = require("lua_tools_domain")
 local lua_tools_fixes  = require("lua_tools_fixes")
 local lua_tools_fix_index = require("lua_tools_fix_index")
 local lua_tools_fix_state = require("lua_tools_fix_state")
@@ -356,7 +357,7 @@ function EnrichGameImportFromDraft(params, import_session, draft_session)
         import_session = params.importSession or params.import_session
         draft_session = params.draftSession or params.draft_session
     end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid or type(import_session) ~= "string"
         or type(draft_session) ~= "string" then
         return json_err("Invalid draft handoff")
@@ -483,7 +484,7 @@ end
 
 function GetSteamAppDetails(params)
     local appid = type(params) == "table" and params.appid or params
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid or appid <= 0 or appid % 1 ~= 0 then
         return json_err("Invalid appid")
     end
@@ -723,7 +724,7 @@ end
 
 function DeleteLuaToolsForApp(appid)
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid or appid <= 0 or appid ~= math.floor(appid) then
         return json_err("invalid appid")
     end
@@ -829,7 +830,7 @@ end
 
 function CheckForFixes(appid)
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local res = {
         success = true,
@@ -885,7 +886,7 @@ end
 -- slsteammoon: ProtonDB compatibility tier for the store-page badge.
 function GetProtonDBStatus(appid)
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local ok, res = pcall(function()
         local url = "https://www.protondb.com/api/v1/reports/summaries/" .. tostring(appid) .. ".json"
@@ -923,7 +924,7 @@ function ApplyGameFix(appid, contentScriptQuery, downloadUrl, fixType, gameName,
         fixType, gameName = payload.fixType, payload.gameName
         installPath, receiptKind = payload.installPath, payload.receiptKind
     end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local tracks_fallback = tostring(receiptKind or "") == "online_fix_fallback"
     if tracks_fallback then
@@ -1010,7 +1011,7 @@ end
 
 function GetLuaToolsAddRecommendation(appid)
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid or appid <= 0 or appid ~= math.floor(appid) then
         return json_err("invalid appid")
     end
@@ -1025,7 +1026,9 @@ end
 
 function CancelLuaToolsAutoFix(appid)
     if type(appid) == "table" then appid = appid.appid end
-    local ok, result = pcall(lua_tools_auto_fix.cancel, tonumber(appid))
+    appid = lua_tools_domain.positive_appid(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, result = pcall(lua_tools_auto_fix.cancel, appid)
     if not ok then return json_err(result) end
     return json_ok(result)
 end
@@ -1037,8 +1040,10 @@ function StartLuaToolsRecommendedAdd(appid, auto_apply, content_script_query, fi
         contentScriptQuery = content_script_query,
         fixId = fix_id,
     }
+    local normalized_appid = lua_tools_domain.positive_appid(payload.appid)
+    if not normalized_appid then return json_err("invalid appid") end
     local ok, result = pcall(lua_tools_recommended_add.start,
-        tonumber(payload.appid), tostring(payload.fixId or ""),
+        normalized_appid, tostring(payload.fixId or ""),
         payload.autoApply == true, {
             availability = function(check_appid, lua_body, steam_root)
                 local ok_module, manifestpins = pcall(require, "manifestpins")
@@ -1074,7 +1079,7 @@ end
 
 function GetLuaToolsFixesForGame(appid)
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local ok_auth, auth_status = pcall(lua_tools_auth.status)
     if not ok_auth then return json_err(auth_status) end
@@ -1094,7 +1099,7 @@ function StartLuaToolsFix(appid, contentScriptQuery, fixId, gameName, installPat
         appid, fixId = payload.appid, payload.fixId
         gameName, installPath = payload.gameName, payload.installPath
     end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
 
     local ok_game, game = pcall(lua_tools_fixes.get_game, appid)
@@ -1194,7 +1199,7 @@ end
 
 function CompleteLuaToolsFixApply(appid, contentScriptQuery, fixId)
     if type(appid) == "table" then fixId = appid.fixId; appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local completed = lua_tools_fix_state.complete(appid, tostring(fixId or ""))
     if not completed then
@@ -1208,7 +1213,7 @@ function ApplySpaceFix(appid, contentScriptQuery)
     -- AIO fix on Linux: enable slsteam-moon FakeAppIds { appid: 480 } so the
     -- game runs as Spacewar on the real client layer. No download/extract.
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     local ok, res = pcall(function()
         local ok_sls, sls = pcall(require, "slsteam")
@@ -1225,16 +1230,18 @@ end
 
 function GetApplyFixStatus(appid)
     if type(appid) == "table" then appid = appid.appid end
-    local ok, res = pcall(fixes.get_apply_status, tonumber(appid))
+    appid = lua_tools_domain.positive_appid(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, res = pcall(fixes.get_apply_status, appid)
     if not ok then return json_err(res) end
     if type(res) == "table" and type(res.state) == "table" then
         if res.state.status == "done" then
-            local pending = lua_tools_fix_state.get_pending(tonumber(appid))
+            local pending = lua_tools_fix_state.get_pending(appid)
             if pending then
                 local installed, install_error = lua_tools_fix_state.install_staged_manifest(
-                    tonumber(appid), steam_utils.detect_steam_install_path())
+                    appid, steam_utils.detect_steam_install_path())
                 if not installed then
-                    pcall(lua_tools_fix_state.abort, tonumber(appid))
+                    pcall(lua_tools_fix_state.abort, appid)
                     return json_ok({ success = true, state = {
                         status = "failed", errorCode = install_error,
                         error = "The fix files were extracted, but the Lua manifest could not be installed.",
@@ -1244,7 +1251,7 @@ function GetApplyFixStatus(appid)
                 res.state.category = pending.category
             end
         elseif res.state.status == "failed" or res.state.status == "cancelled" then
-            pcall(lua_tools_fix_state.abort, tonumber(appid))
+            pcall(lua_tools_fix_state.abort, appid)
         end
     end
     return json_ok(res)
@@ -1305,7 +1312,7 @@ end
 function IsCompatToolForced(appid, contentScriptQuery)
     -- Millennium sorts JS keys: { appid, contentScriptQuery }.
     if type(appid) == "table" then appid = appid.appid end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
     -- An online fix is a Windows DLL bundle that only loads under Proton. For
     -- a title that ships a native Linux build the frontend gates Online Fix on
@@ -1320,7 +1327,9 @@ end
 
 function UninstallFix(appid)
     if type(appid) == "table" then appid = appid.appid end
-    local ok, res = pcall(fixes.uninstall_fix, tonumber(appid))
+    appid = lua_tools_domain.positive_appid(appid)
+    if not appid then return json_err("invalid appid") end
+    local ok, res = pcall(fixes.uninstall_fix, appid)
     if not ok then return json_err(res) end
     return json_ok(res)
 end
@@ -1329,8 +1338,35 @@ function UnFixGame(appid, installPath, fixDate)
     if type(appid) == "table" then
         installPath = appid.installPath; fixDate = appid.fixDate; appid = appid.appid
     end
-    appid = tonumber(appid)
+    appid = lua_tools_domain.positive_appid(appid)
     if not appid then return json_err("invalid appid") end
+
+    -- The frontend path is compatibility data, never authority. Resolve the
+    -- target from Steam's appmanifest and require any supplied value to name
+    -- that exact directory before changing state or removing files.
+    local state_ok, install_state = pcall(steam_utils.get_game_install_state, appid)
+    if not state_ok or type(install_state) ~= "table" or not install_state.found
+        or type(install_state.installPath) ~= "string"
+        or install_state.directoryExists == false then
+        return json_ok({ success = false, errorCode = "not_installed",
+            error = "menu.error.notInstalled" })
+    end
+    local path_ok, derived_path = pcall(
+        steam_utils.game_library_path, install_state.installPath)
+    if not path_ok or type(derived_path) ~= "string" then
+        return json_ok({ success = false, errorCode = "invalid_destination",
+            error = "The install path is outside the Steam libraries." })
+    end
+    local supplied_path = tostring(installPath or "")
+    if supplied_path ~= "" then
+        local supplied_ok, supplied_canonical = pcall(
+            steam_utils.game_library_path, supplied_path)
+        if not supplied_ok or supplied_canonical ~= derived_path then
+            return json_ok({ success = false, errorCode = "invalid_destination",
+                error = "The install path does not belong to this game." })
+        end
+    end
+
     local ok, res = pcall(function()
         local ok_sls, sls = pcall(require, "slsteam")
         if ok_sls and sls and sls.unset_fake_appid then
@@ -1347,11 +1383,8 @@ function UnFixGame(appid, installPath, fixDate)
         end
         pcall(lua_tools_fix_state.clear, appid)
         -- Defensive: remove orphan Unsteam files from an older file-based apply.
-        local path = tostring(installPath or "")
-        if path ~= "" then
-            for _, name in ipairs({ "unsteam.dll", "unsteam.ini", "winmm.dll" }) do
-                pcall(fs.remove, fs.join(path, name))
-            end
+        for _, name in ipairs({ "unsteam.dll", "unsteam.ini", "winmm.dll" }) do
+            pcall(fs.remove, fs.join(derived_path, name))
         end
         -- slsteammoon: clear the WINEDLLOVERRIDES launch option a Crack/Online
         -- fix added AND any launcher redirect (FC25-style), restoring the

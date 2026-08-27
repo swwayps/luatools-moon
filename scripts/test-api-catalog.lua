@@ -101,6 +101,12 @@ local files = {
                 unavailable_code = 404,
                 enabled = true,
             },
+            {
+                name = "Malformed persisted",
+                url = "https://reader@evil.invalid/<appid>",
+                enabled = true,
+                custom = true,
+            },
         },
     },
 }
@@ -200,6 +206,8 @@ check(migrated_ryuu and migrated_ryuu.enabled == false, "disabled built-in stays
 check(find_api(all, "API da comunidade") ~= nil, "custom API survives reconciliation")
 check(find_api(all, "Minha SkyAPI") ~= nil,
     "non-default SkyAPI is preserved instead of treated as retired")
+check(find_api(all, "Malformed persisted") == nil,
+    "malformed persisted custom source is excluded during reconciliation")
 local luie = find_api(all, "Luie")
 check(luie and luie.managed == true and luie.needsLogin == true
     and luie.locked == true and luie.url == "",
@@ -353,6 +361,16 @@ remote_manifest = {
             url = "https://community-feed.invalid/<appid>",
             enabled = true,
         },
+        {
+            name = "Remote without placeholder",
+            url = "https://remote.invalid/all.zip",
+            enabled = true,
+        },
+        {
+            name = "Remote with userinfo",
+            url = "https://remote-reader@evil.invalid/<appid>",
+            enabled = true,
+        },
     },
 }
 local fetched = api_manifest.fetch_free_apis_now()
@@ -361,6 +379,10 @@ check(fetched.success and fetched.count == 3, "fetch reports live built-in and i
 check(find_api(all, "Free remota") ~= nil, "fetch adds a new remote API without replacing custom APIs")
 check(find_api(all, "Feed comunitário") ~= nil,
     "fetch imports an unknown builtin_id as a custom remote API")
+check(find_api(all, "Remote without placeholder") == nil,
+    "fetch rejects a remote source without the appid placeholder")
+check(find_api(all, "Remote with userinfo") == nil,
+    "fetch rejects a remote source with userinfo")
 check(find_api(all, "API da comunidade") ~= nil, "fetch preserves existing custom APIs")
 check(find_api(all, "Minha SkyAPI") ~= nil, "fetch preserves the user's non-default SkyAPI")
 check(find_api(all, "TwentyTwo Cloud") == nil, "fetch cannot reintroduce a retired built-in")

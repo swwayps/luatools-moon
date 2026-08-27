@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import pathlib
+import subprocess
 import tempfile
 import threading
 import urllib.parse
@@ -86,6 +87,32 @@ def check(name, condition):
     if not condition:
         raise AssertionError(name)
     print(f"ok   {name}")
+
+
+lua_categories = subprocess.run(
+    [
+        "luajit",
+        "-e",
+        'package.path="plugin/backend/?.lua;"..package.path; '
+        'local d=require("lua_tools_domain"); '
+        'for _,n in ipairs(d.category_names()) do '
+        'print(n.."\\t"..d.category_rank(n)) end',
+    ],
+    cwd=ROOT,
+    check=True,
+    capture_output=True,
+    text=True,
+)
+lua_category_rank = {
+    name: int(rank)
+    for name, rank in (
+        line.split("\t", 1)
+        for line in lua_categories.stdout.splitlines()
+        if "\t" in line
+    )
+}
+check("G0 Python and Lua use the same category ranks",
+      module.CATEGORY_RANK == lua_category_rank)
 
 
 server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)

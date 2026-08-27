@@ -1,5 +1,7 @@
 #!/usr/bin/env luajit
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 package.loaded.lua_tools_fix_index = {}
 package.loaded.lua_tools_fixes = {}
 package.loaded.lua_tools_fix_state = {}

@@ -1,6 +1,7 @@
 local cjson = require("json")
 local http_client = require("http_client")
 local lua_tools_auth = require("lua_tools_auth")
+local domain = require("lua_tools_domain")
 
 local fixes = {}
 local API_BASE_URL = "https://lua.tools"
@@ -9,25 +10,6 @@ local function urlencode(value)
   return (tostring(value or ""):gsub("[^%w%-_%.~]", function(char)
     return string.format("%%%02X", char:byte())
   end))
-end
-
-local function positive_appid(value)
-  local number = tonumber(value)
-  if not number or number <= 0 or number ~= math.floor(number) then return nil end
-  return math.floor(number)
-end
-
-local function valid_fix_id(value)
-  value = tostring(value or "")
-  local namespace, uuid = value:match("^([a-z0-9][a-z0-9_%-]*):(.+)$")
-  if namespace then
-    if #namespace > 32 then return nil end
-    value = uuid
-  end
-  local a, b, c, d, e = value:match("^(%x+)%-(%x+)%-(%x+)%-(%x+)%-(%x+)$")
-  if not a or #a ~= 8 or #b ~= 4 or #c ~= 4 or #d ~= 4 or #e ~= 12 then return nil end
-  local normalized = value:lower()
-  return namespace and (namespace .. ":" .. normalized) or normalized
 end
 
 local function tag_text(entry)
@@ -56,15 +38,6 @@ function fixes.classify(entry)
   return "other"
 end
 
-local CATEGORY_RANK = {
-  voices38 = 10,
-  bypass = 20,
-  online_fix = 30,
-  freetp = 40,
-  other = 50,
-  denuvowo = 90,
-}
-
 local function normalize_tags(tags)
   local result = {}
   for _, tag in ipairs(type(tags) == "table" and tags or {}) do
@@ -81,7 +54,7 @@ end
 
 local function normalize_fix(entry, source_order)
   if type(entry) ~= "table" then return nil end
-  local id = valid_fix_id(entry.id)
+  local id = domain.fix_id(entry.id)
   if not id then return nil end
   local category = fixes.classify(entry)
   return {
@@ -90,7 +63,7 @@ local function normalize_fix(entry, source_order)
     description = tostring(entry.description or ""),
     tags = normalize_tags(entry.tags),
     category = category,
-    rank = CATEGORY_RANK[category] or CATEGORY_RANK.other,
+    rank = domain.category_rank(category) or domain.category_rank("other"),
     requiresPreparation = category == "denuvowo",
     hasManifest = entry.hasManifest == true,
     hasFix = entry.hasFix == true,
@@ -108,7 +81,7 @@ local function auth_configured(deps)
 end
 
 function fixes.get_game(appid, deps)
-  appid = positive_appid(appid)
+  appid = domain.positive_appid(appid)
   if not appid then return { success = false, error = "Invalid Steam app ID.", fixes = {} } end
   deps = deps or {}
   local response = (deps.get or http_client.get)(
@@ -160,7 +133,7 @@ function fixes.list_games(deps)
   end
   local games = {}
   for _, game in ipairs(payload.games) do
-    local appid = positive_appid(type(game) == "table" and game.appid)
+    local appid = domain.positive_appid(type(game) == "table" and game.appid)
     if appid then
       games[#games + 1] = {
         appid = appid,
@@ -175,7 +148,7 @@ function fixes.list_games(deps)
 end
 
 function fixes.resolve_download(fix_id, slot, deps)
-  fix_id = valid_fix_id(fix_id)
+  fix_id = domain.fix_id(fix_id)
   if not fix_id or (slot ~= "manifest" and slot ~= "fix") then
     return nil, { code = "invalid_download", message = "Invalid lua.tools fix download." }
   end

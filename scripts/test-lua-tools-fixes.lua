@@ -1,5 +1,7 @@
 #!/usr/bin/env luajit
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 package.loaded.json = {}
 package.loaded.http_client = {}
 package.loaded.lua_tools_auth = {}

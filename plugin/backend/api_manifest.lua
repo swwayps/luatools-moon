@@ -41,6 +41,32 @@ local RETIRED_BUILTIN_IDS = {
     ["moon-internal"] = true,
 }
 
+-- validate_source_url(url) -> url, or nil + error message.
+-- A custom source is fetched by the download worker and its payload becomes the
+-- game's Lua script and depot manifests. The endpoint used to accept ANY
+-- non-empty string, so "file:///etc/passwd" was a usable "source" and a URL could
+-- carry userinfo or a CRLF. A source must therefore be an http(s) URL, must carry
+-- the <appid> placeholder (otherwise it is not a per-app source at all), and must
+-- not smuggle a different authority past the reader through userinfo.
+--
+-- http is allowed on purpose: whether a mirror serves TLS is the operator's
+-- deployment choice, and refusing it would break working sources.
+local function validate_source_url(url)
+    if type(url) ~= "string" or url == "" then
+        return nil, "Invalid payload: name and url are required"
+    end
+    local checked, reason = guard.https_url(url, { allow_http = true })
+    if not checked then
+        return nil, "Source URL rejected (" .. tostring(reason)
+            .. "): it must be an http or https URL"
+    end
+    if not checked:find("<appid>", 1, true) then
+        return nil, "Source URL must contain the <appid> placeholder"
+    end
+    return checked
+end
+api_manifest.validate_source_url = validate_source_url
+
 local function copy_table(value)
     if type(value) ~= "table" then return value end
     local result = {}
@@ -110,8 +136,10 @@ local function reconcile_catalog(defaults, user_data)
         custom.builtin_id = nil
         custom.custom = true
         custom.removed = nil
+        local checked_url = validate_source_url(custom.url)
         if type(custom.name) == "string" and custom.name ~= ""
-            and type(custom.url) == "string" and custom.url ~= "" then
+            and checked_url then
+            custom.url = checked_url
             table.insert(reconciled.api_list, custom)
         end
     end
@@ -266,16 +294,17 @@ function api_manifest.init_apis()
             local loaded = 0
             for _, api in ipairs(remote.api_list) do
                 local id = builtin_id(api, false)
+                local checked_url = validate_source_url(api.url)
                 if not (id and RETIRED_BUILTIN_IDS[id])
-                    and type(api.url) == "string" and api.url ~= ""
-                    and not existing_urls[api.url] then
+                    and checked_url and not existing_urls[checked_url] then
                     local item = copy_table(api)
+                    item.url = checked_url
                     item.builtin_id = nil
                     item.custom = true
                     item.remote = true
                     item.removed = nil
                     table.insert(data.api_list, item)
-                    existing_urls[item.url] = true
+                    existing_urls[checked_url] = true
                     loaded = loaded + 1
                 end
             end
@@ -339,20 +368,21 @@ function api_manifest.fetch_free_apis_now()
 
     for _, api in ipairs(remote.api_list) do
         local id = builtin_id(api, false) or live_builtin_by_url[api.url]
+        local checked_url = validate_source_url(api.url)
         if id and RETIRED_BUILTIN_IDS[id] then
             -- Explicitly retired providers never return through remote refresh.
         elseif id and live_builtins[id] then
             -- The shipped copy is authoritative and already present.
             loaded = loaded + 1
-        elseif type(api.url) == "string" and api.url ~= ""
-            and not existing_urls[api.url] then
+        elseif checked_url and not existing_urls[checked_url] then
             local item = copy_table(api)
+            item.url = checked_url
             item.builtin_id = nil
             item.custom = true
             item.remote = true
             item.removed = nil
             table.insert(retained, item)
-            existing_urls[item.url] = true
+            existing_urls[checked_url] = true
             loaded = loaded + 1
         end
     end
@@ -373,35 +403,15 @@ function api_manifest.load_api_manifest()
     local apis = {}
     for _, api in ipairs(data.api_list) do
         if api.enabled ~= false and api.removed ~= true then
-            table.insert(apis, api)
+            if is_managed_api(api) or validate_source_url(api.url) then
+                table.insert(apis, api)
+            else
+                logger.warn("LuaTools: ignoring malformed source '"
+                    .. tostring(api.name or "Unknown") .. "'")
+            end
         end
     end
     return apis
-end
-
--- validate_source_url(url) -> url, or nil + error message.
--- A custom source is fetched by the download worker and its payload becomes the
--- game's Lua script and depot manifests. The endpoint used to accept ANY
--- non-empty string, so "file:///etc/passwd" was a usable "source" and a URL could
--- carry userinfo or a CRLF. A source must therefore be an http(s) URL, must carry
--- the <appid> placeholder (otherwise it is not a per-app source at all), and must
--- not smuggle a different authority past the reader through userinfo.
---
--- http is allowed on purpose: whether a mirror serves TLS is the operator's
--- deployment choice, and refusing it would break working sources.
-function api_manifest.validate_source_url(url)
-    if type(url) ~= "string" or url == "" then
-        return nil, "Invalid payload: name and url are required"
-    end
-    local checked, reason = guard.https_url(url, { allow_http = true })
-    if not checked then
-        return nil, "Source URL rejected (" .. tostring(reason)
-            .. "): it must be an http or https URL"
-    end
-    if not checked:find("<appid>", 1, true) then
-        return nil, "Source URL must contain the <appid> placeholder"
-    end
-    return checked
 end
 
 function api_manifest.add_custom_api(payload, deps)
