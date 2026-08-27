@@ -356,10 +356,36 @@ function api_manifest.load_api_manifest()
     local apis = {}
     for _, api in ipairs(data.api_list) do
         if api.enabled ~= false and api.removed ~= true then
-            table.insert(apis, api)
+            if api_manifest.source_transport_ok(api) then
+                table.insert(apis, api)
+            else
+                logger.warn("LuaTools: skipping source with an unusable "
+                    .. "transport: " .. tostring(api.name))
+            end
         end
     end
     return apis
+end
+
+-- source_transport_ok(api) -> boolean.
+-- A source's payload becomes the game's Lua script and depot manifests, so over
+-- plaintext http whoever is on the path decides that content, and every AppID
+-- the user installs travels in the clear. https is therefore required.
+--
+-- One built-in has no TLS at all (it is reachable only by bare IP, which cannot
+-- have a valid certificate). Rather than let plaintext pass unnoticed anywhere,
+-- that entry declares `"insecure": true` in api.defaults.json: the exposure
+-- becomes a visible property of the catalogue instead of an accident, and any
+-- other plaintext source is refused. The marker only exempts http — never
+-- file://, ftp:// or anything else.
+function api_manifest.source_transport_ok(api)
+    if type(api) ~= "table" then return false end
+    local url = tostring(api.url or "")
+    -- Managed providers (lua.tools) carry no URL of their own.
+    if url == "" then return true end
+    if guard.https_url(url) then return true end
+    return api.insecure == true
+        and guard.https_url(url, { allow_http = true }) ~= nil
 end
 
 -- validate_source_url(url) -> url, or nil + error message.

@@ -1323,7 +1323,7 @@ function ResolveOnlineFix(appid, contentScriptQuery, gameName)
         return {
             success = true,
             found = true,
-            url = "http://api.perondepot.xyz/all/" .. entry.href,
+            url = "https://api.perondepot.xyz/all/" .. entry.href,
             name = entry.name,
         }
     end)

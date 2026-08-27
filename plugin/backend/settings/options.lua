@@ -23,14 +23,6 @@ options.SETTINGS_GROUPS = {
                 metadata = {dynamicChoices = "locales"}
             },
             {
-                key = "donateKeys",
-                label = "Donate Keys",
-                option_type = "toggle",
-                description = "Allow LuaTools to donate spare Steam keys. (placeholder option)",
-                default = true,
-                metadata = {yesLabel = "Yes", noLabel = "No"}
-            },
-            {
                 key = "theme",
                 label = "Theme",
                 option_type = "select",

@@ -46,10 +46,19 @@ function manifests.check(appid, deps)
     }
   end
 
+  -- allow_http is explicit here because the transport layer now requires TLS by
+  -- default and this endpoint has no TLS: it is reachable only by bare IP, which
+  -- cannot present a valid certificate. The exposure is real and deliberate —
+  -- the queried AppID and the fixed discovery User-Agent both travel in the
+  -- clear, and an observer on the path can force the "unavailable" answer. The
+  -- failure mode is fail-closed (the source reports unavailable), so nothing is
+  -- installed on a forged reply. Moving this probe behind a hostname with a
+  -- certificate is the actual fix and needs a server-side change.
   local response = (deps.get or http_client.get)(
     DISCOVERY_URL .. "?appid=" .. tostring(appid), {
       headers = { ["User-Agent"] = DISCOVERY_USER_AGENT },
       timeout = 8,
+      allow_http = true,
     })
   if type(response) ~= "table" or tonumber(response.status) ~= 200 then
     return { available = false, locked = false, needsLogin = true, status = "unavailable" }

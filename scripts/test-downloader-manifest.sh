@@ -5,7 +5,7 @@
 # a fix/crack archive shipped -- so a crack loader with an arbitrary name
 # (voices38, an emulator's steam_api64, ...) is overridden while the game's own
 # DLLs are left alone. This drives the real downloader.sh end to end over a
-# file:// URL, with the bundled 7zz substituted by the system 7z.
+# loopback http URL, with the bundled 7zz substituted by the system 7z.
 #
 # Run from the repo root:  bash scripts/test-downloader-manifest.sh
 set -u
@@ -19,7 +19,12 @@ if ! command -v curl >/dev/null 2>&1; then echo "SKIP: no curl"; exit 0; fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 TMP="$(mktemp -d)"
-trap 'rm -rf "$TMP"' EXIT
+# file:// is no longer a usable source (the worker refuses it), so the archive
+# fixtures are served over loopback http and the worker is told plaintext is
+# expected via ALLOW_HTTP=1.
+. "$REPO/scripts/testlib-httpd.sh"
+trap 'stop_static_server 2>/dev/null || true; rm -rf "$TMP"' EXIT
+start_static_server "$TMP" || { echo "SKIP: no python3 http server"; exit 0; }
 
 # Lay out a fake plugin tree so downloader.sh resolves $SCRIPT_DIR/../bin/7zz.
 mkdir -p "$TMP/backend/scripts" "$TMP/backend/bin"
@@ -42,8 +47,8 @@ mkfile "$SRC/readme.txt"
 
 GAME1="$TMP/game1"
 mkfile "$GAME1/d3d11.dll"   # the game's own DLL -- must be ignored
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t1.zip" "$TMP/t1dl.zip" "$GAME1" "$TMP/t1state.json" >/dev/null 2>&1
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t1.zip" "$TMP/t1dl.zip" "$GAME1" "$TMP/t1state.json" >/dev/null 2>&1
 
 MAN1="$GAME1/.slssteam_fix_dlls"
 check "T1 manifest exists" "[ -f '$MAN1' ]"
@@ -70,8 +75,8 @@ GAME2="$TMP/game2"; mkdir -p "$GAME2"
 # extract, or delete files that existed before this operation.
 PREEXISTING_SRC="$TMP/preexisting-src"; mkfile "$PREEXISTING_SRC/user-owned.txt"
 ( cd "$PREEXISTING_SRC" && "$SEVENZ_SYS" a -tzip "$GAME2/user-backup.zip" . >/dev/null 2>&1 )
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t2.zip" "$TMP/t2dl.zip" "$GAME2" "$TMP/t2state.json" >/dev/null 2>&1
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t2.zip" "$TMP/t2dl.zip" "$GAME2" "$TMP/t2state.json" >/dev/null 2>&1
 
 MAN2="$GAME2/.slssteam_fix_dlls"
 check "T2 manifest exists" "[ -f '$MAN2' ]"
@@ -97,8 +102,8 @@ mkfile "$LSRC/relauncher.exe"    # substring only -- must be ignored
 
 GAME3="$TMP/game3"
 mkfile "$GAME3/launcher.exe"     # the game's OWN launcher -- must be ignored
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t3.zip" "$TMP/t3dl.zip" "$GAME3" "$TMP/t3state.json" >/dev/null 2>&1
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t3.zip" "$TMP/t3dl.zip" "$GAME3" "$TMP/t3state.json" >/dev/null 2>&1
 
 LMAN3="$GAME3/.slssteam_fix_launchers"
 check "T3 launcher manifest exists" "[ -f '$LMAN3' ]"
@@ -117,8 +122,8 @@ mkfile "$NSRC/steam_api64.dll"
 mkfile "$NSRC/game.exe"
 ( cd "$NSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t4.zip" . >/dev/null 2>&1 )
 GAME4="$TMP/game4"; mkdir -p "$GAME4"
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t4.zip" "$TMP/t4dl.zip" "$GAME4" "$TMP/t4state.json" >/dev/null 2>&1
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t4.zip" "$TMP/t4dl.zip" "$GAME4" "$TMP/t4state.json" >/dev/null 2>&1
 check "T4 no launcher manifest" "[ ! -f '$GAME4/.slssteam_fix_launchers' ]"
 
 # ---------------------------------------------------------------------------
@@ -131,8 +136,8 @@ mkfile "$RSRC/z-target"; printf 'NEW-TARGET' > "$RSRC/z-target"
 ( cd "$RSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t5.zip" . >/dev/null 2>&1 )
 GAME5="$TMP/game5"; mkdir -p "$GAME5/z-target"
 printf 'ORIGINAL' > "$GAME5/a-overwrite.dll"
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t5.zip" "$TMP/t5dl.zip" "$GAME5" "$TMP/t5state.json" >/dev/null 2>&1 || true
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t5.zip" "$TMP/t5dl.zip" "$GAME5" "$TMP/t5state.json" >/dev/null 2>&1 || true
 check "T5 conflict reports apply failure" \
   "grep -q '\"errorCode\": \"apply_failed\"' '$TMP/t5state.json'"
 check "T5 rollback restores overwritten file" \
@@ -145,8 +150,8 @@ SSRC="$TMP/t6src"; mkfile "$SSRC/linked/escape.dll"
 ( cd "$SSRC" && "$SEVENZ_SYS" a -tzip "$TMP/t6.zip" . >/dev/null 2>&1 )
 GAME6="$TMP/game6"; OUTSIDE="$TMP/outside"; mkdir -p "$GAME6" "$OUTSIDE"
 ln -s "$OUTSIDE" "$GAME6/linked"
-EXTRACT_NESTED=1 MAX_TIME=0 bash "$DL" \
-  "file://$TMP/t6.zip" "$TMP/t6dl.zip" "$GAME6" "$TMP/t6state.json" >/dev/null 2>&1 || true
+EXTRACT_NESTED=1 MAX_TIME=0 ALLOW_HTTP=1 bash "$DL" \
+  "$HTTPD_URL/t6.zip" "$TMP/t6dl.zip" "$GAME6" "$TMP/t6state.json" >/dev/null 2>&1 || true
 check "T6 target symlink is rejected" \
   "grep -q '\"errorCode\": \"apply_failed\"' '$TMP/t6state.json'"
 check "T6 target symlink cannot escape game directory" "[ ! -e '$OUTSIDE/escape.dll' ]"

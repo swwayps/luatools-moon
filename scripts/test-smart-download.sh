@@ -2,6 +2,9 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT="$ROOT/plugin/backend/scripts/smart_download.sh"
+# The worker requires https unless the caller states that a plaintext source is
+# expected, so every run here passes ALLOW_HTTP=1: the fixtures are served by a
+# loopback http server started below.
 TMP="$(mktemp -d)"
 PASS=0; FAIL=0; SRV_PID=""
 trap '[[ -n "$SRV_PID" ]] && kill "$SRV_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
@@ -129,7 +132,7 @@ for _ in $(seq 1 50); do PORT="$(head -1 "$TMP/port" 2>/dev/null)"; [[ -n "$PORT
 # of a ZIP. The credential must reach curl without becoming part of the URL.
 DL="$TMP/dl"; mkdir -p "$DL"; CL="$TMP/cl.bin"; : > "$CL"
 write_candidate "$CL" 0 "Luie" "http://127.0.0.1:$PORT/luie.lua" 200 "test-secret"
-"$SCRIPT" 1134710 "$DL/state.json" "$DL" "$CL" "$TMP/no-coverage" >/dev/null 2>&1 || true
+ALLOW_HTTP=1 "$SCRIPT" 1134710 "$DL/state.json" "$DL" "$CL" "$TMP/no-coverage" >/dev/null 2>&1 || true
 check "authenticated bare Lua source is collected" \
   '[[ -f "$DL/extracted_1134710/source_0000/1134710.lua" ]]'
 check "bare Lua source never embeds its bearer in the request URL" \
@@ -140,7 +143,7 @@ check "bare Lua source never embeds its bearer in the request URL" \
 D0A="$TMP/d0a"; mkdir -p "$D0A"; C0A="$TMP/c0a.bin"; : > "$C0A"
 write_candidate "$C0A" 0 "Slow connection" "http://127.0.0.1:$PORT/slow.zip" 200
 START=$(date +%s%3N)
-COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0A/state.json" "$D0A" "$C0A" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=0.2 SPEED_TIME=1 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0A/state.json" "$D0A" "$C0A" "$TMP/no-coverage" >/dev/null 2>&1
 ELAPSED=$(( $(date +%s%3N) - START ))
 check "sub-kilobyte healthy transfer is accepted" '[[ -f "$D0A/extracted_1134710/source_0000/payload.bin" ]]'
 check "slow transfer continues beyond fast-path deadline" '[[ "$ELAPSED" -ge 1000 ]]'
@@ -149,7 +152,7 @@ check "slow transfer continues beyond fast-path deadline" '[[ "$ELAPSED" -ge 100
 # byte (slow network, TLS, or on-demand archive generation).
 D0B="$TMP/d0b"; mkdir -p "$D0B"; C0B="$TMP/c0b.bin"; : > "$C0B"
 write_candidate "$C0B" 0 "Late first byte" "http://127.0.0.1:$PORT/late.zip" 200
-COLLECTION_DEADLINE=0.2 SPEED_TIME=2 "$SCRIPT" 1134710 "$D0B/state.json" "$D0B" "$C0B" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=0.2 SPEED_TIME=2 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0B/state.json" "$D0B" "$C0B" "$TMP/no-coverage" >/dev/null 2>&1
 check "first source can start after fast-path deadline" '[[ -f "$D0B/extracted_1134710/source_0000/1134710.lua" ]]'
 
 # A package is not a usable fallback merely because it has the right Lua
@@ -158,7 +161,7 @@ check "first source can start after fast-path deadline" '[[ -f "$D0B/extracted_1
 D0D="$TMP/d0d"; mkdir -p "$D0D"; C0D="$TMP/c0d.bin"; : > "$C0D"
 write_candidate "$C0D" 0 "Fast keyless" "http://127.0.0.1:$PORT/keyless.zip" 200
 write_candidate "$C0D" 1 "Delayed usable" "http://127.0.0.1:$PORT/late.zip" 200
-COLLECTION_DEADLINE=0.2 SPEED_TIME=2 "$SCRIPT" 1134710 "$D0D/state.json" "$D0D" "$C0D" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=0.2 SPEED_TIME=2 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0D/state.json" "$D0D" "$C0D" "$TMP/no-coverage" >/dev/null 2>&1
 check "keyless package cannot cancel delayed usable source" \
   '[[ -f "$D0D/extracted_1134710/source_0001/1134710.lua" ]]'
 
@@ -166,7 +169,7 @@ check "keyless package cannot cancel delayed usable source" \
 # extractor followed .source-name when writing coordinator metadata.
 D0E="$TMP/d0e"; mkdir -p "$D0E"; C0E="$TMP/c0e.bin"; : > "$C0E"
 write_candidate "$C0E" 0 "Linked metadata" "http://127.0.0.1:$PORT/symlink.zip" 200
-if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0E/state.json" "$D0E" "$C0E" "$TMP/no-coverage" >/dev/null 2>&1; then
+if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0E/state.json" "$D0E" "$C0E" "$TMP/no-coverage" >/dev/null 2>&1; then
   SYMLINK_RC=0
 else
   SYMLINK_RC=$?
@@ -179,7 +182,7 @@ check "archive metadata symlink is rejected" \
 D0C="$TMP/d0c"; mkdir -p "$D0C"; C0C="$TMP/c0c.bin"; : > "$C0C"
 write_candidate "$C0C" 0 "Stalled" "http://127.0.0.1:$PORT/dead.zip" 200
 START=$(date +%s%3N)
-if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 "$SCRIPT" 1134710 "$D0C/state.json" "$D0C" "$C0C" "$TMP/no-coverage" >/dev/null 2>&1; then
+if COLLECTION_DEADLINE=0.2 SPEED_TIME=1 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0C/state.json" "$D0C" "$C0C" "$TMP/no-coverage" >/dev/null 2>&1; then
   STALLED_RC=0
 else
   STALLED_RC=$?
@@ -196,7 +199,7 @@ check "stalled source uses bounded inactivity timeout" '[[ "$ELAPSED" -ge 800 &&
 D0F="$TMP/d0f"; mkdir -p "$D0F"; C0F="$TMP/c0f.bin"; : > "$C0F"
 write_candidate "$C0F" 0 "Missing A" "http://127.0.0.1:$PORT/missing-a.zip" 200
 write_candidate "$C0F" 1 "Missing B" "http://127.0.0.1:$PORT/missing-b.zip" 200
-"$SCRIPT" 1134710 "$D0F/state.json" "$D0F" "$C0F" "$TMP/no-coverage" >/dev/null 2>&1 || true
+ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0F/state.json" "$D0F" "$C0F" "$TMP/no-coverage" >/dev/null 2>&1 || true
 check "all-404 response is classified as not found" \
   '[[ "$(state_field "$D0F/state.json" errorCode)" == "not_found" ]]'
 check "all-404 response never counts its error bodies as downloaded data" \
@@ -208,7 +211,7 @@ check "all-404 message does not blame the connection" \
 D0G="$TMP/d0g"; mkdir -p "$D0G"; C0G="$TMP/c0g.bin"; : > "$C0G"
 write_candidate "$C0G" 0 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
 START=$(date +%s%3N)
-SPEED_TIME=9 "$SCRIPT" 1134710 "$D0G/state.json" "$D0G" "$C0G" "$TMP/no-coverage" "$D0G/stop" >/dev/null 2>&1 &
+SPEED_TIME=9 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D0G/state.json" "$D0G" "$C0G" "$TMP/no-coverage" "$D0G/stop" >/dev/null 2>&1 &
 CANCEL_PID=$!
 sleep 0.2
 printf cancel > "$D0G/stop"
@@ -223,7 +226,7 @@ D1="$TMP/d1"; mkdir -p "$D1"; C1="$TMP/c1.bin"; : > "$C1"
 CUSTOM_NAME=$'custom/name\tline\nbreak'
 write_candidate "$C1" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C1" 1 "$CUSTOM_NAME" "http://127.0.0.1:$PORT/other.zip" 200
-COLLECTION_DEADLINE=3 COVERAGE_GRACE=0.2 "$SCRIPT" 1134710 "$D1/state.json" "$D1" "$C1" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=3 COVERAGE_GRACE=0.2 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D1/state.json" "$D1" "$C1" "$TMP/no-coverage" >/dev/null 2>&1
 check "all healthy sources collected" '[[ "$(state_field "$D1/state.json" status)" == "collected" ]]'
 check "first indexed source preserved" '[[ -f "$D1/extracted_1134710/source_0000/1134710.lua" ]]'
 check "second indexed source preserved" '[[ -f "$D1/extracted_1134710/source_0001/1134710.lua" ]]'
@@ -233,7 +236,7 @@ check "custom display name preserved as metadata" '[[ "$(cat "$D1/extracted_1134
 # Configured non-200 success code must be accepted.
 D2="$TMP/d2"; mkdir -p "$D2"; C2="$TMP/c2.bin"; : > "$C2"
 write_candidate "$C2" 0 "Created" "http://127.0.0.1:$PORT/created.zip" 201
-COLLECTION_DEADLINE=2 "$SCRIPT" 1134710 "$D2/state.json" "$D2" "$C2" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=2 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D2/state.json" "$D2" "$C2" "$TMP/no-coverage" >/dev/null 2>&1
 check "configured success code accepted" '[[ -f "$D2/extracted_1134710/source_0000/1134710.lua" ]]'
 
 # Exact cached coverage allows a short grace instead of awaiting a dead peer.
@@ -242,7 +245,7 @@ write_candidate "$C3" 0 "Covered" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C3" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
 printf '1134711\t9001\n' > "$TMP/coverage"
 START=$(date +%s%3N)
-COLLECTION_DEADLINE=5 COVERAGE_GRACE=0.2 SPEED_TIME=9 "$SCRIPT" 1134710 "$D3/state.json" "$D3" "$C3" "$TMP/coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=5 COVERAGE_GRACE=0.2 SPEED_TIME=9 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D3/state.json" "$D3" "$C3" "$TMP/coverage" >/dev/null 2>&1
 ELAPSED=$(( $(date +%s%3N) - START ))
 check "exact coverage closes collection early" '[[ "$ELAPSED" -lt 2000 ]]'
 check "covered source collected" '[[ -f "$D3/extracted_1134710/source_0000/1134711_9001.manifest" ]]'
@@ -255,7 +258,7 @@ D3A="$TMP/d3a"; mkdir -p "$D3A"; C3A="$TMP/c3a.bin"; : > "$C3A"
 write_candidate "$C3A" 0 "Covered" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C3A" 1 "Large active" "http://127.0.0.1:$PORT/paced.zip" 200
 printf '1134711\t9001\n' > "$TMP/coverage-active"
-COLLECTION_DEADLINE=0.3 COVERAGE_GRACE=0.1 SPEED_TIME=9 "$SCRIPT" 1134710 "$D3A/state.json" "$D3A" "$C3A" "$TMP/coverage-active" >/dev/null 2>&1
+COLLECTION_DEADLINE=0.3 COVERAGE_GRACE=0.1 SPEED_TIME=9 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D3A/state.json" "$D3A" "$C3A" "$TMP/coverage-active" >/dev/null 2>&1
 check "active large source survives coverage grace and startup deadline" '[[ -f "$D3A/extracted_1134710/source_0001/payload.bin" ]]'
 
 # Once a small package makes the aggregate usable, a healthy larger source may
@@ -266,7 +269,7 @@ write_candidate "$C3AA" 0 "Fast usable" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C3AA" 1 "Large enrichment" "http://127.0.0.1:$PORT/paced.zip" 200
 START=$(date +%s%3N)
 COLLECTION_DEADLINE=0.1 ENRICHMENT_MAX=0.2 ACTIVE_PROGRESS_WINDOW=2 SPEED_TIME=2 \
-  "$SCRIPT" 1134710 "$D3AA/state.json" "$D3AA" "$C3AA" "$TMP/no-coverage" >/dev/null 2>&1
+  ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D3AA/state.json" "$D3AA" "$C3AA" "$TMP/no-coverage" >/dev/null 2>&1
 ELAPSED=$(( $(date +%s%3N) - START ))
 check "active enrichment is not truncated by the fast-path ceiling" \
   '[[ -f "$D3AA/extracted_1134710/source_0001/1134712_9002.manifest" ]]'
@@ -279,7 +282,7 @@ write_candidate "$C3B" 0 "Invalid exact name" "http://127.0.0.1:$PORT/invalid.zi
 write_candidate "$C3B" 1 "Valid slower peer" "http://127.0.0.1:$PORT/othercovered.zip" 200
 printf '1134711\t9001\n' > "$TMP/coverage-invalid"
 START=$(date +%s%3N)
-COLLECTION_DEADLINE=3 COVERAGE_GRACE=0.2 "$SCRIPT" 1134710 "$D3B/state.json" "$D3B" "$C3B" "$TMP/coverage-invalid" >/dev/null 2>&1
+COLLECTION_DEADLINE=3 COVERAGE_GRACE=0.2 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D3B/state.json" "$D3B" "$C3B" "$TMP/coverage-invalid" >/dev/null 2>&1
 ELAPSED=$(( $(date +%s%3N) - START ))
 check "invalid named manifest cannot satisfy early coverage" '[[ "$ELAPSED" -ge 1500 ]]'
 check "invalid source itself is still collected for its valid Lua" '[[ -f "$D3B/extracted_1134710/source_0000/1134710.lua" ]]'
@@ -291,7 +294,7 @@ D4="$TMP/d4"; mkdir -p "$D4"; C4="$TMP/c4.bin"; : > "$C4"
 write_candidate "$C4" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C4" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
 START=$(date +%s%3N)
-COLLECTION_DEADLINE=2 SPEED_TIME=9 "$SCRIPT" 1134710 "$D4/state.json" "$D4" "$C4" "$TMP/no-coverage" >/dev/null 2>&1
+COLLECTION_DEADLINE=2 SPEED_TIME=9 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D4/state.json" "$D4" "$C4" "$TMP/no-coverage" >/dev/null 2>&1
 ELAPSED=$(( $(date +%s%3N) - START ))
 # The exact close time may be earlier when the usable peer finishes while curl
 # processes are still being started. What matters is that the unhealthy peer
@@ -304,13 +307,13 @@ check "successful peer survives deadline" '[[ -f "$D4/extracted_1134710/source_0
 D4A="$TMP/d4a"; mkdir -p "$D4A"; C4A="$TMP/c4a.bin"; : > "$C4A"
 write_candidate "$C4A" 0 "Fast" "http://127.0.0.1:$PORT/fast.zip" 200
 write_candidate "$C4A" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
-COLLECTION_DEADLINE=1 SPEED_TIME=4 "$SCRIPT" 1134710 "$D4A/state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 &
+COLLECTION_DEADLINE=1 SPEED_TIME=4 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D4A/state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 &
 FIRST_PID=$!
 for _ in $(seq 1 100); do
   [[ -f "$D4A/extracted_1134710/source_0000/1134710.lua" ]] && break
   sleep 0.02
 done
-"$SCRIPT" 1134710 "$D4A/duplicate-state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 || true
+ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D4A/duplicate-state.json" "$D4A" "$C4A" "$TMP/no-coverage" >/dev/null 2>&1 || true
 wait "$FIRST_PID"
 check "duplicate worker cannot erase active extraction" \
   '[[ -f "$D4A/extracted_1134710/source_0000/1134710.lua" ]]'
@@ -320,7 +323,7 @@ check "duplicate worker cannot erase active extraction" \
 D5="$TMP/d5"; mkdir -p "$D5"; C5="$TMP/c5.bin"; : > "$C5"
 write_candidate "$C5" 0 "Paced" "http://127.0.0.1:$PORT/paced.zip" 200
 write_candidate "$C5" 1 "Dead" "http://127.0.0.1:$PORT/dead.zip" 200
-COLLECTION_DEADLINE=1.5 SPEED_TIME=9 "$SCRIPT" 1134710 "$D5/state.json" "$D5" "$C5" "$TMP/no-coverage" >/dev/null 2>&1 &
+COLLECTION_DEADLINE=1.5 SPEED_TIME=9 ALLOW_HTTP=1 "$SCRIPT" 1134710 "$D5/state.json" "$D5" "$C5" "$TMP/no-coverage" >/dev/null 2>&1 &
 WORKER_PID=$!
 : > "$D5/observed"
 JSON_ERRORS=0
@@ -353,8 +356,8 @@ raise SystemExit(0 if any(1 < pct < 99 for pct in pcts) else 1)
 PY'
 
 # Existing pure progress contract remains monotonic and capped.
-check "progress never decreases" '[[ "$("$SCRIPT" mono_pct 50 30)" == 50 ]]'
-check "progress remains below terminal 100" '[[ "$("$SCRIPT" mono_pct 50 100)" == 99 ]]'
+check "progress never decreases" '[[ "$(ALLOW_HTTP=1 "$SCRIPT" mono_pct 50 30)" == 50 ]]'
+check "progress remains below terminal 100" '[[ "$(ALLOW_HTTP=1 "$SCRIPT" mono_pct 50 100)" == 99 ]]'
 
 echo
 printf 'passed: %d, failed: %d\n' "$PASS" "$FAIL"

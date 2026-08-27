@@ -1,7 +1,7 @@
 -- onlinefix.lua  (Linux overlay for luatools-moon)
 --
 -- Resolves a Steam store-page game name to an online-fix archive on the
--- perondepot mirror (http://api.perondepot.xyz/all/), which is an nginx
+-- perondepot mirror (https://api.perondepot.xyz/all/), which is an nginx
 -- autoindex of .rar files named:
 --
 --   <Game Name> по сети - <code>_Fix_Repair_<Store>[_Vn]_Generic.rar
@@ -131,7 +131,7 @@ end
 -- total time budget, and prefer a stale copy over hanging.
 --
 -- deps = { get(url, opts), now(), read() -> {body=, at=}, write(body), ttl, budget }
-onlinefix.INDEX_URL = "http://api.perondepot.xyz/all/"
+onlinefix.INDEX_URL = "https://api.perondepot.xyz/all/"
 onlinefix.INDEX_TTL = 600      -- seconds a cached index stays fresh
 onlinefix.INDEX_BUDGET = 12    -- seconds of wall clock this call may consume
 onlinefix.INDEX_TIMEOUT = 6    -- seconds per attempt

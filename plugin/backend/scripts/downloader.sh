@@ -94,8 +94,31 @@ if [ -n "$HEADER_FILE" ] && [ -r "$HEADER_FILE" ]; then
   CURL_HEADERS=(--header "@$HEADER_FILE")
 fi
 
+# Transport policy. curl was previously invoked with no --proto restriction, so
+# the scheme was whatever the URL happened to be: file:// turned this worker into
+# a local-file reader, and an https download could be redirected down to http.
+# The scheme is decided here, from the URL, and pinned for redirects too.
+#
+# ALLOW_HTTP=1 is the caller's explicit statement that this source has no TLS at
+# all (one built-in catalogue entry is reachable only by bare IP). Without it,
+# plaintext is refused rather than silently accepted.
+case "$URL" in
+  https://*)
+    CURL_PROTO=(--proto '=https' --proto-redir '=https') ;;
+  http://*)
+    if [ "${ALLOW_HTTP:-0}" = "1" ]; then
+      CURL_PROTO=(--proto '=http,https' --proto-redir '=http,https')
+    else
+      write_failed "This download source does not use a secure connection." "insecure_source"
+      exit 1
+    fi ;;
+  *)
+    write_failed "This download source uses an unsupported address type." "unsupported_scheme"
+    exit 1 ;;
+esac
+
 # Best-effort total size for a real progress bar.
-TOTAL="$(curl -sIL -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
+TOTAL="$(curl -sIL "${CURL_PROTO[@]}" -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
   --max-time 6 "${CURL_HEADERS[@]}" "$URL" 2>/dev/null | tr -d '\r' \
   | awk -F': ' 'tolower($1)=="content-length"{v=$2} END{print v+0}')"
 [ -z "$TOTAL" ] && TOTAL=0
@@ -103,7 +126,7 @@ TOTAL="$(curl -sIL -A "$USER_AGENT" --connect-timeout "$CONNECT_TIMEOUT" \
 # Download in the background so we can poll progress from the partial file.
 PART_PATH="${DEST_PATH}.part.$$"
 HTTP_CODE_PATH="${PART_PATH}.http"
-curl --fail -L -A "$USER_AGENT" \
+curl --fail -L "${CURL_PROTO[@]}" -A "$USER_AGENT" \
   --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TIME" \
   --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
   --write-out '%{http_code}' "${CURL_HEADERS[@]}" -o "$PART_PATH" "$URL" \
@@ -151,6 +174,29 @@ mv -f "$PART_PATH" "$DEST_PATH" || {
   exit 1
 }
 slog "download ok ($(stat -c %s "$DEST_PATH" 2>/dev/null || echo '?') bytes)"
+
+# Integrity. When the caller states the artefact's expected sha256, verify it
+# BEFORE anything is unpacked over a game directory. A malformed expectation is a
+# failure, never "no expectation given": a typo must not silently disable the
+# check. When no digest is supplied the download proceeds unverified, which is
+# the current reality for every source — the catalogues do not publish digests
+# yet, and making this mandatory is a server-side change.
+if [ -n "${EXPECTED_SHA256:-}" ]; then
+  want="$(printf '%s' "$EXPECTED_SHA256" | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+  if ! printf '%s' "$want" | grep -qE '^[0-9a-f]{64}$'; then
+    slog "expected digest is malformed"
+    write_failed "The expected file signature for this download is not valid." "bad_digest"
+    exit 1
+  fi
+  got="$(sha256sum "$DEST_PATH" 2>/dev/null | cut -d' ' -f1)"
+  if [ "$got" != "$want" ]; then
+    slog "digest mismatch (want=$want got=${got:-none})"
+    rm -f "$DEST_PATH"
+    write_failed "The download could not be verified — it does not match the expected file signature. Try again or pick another source." "digest_mismatch"
+    exit 1
+  fi
+  slog "digest verified"
+fi
 
 if [ -n "$EXTRACT_DIR" ]; then
   write_state "extracting" "$TOTAL" "$TOTAL"

@@ -56,7 +56,7 @@ unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENIT
 
 # NUL records: source-index, display-name, URL, accepted HTTP status, optional
 # bearer token. The token is copied into a private curl header file, never argv.
-declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE C_REASON C_AUTH_FILE
+declare -a C_INDEX C_NAME C_URL C_CODE C_ZIP C_HEAD C_PIPE C_TOTAL_FILE C_TOTAL C_PID C_PARSE_PID C_STATE C_REASON C_AUTH_FILE C_PROTO
 n=0
 exec 3< "$CANDIDATES_FILE"
 while IFS= read -r -d '' idx <&3; do
@@ -65,6 +65,25 @@ while IFS= read -r -d '' idx <&3; do
   IFS= read -r -d '' code <&3 || break
   IFS= read -r -d '' bearer <&3 || break
   [[ "$idx" =~ ^[0-9]+$ && "$code" =~ ^[0-9]+$ && -n "$url" ]] || continue
+  # Transport policy, decided per candidate from its own URL. curl was called
+  # with no --proto restriction, so a candidate could be file:// (reading a local
+  # file into the merge pipeline) and an https candidate could be redirected down
+  # to http. ALLOW_HTTP=1 is the backend's explicit statement that a plaintext
+  # source is expected in this run; without it a plaintext candidate is dropped
+  # rather than fetched.
+  case "$url" in
+    https://*) C_PROTO[n]="=https" ;;
+    http://*)
+      if [[ "${ALLOW_HTTP:-0}" == "1" ]]; then
+        C_PROTO[n]="=http,https"
+      else
+        slog "dropping candidate $name: source is not using a secure connection"
+        continue
+      fi ;;
+    *)
+      slog "dropping candidate $name: unsupported address type"
+      continue ;;
+  esac
   C_INDEX[n]="$idx"; C_NAME[n]="$name"; C_URL[n]="$url"; C_CODE[n]="$code"
   C_ZIP[n]="$WORK/source_${n}.zip"; C_HEAD[n]="$WORK/source_${n}.headers"
   C_PIPE[n]="$WORK/source_${n}.stream"; C_TOTAL_FILE[n]="$WORK/source_${n}.total"
@@ -233,7 +252,8 @@ for ((i=0; i<n; i++)); do
   # so slow links and delayed archive generation cannot become false failures.
   curl_auth=()
   if [[ -n "${C_AUTH_FILE[i]}" ]]; then curl_auth=(-H "@${C_AUTH_FILE[i]}"); fi
-  stdbuf -e0 curl -sSLv -A 'discord(dot)gg/luatools' "${curl_auth[@]}" \
+  stdbuf -e0 curl -sSLv --proto "${C_PROTO[i]}" --proto-redir "${C_PROTO[i]}" \
+    -A 'discord(dot)gg/luatools' "${curl_auth[@]}" \
     --connect-timeout "$CONNECT_TIMEOUT" --max-time "$MAX_TRANSFER_TIME" \
     --speed-limit "$SPEED_LIMIT" --speed-time "$SPEED_TIME" \
     -o "${C_ZIP[i]}" "${C_URL[i]}" > /dev/null 2> "${C_PIPE[i]}" &
