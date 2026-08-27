@@ -1723,9 +1723,70 @@ forge_unreachable_msg() {
 	  "Não foi possível acessar o GitHub para baixar. Ele pode estar lento ou fora do ar no momento — verifique sua conexão e tente de novo em alguns minutos."
 }
 
+# verify_sha256 <file> <expected>
+# `expected` may be a bare digest or a `sha256sum`-style line ("<digest>  name").
+# An empty or malformed expectation is a FAILURE, never "nothing to check": a
+# truncated sidecar must not silently disable verification.
+verify_sha256() {
+	local file="$1" expected="$2" want actual
+	[ -f "$file" ] || return 1
+	want="$(printf '%s' "$expected" | awk '{print $1}' | tr -d '[:space:]' | tr 'A-F' 'a-f')"
+	case "$want" in
+	[0-9a-f]*) ;;
+	*) return 1 ;;
+	esac
+	[ "${#want}" -eq 64 ] || return 1
+	command -v sha256sum >/dev/null 2>&1 || return 1
+	actual="$(sha256sum "$file" 2>/dev/null | awk '{print $1}')"
+	[ -n "$actual" ] && [ "$actual" = "$want" ]
+}
+
+# archive_entries_safe <archive>
+# Reject an archive before extracting it if any entry would write outside the
+# destination or create a link. `unzip -qo` strips a leading "/" with a warning
+# but happily honours "../", and a symlink entry lets whatever runs next escape
+# the destination.
+archive_entries_safe() {
+	local archive="$1"
+	command -v python3 >/dev/null 2>&1 || return 0 # cannot inspect; caller decides
+	python3 - "$archive" <<'PY'
+import sys, zipfile
+
+S_IFLNK = 0xA000
+try:
+    with zipfile.ZipFile(sys.argv[1], "r") as zf:
+        for info in zf.infolist():
+            name = info.filename
+            if not name:
+                continue
+            if name.startswith("/") or name.startswith("\\"):
+                sys.exit(1)
+            # A Windows-style drive letter is an absolute path too.
+            if len(name) > 1 and name[1] == ":":
+                sys.exit(1)
+            parts = name.replace("\\", "/").split("/")
+            if ".." in parts:
+                sys.exit(1)
+            if "\x00" in name or "\r" in name or "\n" in name:
+                sys.exit(1)
+            if (info.external_attr >> 16) & 0xF000 == S_IFLNK:
+                sys.exit(1)
+except zipfile.BadZipFile:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
+# Entries are validated first and the destination is left untouched when the
+# archive is rejected.
 extract_zip() {
 	local archive="$1" dest="$2"
+	if ! archive_entries_safe "$archive"; then
+		log_warn "$(L "The downloaded archive contains unsafe entries and was not extracted." \
+		             "O pacote baixado contém entradas inseguras e não foi extraído.")"
+		return 1
+	fi
 	mkdir -p "$dest"
 	if command -v unzip >/dev/null 2>&1; then
 		unzip -qo "$archive" -d "$dest"
@@ -1740,6 +1801,39 @@ PY
 		return $?
 	fi
 	return 1
+}
+
+# download_and_verify <url> <out> [<label>]
+# Fetch a release asset, then verify it against its `<asset>.sha256` sidecar when
+# the release publishes one. A sidecar that is present but does not match is a
+# hard failure. A sidecar that is absent is reported and the install continues,
+# because releases cut before sidecars existed have none.
+#
+# NOTE: a sidecar served from the same release over the same connection does not
+# defend against a compromised publishing account — it detects corruption and a
+# partial mirror/CDN compromise. Detached signatures with a public key embedded
+# here are the actual fix and need a project signing key.
+download_and_verify() {
+	local url="$1" out="$2" label="${3:-download}"
+	curl --proto '=https' --proto-redir '=https' -fL \
+		--connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$out" || return 1
+	local sidecar="$out.sha256"
+	if curl --proto '=https' --proto-redir '=https' -fsL \
+		--connect-timeout 10 "$url.sha256" -o "$sidecar" 2>/dev/null; then
+		if verify_sha256 "$out" "$(cat "$sidecar" 2>/dev/null)"; then
+			log_info "$(L "Verified $label" "Verificado: $label")"
+			rm -f "$sidecar"
+			return 0
+		fi
+		rm -f "$sidecar" "$out"
+		log_error "$(L "The downloaded $label does not match its published signature." \
+		             "O $label baixado não corresponde à assinatura publicada.")"
+		return 1
+	fi
+	rm -f "$sidecar"
+	log_warn "$(L "No published signature for $label; continuing unverified." \
+	             "Sem assinatura publicada para $label; continuando sem verificação.")"
+	return 0
 }
 
 # ============================================================================
@@ -1765,7 +1859,7 @@ install_slsteam_moon() {
 	zip="$tmp/slsteam-moon.zip"
 
 	log_info "$(L "Downloading slsteam-moon" "Baixando slsteam-moon")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+	download_and_verify "$url" "$zip" "slsteam-moon" \
 		|| fail "$(forge_unreachable_msg)"
 
 	log_info "$(L "Extracting" "Extraindo")"
@@ -1818,7 +1912,7 @@ install_lumen() {
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$LUMEN_ASSET"
 	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+	download_and_verify "$url" "$zip" "Lumen" \
 		|| fail "$(forge_unreachable_msg)"
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
@@ -1945,7 +2039,7 @@ install_plugin() {
 	zip="$tmp/$PLUGIN_ASSET"
 
 	log_info "$(L "Downloading plugin" "Baixando o plugin")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
+	download_and_verify "$url" "$zip" "plugin" \
 		|| fail "$(forge_unreachable_msg)"
 
 	# Lumen hosts the plugin under ~/.local/share/Lumen/luatools (the wrapper

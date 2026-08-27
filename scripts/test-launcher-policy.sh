@@ -119,6 +119,10 @@ resolve_component_asset() {
   return 0
 }
 curl() { return 0; }
+# The installer now verifies each downloaded asset against its published sha256
+# sidecar before extracting. This fixture never produces a real archive, so the
+# fetch+verify step is stubbed out as a whole.
+download_and_verify() { : > "$2"; return 0; }
 extract_zip() {
   mkdir -p "$2/fixture-root"
   cp "$SETUP_STUB" "$2/fixture-root/setup.sh"
