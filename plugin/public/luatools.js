@@ -3952,22 +3952,28 @@
 
     const columnsContainer = document.createElement("div");
     columnsContainer.style.cssText =
-      "display:grid;grid-template-columns:minmax(0,2fr) minmax(160px,1fr);grid-template-rows:repeat(3,minmax(88px,1fr));align-items:stretch;gap:10px;margin-top:16px;";
+      "display:grid;grid-template-columns:minmax(0,2fr) minmax(170px,1fr);"
+      + "grid-template-rows:repeat(3,minmax(92px,1fr));align-items:stretch;"
+      + "justify-items:stretch;gap:10px;margin-top:16px;";
 
     function createFixButton(label, text, icon, isSuccess, onClick) {
       const btn = document.createElement("a");
       btn.href = "#";
       const btnColors = getThemeColors();
-      btn.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;flex:1 1 calc(50% - 10px);min-width:140px;box-sizing:border-box;padding:14px 6px;background:rgba(${btnColors.rgbString},0.06);border:1px solid ${btnColors.borderRgba};border-radius:12px;color:${btnColors.text};text-decoration:none;transition:all 0.2s ease;cursor:pointer;text-align:center;`;
+      // The cards live in a CSS grid, so they must NOT carry flex sizing of
+      // their own: `flex:1 1 calc(50% - 10px)` plus a min-width fought the grid
+      // tracks and left the column ragged with clipped copy. Let the grid place
+      // and stretch them, and keep the card itself a simple centred column.
+      btn.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-width:0;box-sizing:border-box;padding:16px 14px;background:rgba(${btnColors.rgbString},0.06);border:1px solid ${btnColors.borderRgba};border-radius:12px;color:${btnColors.text};text-decoration:none;transition:all 0.2s ease;cursor:pointer;text-align:center;overflow:hidden;`;
 
       const iconEl = document.createElement("i");
       iconEl.className = "fa-solid " + String(icon || "fa-wrench");
       iconEl.style.fontSize = "22px";
       const labelEl = document.createElement("span");
-      labelEl.style.cssText = "font-weight:600;font-size:13px;line-height:1.2;";
+      labelEl.style.cssText = "font-weight:600;font-size:13px;line-height:1.25;max-width:100%;";
       labelEl.textContent = String(label || "");
       const textEl = document.createElement("span");
-      textEl.style.cssText = "font-size:11px;opacity:0.8;line-height:1.2;";
+      textEl.style.cssText = "font-size:11px;opacity:0.8;line-height:1.35;max-width:100%;";
       textEl.textContent = String(text || "");
       btn.appendChild(iconEl); btn.appendChild(labelEl); btn.appendChild(textEl);
 
@@ -4045,29 +4051,30 @@
       if (!oldIcon) return;
       const logo = document.createElement("span");
       logo.className = "luatools-logo";
-      logo.style.cssText = "display:block;width:44px;height:44px;flex:0 0 auto;";
-      logo.innerHTML = '<svg viewBox="0 0 334 335" width="100%" height="100%" aria-hidden="true">' +
+      logo.style.cssText = "display:block;width:46px;height:46px;flex:0 0 auto;";
+      // Same mark Lumen's Fixes Menu uses, so the two surfaces are identical.
+      logo.innerHTML = '<svg viewBox="0 0 24 24" width="100%" height="100%" shape-rendering="geometricPrecision" aria-hidden="true">' +
         '<defs><linearGradient id="luatools-logo-gradient" x1="0" y1="0" x2="1" y2="1">' +
         '<stop offset="0" stop-color="#AC4EAD"/><stop offset=".48" stop-color="#9A249A"/>' +
         '<stop offset="1" stop-color="#670867"/></linearGradient>' +
-        '<mask id="luatools-logo-mark"><rect width="334" height="335" fill="#000"/>' +
-        '<g fill="#fff"><path d="M120 0h62l-32 91c-3 10-8 18-15 25l-42 39-24-26 37-42z"/>' +
-        '<circle cx="104" cy="116" r="46"/><path d="M121 93l132 111-63 69L91 143z"/>' +
-        '<circle cx="220" cy="230" r="57"/></g>' +
-        '<circle cx="104" cy="116" r="28" fill="#000"/><circle cx="220" cy="230" r="32" fill="#000"/>' +
-        '</mask></defs><circle class="luatools-logo-mono" cx="167" cy="168" r="163" fill="#090A0C"/>' +
-        '<circle class="luatools-logo-brand" cx="167" cy="168" r="163" fill="url(#luatools-logo-gradient)" opacity="0"/>' +
-        '<rect width="334" height="335" fill="#fff" mask="url(#luatools-logo-mark)"/></svg>';
+        '<clipPath id="luatools-logo-edge"><circle cx="12" cy="12" r="11.5"/></clipPath></defs>' +
+        '<g clip-path="url(#luatools-logo-edge)"><circle cx="12" cy="12" r="12" fill="#fff"/>' +
+        '<g transform="rotate(90 12 12)"><path class="luatools-logo-mono" fill="#090A0C" d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/>' +
+        '<path class="luatools-logo-brand" fill="url(#luatools-logo-gradient)" opacity="0" d="M11.979 0C5.678 0 .511 4.86.022 11.037l6.432 2.658c.545-.371 1.203-.59 1.912-.59.063 0 .125.004.188.006l2.861-4.142V8.91c0-2.495 2.028-4.524 4.524-4.524 2.494 0 4.524 2.031 4.524 4.527s-2.03 4.525-4.524 4.525h-.105l-4.076 2.911c0 .052.004.105.004.159 0 1.875-1.515 3.396-3.39 3.396-1.635 0-3.016-1.173-3.331-2.727L.436 15.27C1.862 20.307 6.486 24 11.979 24c6.627 0 11.999-5.373 11.999-12S18.605 0 11.979 0zM7.54 18.21l-1.473-.61c.262.543.714.999 1.314 1.25 1.297.539 2.793-.076 3.332-1.375.263-.63.264-1.319.005-1.949s-.75-1.121-1.377-1.383c-.624-.26-1.29-.249-1.878-.03l1.523.63c.956.4 1.409 1.5 1.009 2.455-.397.957-1.497 1.41-2.454 1.012H7.54zm11.415-9.303c0-1.662-1.353-3.015-3.015-3.015-1.665 0-3.015 1.353-3.015 3.015 0 1.665 1.35 3.015 3.015 3.015 1.663 0 3.015-1.35 3.015-3.015zm-5.273-.005c0-1.252 1.013-2.266 2.265-2.266 1.249 0 2.266 1.014 2.266 2.266 0 1.251-1.017 2.265-2.266 2.265-1.253 0-2.265-1.014-2.265-2.265z"/></g></g>' +
+        '<circle class="luatools-logo-mono" cx="12" cy="12" r="11.55" fill="none" stroke="#090A0C" stroke-width=".65"/>' +
+        '<circle class="luatools-logo-brand" cx="12" cy="12" r="11.55" fill="none" stroke="url(#luatools-logo-gradient)" stroke-width=".65" opacity="0"/></svg>';
       oldIcon.replaceWith(logo);
-      const mono = logo.querySelector(".luatools-logo-mono");
-      const brand = logo.querySelector(".luatools-logo-brand");
+      const mono = logo.querySelectorAll(".luatools-logo-mono");
+      const brand = logo.querySelectorAll(".luatools-logo-brand");
+      const setLogoState = function (hovered) {
+        mono.forEach(function (el) { el.style.opacity = hovered ? "0" : "1"; });
+        brand.forEach(function (el) { el.style.opacity = hovered ? "1" : "0"; });
+      };
       btn.addEventListener("mouseenter", function () {
-        if (mono) mono.style.opacity = "0";
-        if (brand) brand.style.opacity = "1";
+        setLogoState(true);
       });
       btn.addEventListener("mouseleave", function () {
-        if (mono) mono.style.opacity = "1";
-        if (brand) brand.style.opacity = "0";
+        setLogoState(false);
       });
     }
 
@@ -4412,12 +4419,13 @@
           }
         },
       );
-      next.style.flex = "1 0 100%";
-      next.style.minHeight = "284px";
+      // Grid placement only: a flex-basis here made the featured card overflow
+      // its track and drag the whole row out of alignment.
       next.style.gridColumn = "1";
       next.style.gridRow = "1 / 4";
       next.style.position = "relative";
-      next.style.padding = "24px 20px";
+      next.style.padding = "26px 22px";
+      next.style.gap = "12px";
       attachLuaToolsLogo(next);
       if (categoryGroups.length) next.appendChild(categoryRow);
       if (applied) {
@@ -4464,8 +4472,6 @@
       "fa-globe", data.fallbackOnlineApplied ? true : false, function (e) { e.preventDefault(); },
     );
     if (data.fallbackOnlineApplied) markFixApplied(fallbackOnlineSection);
-    fallbackOnlineSection.style.flex = "1 1 calc(33.333% - 10px)";
-    fallbackOnlineSection.style.minWidth = "0";
     fallbackOnlineSection.style.gridColumn = "2";
     fallbackOnlineSection.style.gridRow = "1";
     columnsContainer.appendChild(fallbackOnlineSection);
@@ -4492,8 +4498,6 @@
           } else proceed();
         },
       );
-      next.style.flex = "1 1 calc(33.333% - 10px)";
-      next.style.minWidth = "0";
       next.style.gridColumn = "2";
       next.style.gridRow = "1";
       if (data.fallbackOnlineApplied) markFixApplied(next);
@@ -4554,8 +4558,6 @@
         }
       },
     );
-    aioSection.style.flex = "1 1 calc(33.333% - 10px)";
-    aioSection.style.minWidth = "0";
     aioSection.style.gridColumn = "2";
     aioSection.style.gridRow = "2";
     if (data.spacewarApplied) markFixApplied(aioSection);
@@ -4592,8 +4594,6 @@
       },
     );
     columnsContainer.appendChild(unfixSection);
-    unfixSection.style.flex = "1 1 calc(33.333% - 10px)";
-    unfixSection.style.minWidth = "0";
     unfixSection.style.gridColumn = "2";
     unfixSection.style.gridRow = "3";
     if (!isGameInstalled) {
