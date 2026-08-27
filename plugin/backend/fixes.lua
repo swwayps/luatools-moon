@@ -19,12 +19,17 @@ end
 
 local shell_quote = guard.shell_quote
 
--- Mirrors a fix archive may come from. Every URL the frontend can pass to
--- apply_game_fix was produced by one of this backend's own RPCs
--- (check_for_fixes -> files.luatools.work, onlinefix.resolve -> the online-fix
--- mirror, and the authenticated Ryuu generator), so the set is closed. Without
--- this, the endpoint accepted any URL and wrote its contents into a directory
--- the caller also chose — file write to anywhere the user can write.
+-- Mirrors a fix archive may come from when the FRONTEND supplies the URL. Every
+-- such URL was produced by one of this backend's own RPCs (check_for_fixes ->
+-- files.luatools.work, onlinefix.resolve -> the online-fix mirror, and the
+-- authenticated Ryuu generator), so that set is closed. Without it the endpoint
+-- accepted any URL and wrote its contents into a directory the caller also chose
+-- — a file write to anywhere the user can write.
+--
+-- One producer is deliberately NOT in this set: lua.tools answers
+-- /api/denuvo/download with a short-lived presigned link on its own storage host,
+-- which cannot be enumerated. That path passes deps.trusted_source instead, and
+-- provenance vouches for it (see validate_apply_target).
 fixes.ALLOWED_FIX_HOSTS = {
     ["files.luatools.work"] = true,
     ["index.luatools.work"] = true,
@@ -83,10 +88,21 @@ end
 -- AppID from libraryfolders.vdf + appmanifest_<appid>.acf, so the caller cannot
 -- redirect the extraction to an autostart directory, a shell rc file, or the
 -- plugin's own backend/ (which is loaded at the next boot).
+-- validate_apply_target(...) -> url, nil, path   or   nil, error_table
+--
+-- `deps.trusted_source` marks a URL this backend resolved itself through an
+-- authenticated API rather than one the frontend chose. lua.tools answers
+-- /api/denuvo/download with a short-lived PRESIGNED link on its own storage host,
+-- which by design is not a host we can enumerate — so provenance, not a host
+-- allowlist, is what vouches for it. Everything else still applies: https only,
+-- no userinfo, no control characters, and the destination check below.
 function fixes.validate_apply_target(appid, download_url, install_path, deps)
     deps = deps or {}
-    local url = guard.https_url(tostring(download_url or ""),
-        { hosts = fixes.ALLOWED_FIX_HOSTS })
+    local url_opts = {}
+    if not deps.trusted_source then
+        url_opts.hosts = fixes.ALLOWED_FIX_HOSTS
+    end
+    local url = guard.https_url(tostring(download_url or ""), url_opts)
     if not url then
         return nil, { success = false, errorCode = "invalid_source",
             error = "This fix download source is not allowed." }
@@ -102,8 +118,23 @@ function fixes.validate_apply_target(appid, download_url, install_path, deps)
         return nil, { success = false, errorCode = "invalid_destination",
             error = "The install path does not belong to this game." }
     end
-    -- Use the path the backend derived, not the caller's spelling of it.
-    return url, nil, guard.normalize_path(state.installPath)
+    -- The derived path is not trusted blindly either. `installdir` is scraped out
+    -- of appmanifest_<appid>.acf with a pattern that permits "..", which
+    -- normalize_path would happily collapse into a clean path OUTSIDE the library.
+    -- Require it to sit inside a Steam library's steamapps/common, and require the
+    -- directory to exist so a fix is never unpacked into a path we just invented.
+    local contained = deps.library_path
+        or function(path) return require("steam_utils").game_library_path(path) end
+    local ok_contained, canonical = pcall(contained, state.installPath)
+    if not ok_contained or type(canonical) ~= "string" then
+        return nil, { success = false, errorCode = "invalid_destination",
+            error = "The install path is outside the Steam libraries." }
+    end
+    if state.directoryExists == false then
+        return nil, { success = false, errorCode = "not_installed",
+            error = "menu.error.notInstalled" }
+    end
+    return url, nil, canonical
 end
 
 function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_name, deps)

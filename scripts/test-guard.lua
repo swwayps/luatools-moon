@@ -125,6 +125,17 @@ end
 -- everything that is not a plain web URL is refused.
 check("external https accepted",
   guard.external_url("https://steamdb.info/app/1/") ~= nil)
+-- Query strings and fragments are ordinary URL syntax. Refusing them turned a
+-- valid product link into "Invalid URL" for the user.
+check("a query string is accepted",
+  guard.external_url("https://steamdb.info/app/440/?tab=depots") ~= nil)
+check("a fragment is accepted",
+  guard.external_url("https://lua.tools/docs#install") ~= nil)
+check("a tilde is accepted", guard.external_url("https://a.example/~user") ~= nil)
+check("an asterisk is accepted", guard.external_url("https://a.example/a*b") ~= nil)
+check("brackets are accepted", guard.external_url("https://a.example/[x]") ~= nil)
+check("an exclamation mark is accepted",
+  guard.external_url("https://a.example/a!b") ~= nil)
 check("external http accepted", guard.external_url("http://lua.tools/") ~= nil)
 check("javascript scheme refused", guard.external_url("javascript:alert(1)") == nil)
 check("data scheme refused", guard.external_url("data:text/html,<b>") == nil)

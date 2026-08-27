@@ -1748,7 +1748,27 @@ verify_sha256() {
 # the destination.
 archive_entries_safe() {
 	local archive="$1"
-	command -v python3 >/dev/null 2>&1 || return 0 # cannot inspect; caller decides
+	# unzip is a hard prerequisite (detect_missing_tools requires it), so the
+	# listing path below always works. python3 is NOT a declared prerequisite, so
+	# it cannot be the only implementation: returning success when it is absent
+	# would silently delete the guard on exactly the systems that lack it.
+	if command -v unzip >/dev/null 2>&1; then
+		local names
+		names="$(unzip -Z1 "$archive" 2>/dev/null)" || return 1
+		[ -n "$names" ] || return 1
+		# Absolute path, Windows drive letter, or a ".." path component.
+		if printf '%s\n' "$names" |
+			grep -Eq '(^/|^\\|^[A-Za-z]:|(^|[/\\])\.\.([/\\]|$))'; then
+			return 1
+		fi
+		# Symlink entries: mode bits live in the "external file attributes" field,
+		# which unzip -Z prints in its long listing as a leading "l".
+		if unzip -Z "$archive" 2>/dev/null | grep -Eq '^l'; then
+			return 1
+		fi
+		return 0
+	fi
+	command -v python3 >/dev/null 2>&1 || return 1
 	python3 - "$archive" <<'PY'
 import sys, zipfile
 
@@ -1826,9 +1846,12 @@ download_and_verify() {
 			return 0
 		fi
 		rm -f "$sidecar" "$out"
+		# Distinct exit code: the callers turn a non-zero return into "could not
+		# reach GitHub", which would send the user to debug their network after an
+		# integrity failure. 2 means "arrived, did not verify".
 		log_error "$(L "The downloaded $label does not match its published signature." \
 		             "O $label baixado não corresponde à assinatura publicada.")"
-		return 1
+		return 2
 	fi
 	rm -f "$sidecar"
 	log_warn "$(L "No published signature for $label; continuing unverified." \
@@ -2371,7 +2394,10 @@ install_cloudredirect_so() {
 	so="$tmp/cloud_redirect.so"
 
 	log_info "$(L "Downloading cloud_redirect.so" "Baixando cloud_redirect.so")"
-	if ! curl -fL "$CR_SO_URL" -o "$so"; then
+	# The .so is LD_PRELOAD'ed into the Steam process, so it is the highest-value
+	# artefact in the pipeline; it must not be the one download that skips the
+	# protocol pinning and the sidecar check.
+	if ! download_and_verify "$CR_SO_URL" "$so" "CloudRedirect"; then
 		log_warn "$(L "Download of cloud_redirect.so failed; skipping cloud saves." \
 		             "Falha ao baixar cloud_redirect.so; pulando cloud saves.")"
 		return 1
@@ -2604,7 +2630,7 @@ install_cloudredirect_flatpak() {
 	bundle="$tmp/$(basename "$url")"
 
 	log_info "$(L "Downloading CloudRedirect app" "Baixando o app CloudRedirect")"
-	if ! curl -fL "$url" -o "$bundle"; then
+	if ! download_and_verify "$url" "$bundle" "CloudRedirect app"; then
 		log_warn "$(L "Download of the CloudRedirect app failed; you can install it later." \
 		             "Falha ao baixar o app CloudRedirect; você pode instalá-lo depois.")"
 		return 1

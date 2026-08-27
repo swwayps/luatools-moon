@@ -46,9 +46,13 @@ function manifests.check(appid, deps)
     }
   end
 
-  -- allow_http is explicit here because the transport layer now requires TLS by
-  -- default and this endpoint has no TLS: it is reachable only by bare IP, which
-  -- cannot present a valid certificate. The exposure is real and deliberate —
+  -- allow_http is an explicit request for plaintext, honoured by the Lumen HTTP
+  -- shim (which defaults to TLS) and ignored by Millennium's, which has no such
+  -- option and permits http anyway. Either way it records the intent at the call
+  -- site rather than leaving the plaintext fetch looking accidental.
+  --
+  -- This endpoint has no TLS at all: it is reachable only by bare IP, which cannot
+  -- present a valid certificate. The exposure is real and deliberate —
   -- the queried AppID and the fixed discovery User-Agent both travel in the
   -- clear, and an observer on the path can force the "unavailable" answer. The
   -- failure mode is fail-closed (the source reports unavailable), so nothing is

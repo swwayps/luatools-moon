@@ -114,6 +114,58 @@ check "V7 a missing file fails" \
 check "P1 the plugin packager writes a sha256 sidecar" \
 	'grep -q "sha256sum" "$SCRIPT_DIR/build.sh"'
 
+# ---------------------------------------------------------------------------
+# The entry guard must not depend on python3. python3 is not in the installer's
+# required_tools, so an implementation that returns success when it is missing
+# deletes the guard on exactly the systems that lack it. unzip IS a hard
+# prerequisite, so that is the implementation that has to carry the check.
+# ---------------------------------------------------------------------------
+NOPY="$TMP/nopy"
+BASH="$(command -v bash)"
+mkdir -p "$NOPY"
+for tool in bash sh unzip zip sha256sum awk sed grep printf cut tr cat mktemp rm id uname; do
+	real="$(command -v "$tool" 2>/dev/null)" || continue
+	ln -sf "$real" "$NOPY/$tool"
+done
+
+run_without_python3() {
+	# run_without_python3 <archive> <dest>
+	# Absolute bash: the point is a PATH without python3, not without a shell.
+	PATH="$NOPY" "$BASH" -c '
+		SLSPLUGIN_LIB_ONLY=1
+		export SLSPLUGIN_LIB_ONLY
+		. "$1" >/dev/null 2>&1
+		archive_entries_safe "$2"
+	' _ "$INSTALL_SH" "$1"
+}
+
+check "N1 python3 really is unavailable on the stripped PATH" \
+	'! PATH="$NOPY" command -v python3 >/dev/null 2>&1'
+check "N2 a benign archive still passes without python3" \
+	'run_without_python3 "$TMP/good.zip"'
+check "N3 a traversal entry is still refused without python3" \
+	'! run_without_python3 "$TMP/slip.zip"'
+check "N4 a nested traversal is still refused without python3" \
+	'! run_without_python3 "$TMP/slip2.zip"'
+check "N5 an absolute-path entry is still refused without python3" \
+	'! run_without_python3 "$TMP/abs.zip"'
+check "N6 a symlink entry is still refused without python3" \
+	'! run_without_python3 "$TMP/link.zip"'
+check "N7 a non-archive is refused without python3" \
+	'printf notazip > "$TMP/bogus.zip"; ! run_without_python3 "$TMP/bogus.zip"'
+
+# ---------------------------------------------------------------------------
+# A digest mismatch must be distinguishable from a network failure, so the
+# installer does not tell the user to check their connection after an integrity
+# failure.
+# ---------------------------------------------------------------------------
+check "D1 download_and_verify returns a distinct code for an integrity failure" \
+	'grep -q "return 2" "$INSTALL_SH"'
+check "D2 the CloudRedirect .so goes through download_and_verify" \
+	'grep -q "download_and_verify \"\$CR_SO_URL\"" "$INSTALL_SH"'
+check "D3 no asset download bypasses the verified path" \
+	'! grep -qE "curl -fL \"\\\$(CR_SO_URL|url)\" -o" "$INSTALL_SH"'
+
 echo
 echo "$checks check(s), $fails failure(s)"
 [ "$fails" -eq 0 ] || exit 1

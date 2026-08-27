@@ -1169,8 +1169,13 @@ function StartLuaToolsFix(appid, contentScriptQuery, fixId, gameName, installPat
 
     local ok_apply, result
     if fix_download then
+        -- fix_download.url is the presigned link lua.tools returned for an
+        -- authenticated request, so it lives on their storage host rather than on
+        -- one of the mirrors we publish. Its provenance is what vouches for it;
+        -- the host allowlist would reject it.
         ok_apply, result = pcall(fixes.apply_game_fix, appid, fix_download.url,
-            install.installPath, "lua.tools", tostring(gameName or game.name or ""))
+            install.installPath, "lua.tools", tostring(gameName or game.name or ""),
+            { trusted_source = true })
     else
         ok_apply, result = pcall(fixes.mark_apply_ready, appid)
     end

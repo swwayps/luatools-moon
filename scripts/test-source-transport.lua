@@ -103,6 +103,26 @@ do
   check("T11 a custom source cannot opt itself out of TLS", added.success == false)
 end
 
+
+-- ── a remote catalogue cannot grant itself the TLS exemption ─────────────────
+-- The "insecure" marker exempts a source from the TLS requirement. It describes
+-- OUR shipped catalogue. The remote manifest lives in a third-party repository on
+-- a mutable branch, so an entry from there must never carry it: honouring it would
+-- let that repository hand itself a plaintext source whose payload becomes the
+-- game's Lua script and depot manifests.
+do
+  local f = assert(io.open("plugin/backend/api_manifest.lua", "r"))
+  local source = f:read("*a")
+  f:close()
+  local _, stripped = source:gsub("item%.insecure = nil", "")
+  check("T16 every remote-manifest import strips the insecure marker",
+    stripped >= 2)
+  -- Both import loops build their entry with copy_table, so the strip has to sit
+  -- next to each of them rather than in one shared place.
+  local _, copies = source:gsub("copy_table%(api%)", "")
+  check("T17 the strip covers every copy_table import site", stripped >= copies)
+end
+
 -- ── the plaintext discovery probe is explicit, not accidental ────────────────
 do
   local f = assert(io.open("plugin/backend/lua_tools_manifest.lua", "r"))
@@ -110,6 +130,8 @@ do
   f:close()
   check("T12 the plaintext discovery probe opts in explicitly",
     source:find("allow_http = true", 1, true) ~= nil)
+  check("T12b and does not claim a transport behaviour it cannot rely on",
+    source:find("honoured by the Lumen HTTP", 1, true) ~= nil)
   check("T13 the plaintext discovery probe is documented as such",
     source:find("no TLS", 1, true) ~= nil)
 end

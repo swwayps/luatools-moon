@@ -55,6 +55,10 @@ local function apply(appid, url, path, kind, name)
       if not install then return { found = false, error = "notInstalled" } end
       return { found = true, installPath = install, directoryExists = true }
     end,
+    -- The derived path is contained too (a ".." in the appmanifest's installdir
+    -- must not escape the library). These fixtures use bare /games paths, so the
+    -- containment check is stubbed to accept them.
+    library_path = function(p) return p end,
   })
 end
 
@@ -107,7 +111,8 @@ local denied = no_key_fixes.apply_game_fix(12100,
   "https://generator.ryuu.lol/fixes/GTA%20III.zip", "/games/GTA3", "Crack", "GTA III",
   { install_state = function()
       return { found = true, installPath = "/games/GTA3", directoryExists = true }
-    end })
+    end,
+    library_path = function(p) return p end })
 check("A7 missing Ryuu key is rejected before launch",
   denied.success == false and tostring(denied.error):lower():find("auth", 1, true) ~= nil)
 check("A8 missing Ryuu key launches no worker", #commands == no_key_before)

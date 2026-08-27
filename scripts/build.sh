@@ -120,12 +120,12 @@ if [[ "$MAKE_ZIP" -eq 1 ]]; then
   BUNDLE="$(dirname "$OUT")/luatools-linux.zip"
   rm -f "$BUNDLE"
   (cd "$OUT" && zip -qr "$BUNDLE" .)
-  # Publish a sha256 sidecar next to the asset. install.sh fetches
-  # "<asset>.sha256" and refuses an asset that does not match it, so an archive
-  # that was truncated or altered in transit is caught before it is unpacked and
-  # executed. (A sidecar from the same release does not defend against a
-  # compromised publishing account; detached signatures would, and need a project
-  # signing key.)
+  # Publish a sha256 sidecar next to the asset. The installer on the paired
+  # luatools-moon branch fetches "<asset>.sha256" and refuses an asset that does
+  # not match it, so a truncated or altered archive is caught before it is unpacked
+  # and executed; an installer that predates that change ignores the sidecar. This
+  # detects transport and mirror damage, NOT a compromised publishing account —
+  # that needs a detached signature and a project signing key.
   (cd "$(dirname "$BUNDLE")" && sha256sum "$(basename "$BUNDLE")" > "$(basename "$BUNDLE").sha256")
   echo "[build] wrote $BUNDLE"
   echo "[build] wrote $BUNDLE.sha256"

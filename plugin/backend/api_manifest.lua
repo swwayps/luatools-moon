@@ -257,6 +257,13 @@ function api_manifest.init_apis()
                     item.custom = true
                     item.remote = true
                     item.removed = nil
+                    -- "insecure" exempts a source from the TLS requirement. It is
+                    -- a property of OUR shipped catalogue, so it must never
+                    -- arrive from a remote manifest: that manifest lives in a
+                    -- third-party repository on a mutable branch, and honouring
+                    -- the marker there would let it hand itself a plaintext
+                    -- source whose payload becomes the game's Lua script.
+                    item.insecure = nil
                     table.insert(data.api_list, item)
                     existing_urls[item.url] = true
                     loaded = loaded + 1
@@ -334,6 +341,9 @@ function api_manifest.fetch_free_apis_now()
             item.custom = true
             item.remote = true
             item.removed = nil
+            -- See init_apis: the TLS exemption is never importable from a remote
+            -- manifest.
+            item.insecure = nil
             table.insert(retained, item)
             existing_urls[item.url] = true
             loaded = loaded + 1
@@ -359,8 +369,13 @@ function api_manifest.load_api_manifest()
             if api_manifest.source_transport_ok(api) then
                 table.insert(apis, api)
             else
-                logger.warn("LuaTools: skipping source with an unusable "
-                    .. "transport: " .. tostring(api.name))
+                -- Not silently dropped: the entry stays in the catalogue (so the
+                -- user does not appear to have lost a source they added) and is
+                -- marked so the settings UI can say WHY it is not being used.
+                api.blocked = "insecure_transport"
+                logger.warn("LuaTools: source '" .. tostring(api.name)
+                    .. "' is not used because it does not use a secure "
+                    .. "connection: " .. tostring(api.url))
             end
         end
     end

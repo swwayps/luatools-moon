@@ -445,7 +445,11 @@ end
 -- plaintext the silent default for everything.
 local function _records_need_http(records)
     for _, record in ipairs(records or {}) do
-        if tostring(record):find("\0http://", 1, true) then return true end
+        -- Match the URL FIELD, not the record: a source merely NAMED "http://…"
+        -- would otherwise grant ALLOW_HTTP=1 for the whole run. Record layout is
+        -- index \0 name \0 url \0 code \0 bearer \0.
+        local _, _, url = tostring(record):match("^([^%z]*)%z([^%z]*)%z([^%z]*)%z")
+        if url and url:sub(1, 7) == "http://" then return true end
     end
     return false
 end

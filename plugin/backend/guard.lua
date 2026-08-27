@@ -71,11 +71,16 @@ end
 
 -- external_url(url) -> url, or nil + reason.
 -- For URLs handed to the desktop browser. http is tolerated (the legitimate
--- targets are fixed product links, some of which still redirect from http), but
--- every shell metacharacter is refused: this value has historically ended up
--- inside a double-quoted `xdg-open "..."`, and defence in depth is cheaper than
--- trusting the caller of the day to keep quoting it correctly.
-local SHELL_META = '[`$\\\\;|&<>()"\'!*?{}%[%]~#]'
+-- targets are fixed product links, some of which still redirect from http).
+--
+-- The characters refused here are the ones that cannot legally appear unescaped
+-- in a URL and that a shell would act on: quotes, backticks, `$`, `;`, `|`, `&`,
+-- redirection and braces. Query strings and fragments are NOT refused — `?`, `#`,
+-- `*`, `~`, `[` and `]` are ordinary URL characters, and rejecting them made a
+-- perfectly good link like https://steamdb.info/app/440/?x=1 surface to the user
+-- as "Invalid URL". Injection is prevented by single-quoting at the call site
+-- (guard.shell_quote); this blocklist is the second layer, not the first.
+local SHELL_META = '[`$\\;|&<>()"\'{}]'
 function guard.external_url(url)
   local checked, reason = guard.https_url(url, { allow_http = true })
   if not checked then return nil, reason end

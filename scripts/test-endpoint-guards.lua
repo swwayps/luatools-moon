@@ -53,8 +53,8 @@ local function check(name, cond)
 end
 
 local GAME_PATH = "/home/u/.steam/steam/steamapps/common/Outlast"
-local function fix_deps(install_path)
-  return {
+local function fix_deps(install_path, extra)
+  local d = {
     install_state = function(appid)
       if tonumber(appid) ~= 238320 then
         return { found = false, error = "menu.error.notInstalled" }
@@ -64,7 +64,20 @@ local function fix_deps(install_path)
         directoryExists = true,
       }
     end,
+    -- Containment of the DERIVED path. Mirrors steam_utils.game_library_path
+    -- without needing the millennium shim.
+    library_path = function(path)
+      local root = "/home/u/.steam/steam/steamapps/common"
+      local canonical = guard.normalize_path(path)
+      if canonical and (canonical == root
+          or canonical:sub(1, #root + 1) == root .. "/") then
+        return canonical
+      end
+      return nil
+    end,
   }
+  for k, v in pairs(extra or {}) do d[k] = v end
+  return d
 end
 
 local function last_command()
@@ -219,6 +232,67 @@ do
     cmd and cmd:find('"' .. GAME_PATH, 1, true) == nil)
 end
 
+
+-- ── ApplyGameFix: the DERIVED destination is checked too ─────────────────────
+-- installdir is scraped out of appmanifest_<appid>.acf with a pattern that allows
+-- "..", and normalize_path would collapse that into a clean absolute path outside
+-- the Steam library. The backend's own derivation is therefore contained as well.
+do
+  local escaped = "/home/u/.steam/steam/steamapps/common/../../../../etc/cron.d"
+  local res = fixes.apply_game_fix(238320,
+    "https://files.luatools.work/GameBypasses/238320.zip",
+    escaped, "Crack", "Outlast", fix_deps(escaped))
+  check("G15 a traversing installdir from the appmanifest is refused",
+    res.success == false)
+end
+
+do
+  -- A game directory that does not exist is not a destination.
+  local res = fixes.apply_game_fix(238320,
+    "https://files.luatools.work/GameBypasses/238320.zip",
+    GAME_PATH, "Crack", "Outlast", fix_deps(GAME_PATH, {
+      install_state = function()
+        return { found = true, installPath = GAME_PATH, directoryExists = false }
+      end,
+    }))
+  check("G16 a missing game directory is refused", res.success == false)
+end
+
+-- ── a backend-resolved presigned URL is not host-restricted ──────────────────
+-- lua.tools answers /api/denuvo/download with a short-lived link on its own
+-- storage host, which cannot be enumerated in an allowlist. Provenance vouches
+-- for it, so the fix-apply path must accept it while still requiring https.
+do
+  local presigned =
+    "https://denuvo-fixes.r2.cloudflarestorage.com/fix.zip?X-Amz-Signature=abc"
+  local refused = fixes.apply_game_fix(238320, presigned, GAME_PATH,
+    "lua.tools", "Outlast", fix_deps())
+  check("G17 an unknown host is still refused without the trusted flag",
+    refused.success == false)
+  local allowed = fixes.apply_game_fix(238320, presigned, GAME_PATH,
+    "lua.tools", "Outlast", fix_deps(nil, { trusted_source = true }))
+  check("G18 a backend-resolved presigned URL is accepted",
+    allowed.success == true)
+end
+
+do
+  -- The trusted flag relaxes ONLY the host allowlist.
+  local d = fix_deps(nil, { trusted_source = true })
+  check("G19 trusted provenance does not permit http",
+    fixes.apply_game_fix(238320, "http://storage.example/f.zip", GAME_PATH,
+      "lua.tools", "Outlast", d).success == false)
+  check("G20 trusted provenance does not permit a CRLF URL",
+    fixes.apply_game_fix(238320, "https://storage.example/f.zip\r\nX: y",
+      GAME_PATH, "lua.tools", "Outlast", d).success == false)
+  check("G21 trusted provenance does not permit userinfo",
+    fixes.apply_game_fix(238320, "https://a@evil.example/f.zip", GAME_PATH,
+      "lua.tools", "Outlast", d).success == false)
+  check("G22 trusted provenance does not relax the destination check",
+    fixes.apply_game_fix(238320, "https://storage.example/f.zip",
+      "/home/u/.config/autostart", "lua.tools", "Outlast", d).success == false)
+end
+
+-- ── the remote catalogue cannot grant itself a TLS exemption ─────────────────
 -- ── OpenExternalUrl ─────────────────────────────────────────────────────────
 do
   local EXT_DEPS = { getenv = function() return nil end }
