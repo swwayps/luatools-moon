@@ -16,7 +16,6 @@ local locales_mod      = require("locales.manager")
 local api_manifest     = require("api_manifest")
 local downloads        = require("downloads")
 local fixes            = require("fixes")
-local ryuu_auth        = require("ryuu_auth")
 local lua_tools_auth   = require("lua_tools_auth")
 local lua_tools_fixes  = require("lua_tools_fixes")
 local lua_tools_fix_index = require("lua_tools_fix_index")
@@ -839,9 +838,9 @@ function CheckForFixes(appid)
         genericFix = { status = 404, available = false },
         onlineFix = { status = 404, available = false },
     }
-    -- The official lua.tools catalogue supersedes Ryuu for this surface. The
-    -- public response contains metadata only; bearer tokens and signed download
-    -- URLs stay in lua_tools_fixes and never cross the RPC boundary.
+    -- The official lua.tools catalogue is the source for this surface. The public
+    -- response contains metadata only; bearer tokens and signed download URLs
+    -- stay in lua_tools_fixes and never cross the RPC boundary.
     local ok_official, official = pcall(lua_tools_fixes.get_game, appid)
     if not ok_official or type(official) ~= "table" then
         official = { success = false, available = false, fixes = {} }
@@ -1198,39 +1197,6 @@ function CompleteLuaToolsFixApply(appid, contentScriptQuery, fixId)
             error = "The selected fix has not finished applying." })
     end
     return json_ok({ success = true, appliedFix = lua_tools_fix_state.get_applied(appid) })
-end
-
-function GetRyuuAuthStatus()
-    local ok, status = pcall(ryuu_auth.status)
-    if not ok then return json_err(status) end
-    status.success = true
-    return json_ok(status)
-end
-
-function SaveRyuuAuthCredential(contentScriptQuery, credential)
-    local ok, status, err = pcall(ryuu_auth.save, tostring(credential or ""))
-    if not ok then return json_err(status) end
-    if not status then return json_err(err or "Invalid Ryuu authentication.") end
-    status.success = true
-    return json_ok(status)
-end
-
--- Adopt the session cookie Steam's own browser holds after the in-client Ryuu
--- login. Called by Lumen's injector with a value read from the CEF cookie jar,
--- never by JavaScript: the secret stays inside Lua.
-function AdoptRyuuSessionValue(contentScriptQuery, session)
-    local ok, status, err = pcall(ryuu_auth.adopt_session_value, tostring(session or ""))
-    if not ok then return json_err(status) end
-    if not status then return json_err(err or "Ryuu has not accepted this session yet.") end
-    status.success = true
-    return json_ok(status)
-end
-
-function ClearRyuuAuthCredential()
-    local ok, removed = pcall(ryuu_auth.clear)
-    if not ok then return json_err(removed) end
-    if not removed then return json_err("Could not remove Ryuu authentication.") end
-    return json_ok({ success = true, configured = false })
 end
 
 function ApplySpaceFix(appid, contentScriptQuery)

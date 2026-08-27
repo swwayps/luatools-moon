@@ -11,6 +11,7 @@ local settings_manager = require("settings.manager")
 local cjson = require("json")
 local smart_merge = require("smart_merge")
 local lua_tools_manifest = require("lua_tools_manifest")
+local source_limits = require("source_limits")
 
 local downloads = {}
 local DOWNLOAD_STATE = {}
@@ -195,10 +196,12 @@ function downloads.get_add_status(appid)
                     error = data.error,
                     bytesRead = data.bytesRead,
                     totalBytes = data.totalBytes,
+                    progress = data.progress,
                     currentApi = data.currentApi,
                     apiErrors = data.apiErrors,
                     errorCode = data.errorCode,
                     errorPhase = data.errorPhase,
+                    errorSource = data.errorSource,
                 })
 
                 if data.status == "collected" or data.status == "extracted" then
@@ -359,13 +362,16 @@ function downloads.check_apis_for_app(appid)
 
         if api.builtin_id == "luie" then
             local status = lua_tools_manifest.check(appid)
+            local limit_code = source_limits.classify(nil, status.status)
             table.insert(results, {
                 name = name,
-                available = status.available == true,
+                available = status.available == true and not limit_code,
                 managed = true,
                 needsLogin = true,
                 locked = status.locked == true,
                 status = status.status,
+                errorCode = limit_code,
+                error = source_limits.message(limit_code, name),
             })
             goto continue
         end
@@ -379,22 +385,29 @@ function downloads.check_apis_for_app(appid)
 
         local url = template:gsub("<appid>", tostring(appid))
         local available = false
+        local limit_code
 
         if _is_hubcap_api(api) then
             local status_url = "https://hubcapmanifest.com/api/v1/status/" .. tostring(appid) .. "?api_key=" .. tostring(hubcap_api_key)
             local resp = http_client.get(status_url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-            if resp and resp.status == success_code then
+            limit_code = type(resp) == "table"
+                and source_limits.classify(resp.status, resp.body) or nil
+            if not limit_code and resp and resp.status == success_code then
                 available = true
             end
         else
             local success = false
             local resp = http_client.head(url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-            if resp and resp.status == success_code then
+            limit_code = type(resp) == "table"
+                and source_limits.classify(resp.status, resp.body) or nil
+            if not limit_code and resp and resp.status == success_code then
                 success = true
-            else
+            elseif not limit_code then
                 -- Fallback to GET if HEAD fails
                 local get_resp = http_client.get(url, { headers = { ["User-Agent"] = config.USER_AGENT }, timeout = 5 })
-                if get_resp and get_resp.status == success_code then
+                limit_code = type(get_resp) == "table"
+                    and source_limits.classify(get_resp.status, get_resp.body) or nil
+                if not limit_code and get_resp and get_resp.status == success_code then
                     success = true
                 end
             end
@@ -411,6 +424,8 @@ function downloads.check_apis_for_app(appid)
             successCode = success_code,
             needsKey = credential_state.needsKey,
             locked = false,
+            errorCode = limit_code,
+            error = source_limits.message(limit_code, name),
         })
 
         ::continue::
@@ -585,7 +600,7 @@ _start_smart_records = function(appid, records, current_api)
         DOWNLOAD_STATE[appid] = {}
         _set_download_state(appid, {
             status = "downloading", currentApi = current_api or "",
-            bytesRead = 0, totalBytes = 0,
+            bytesRead = 0, totalBytes = 0, progress = 0,
         })
         _launch_smart_download(appid, job.candidates, job.coverage,
             job.root, job.state, job.stop)
@@ -759,6 +774,7 @@ function downloads.get_game_draft_status(appid, session)
             memory.errorCode = data.errorCode
             memory.bytesRead = data.bytesRead
             memory.totalBytes = data.totalBytes
+            memory.progress = data.progress
             memory.currentApi = data.currentApi
             if (data.status == "collected" or data.status == "ready")
                 and not memory.draft and not DRAFT_FINALIZING[session] then

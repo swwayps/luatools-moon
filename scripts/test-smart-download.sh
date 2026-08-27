@@ -86,6 +86,12 @@ class H(http.server.BaseHTTPRequestHandler):
   def log_message(self,*args): pass
   def do_GET(self):
     name=self.path.lstrip('/')
+    if name == 'rate-limit.zip':
+      data=b'{"error":"Daily limit reached"}\n'; self.send_response(429); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+    if name == 'daily-limit.zip':
+      data=b'{"detail":"Daily limit reached for this account"}\n'; self.send_response(403); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
+    if name == 'daily-fields.zip':
+      data=b'{"daily_usage":25,"daily_limit":25}\n'; self.send_response(200); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
     if name == 'luie.lua' and self.headers.get('Authorization') != 'Bearer test-secret':
       data=b'unauthorized\n'; self.send_response(401); self.send_header('Content-Length',str(len(data))); self.end_headers(); self.wfile.write(data); return
     if name == 'dead.zip':
@@ -94,8 +100,9 @@ class H(http.server.BaseHTTPRequestHandler):
       time.sleep(0.7)
     status=201 if name == 'created.zip' else 200
     paced=name == 'paced.zip'
+    unknown_length=name == 'unknown-length.zip'
     slow=name == 'slow.zip'
-    if name == 'created.zip' or name == 'late.zip': source='fast.zip'
+    if name == 'created.zip' or name == 'late.zip' or unknown_length: source='fast.zip'
     elif paced: source='large.zip'
     elif slow: source='slow.zip'
     else: source=name
@@ -107,7 +114,8 @@ class H(http.server.BaseHTTPRequestHandler):
     if name == 'other.zip': time.sleep(0.7)
     if name == 'othercovered.zip': time.sleep(2.0)
     data=open(path,'rb').read(); self.send_response(status)
-    self.send_header('Content-Length',str(len(data))); self.end_headers()
+    if not unknown_length: self.send_header('Content-Length',str(len(data)))
+    self.end_headers()
     if paced:
       for pos in range(0, len(data), 4096):
         self.wfile.write(data[pos:pos+4096]); self.wfile.flush(); time.sleep(0.005)
@@ -203,6 +211,40 @@ check "all-404 response never counts its error bodies as downloaded data" \
   '[[ "$(state_field "$D0F/state.json" bytesRead)" == "0" ]]'
 check "all-404 message does not blame the connection" \
   '[[ "$(state_field "$D0F/state.json" error)" == *"not have this app"* ]]'
+
+# HTTP 429 is temporary request throttling even when a misleading body mentions
+# a daily limit. A daily limit is reserved for an explicit non-429 response.
+D0H="$TMP/d0h"; mkdir -p "$D0H"; C0H="$TMP/c0h.bin"; : > "$C0H"
+write_candidate "$C0H" 0 "Custom Burst API" "http://127.0.0.1:$PORT/rate-limit.zip" 200
+"$SCRIPT" 1134710 "$D0H/state.json" "$D0H" "$C0H" "$TMP/no-coverage" >/dev/null 2>&1 || true
+check "HTTP 429 is classified as temporary rate limiting" \
+  '[[ "$(state_field "$D0H/state.json" errorCode)" == "rate_limited" ]]'
+check "rate-limit message identifies the custom source" \
+  '[[ "$(state_field "$D0H/state.json" error)" == *"Custom Burst API"* ]]'
+check "rate-limit message never claims the daily quota was reached" \
+  '[[ "$(state_field "$D0H/state.json" error)" != *"Daily"* ]]'
+
+D0I="$TMP/d0i"; mkdir -p "$D0I"; C0I="$TMP/c0i.bin"; : > "$C0I"
+write_candidate "$C0I" 0 "Custom Daily API" "http://127.0.0.1:$PORT/daily-limit.zip" 200
+"$SCRIPT" 1134710 "$D0I/state.json" "$D0I" "$C0I" "$TMP/no-coverage" >/dev/null 2>&1 || true
+check "explicit daily response is classified as a daily limit" \
+  '[[ "$(state_field "$D0I/state.json" errorCode)" == "daily_limit" ]]'
+check "daily-limit message identifies the custom source" \
+  '[[ "$(state_field "$D0I/state.json" error)" == *"Custom Daily API"* ]]'
+
+D0K="$TMP/d0k"; mkdir -p "$D0K"; C0K="$TMP/c0k.bin"; : > "$C0K"
+write_candidate "$C0K" 0 "Custom Usage API" "http://127.0.0.1:$PORT/daily-fields.zip" 200
+"$SCRIPT" 1134710 "$D0K/state.json" "$D0K" "$C0K" "$TMP/no-coverage" >/dev/null 2>&1 || true
+check "daily usage fields detect an exhausted allowance" \
+  '[[ "$(state_field "$D0K/state.json" errorCode)" == "daily_limit" ]]'
+
+# A limited source is not terminal when another configured source succeeds.
+D0J="$TMP/d0j"; mkdir -p "$D0J"; C0J="$TMP/c0j.bin"; : > "$C0J"
+write_candidate "$C0J" 0 "Limited" "http://127.0.0.1:$PORT/daily-limit.zip" 200
+write_candidate "$C0J" 1 "Healthy fallback" "http://127.0.0.1:$PORT/fast.zip" 200
+"$SCRIPT" 1134710 "$D0J/state.json" "$D0J" "$C0J" "$TMP/no-coverage" >/dev/null 2>&1
+check "a healthy fallback survives another source daily limit" \
+  '[[ "$(state_field "$D0J/state.json" status)" == "collected" ]]'
 
 # Cancellation must stop an active transfer rather than only closing the UI.
 D0G="$TMP/d0g"; mkdir -p "$D0G"; C0G="$TMP/c0g.bin"; : > "$C0G"
@@ -330,7 +372,8 @@ while kill -0 "$WORKER_PID" 2>/dev/null; do
 import json, sys
 with open(sys.argv[1], encoding="utf-8") as f:
     data = json.load(f)
-print(int(data.get("bytesRead", 0)), int(data.get("totalBytes", 0)))
+print(int(data.get("bytesRead", 0)), int(data.get("totalBytes", 0)),
+      int(data.get("progress", 0)))
 PY
 )" || JSON_ERRORS=$((JSON_ERRORS + 1))
     [[ -n "$value" ]] && printf '%s\n' "$value" >> "$D5/observed"
@@ -348,7 +391,36 @@ PY'
 check "known totals expose intermediate progress" 'python3 - "$D5/observed" <<'"'"'PY'"'"'
 import sys
 samples=[tuple(map(int, x.split())) for x in open(sys.argv[1]) if x.strip()]
-pcts=[bytes_read * 100 / total for bytes_read, total in samples if total > 0]
+pcts=[progress for _bytes_read, _total, progress in samples]
+raise SystemExit(0 if any(1 < pct < 99 for pct in pcts) else 1)
+PY'
+
+# Luie may return its authenticated Lua without a Content-Length. One unknown
+# response size must not collapse the aggregate progress contract to the UI's
+# 1% fallback while another source is still transferring known bytes.
+D5B="$TMP/d5b"; mkdir -p "$D5B"; C5B="$TMP/c5b.bin"; : > "$C5B"
+write_candidate "$C5B" 0 "Paced" "http://127.0.0.1:$PORT/paced.zip" 200
+write_candidate "$C5B" 1 "Luie" "http://127.0.0.1:$PORT/unknown-length.zip" 200
+COLLECTION_DEADLINE=1.5 SPEED_TIME=9 "$SCRIPT" 1134710 "$D5B/state.json" "$D5B" "$C5B" "$TMP/no-coverage" >/dev/null 2>&1 &
+WORKER_PID=$!
+: > "$D5B/observed"
+while kill -0 "$WORKER_PID" 2>/dev/null; do
+  if [[ -f "$D5B/state.json" ]]; then
+    python3 - "$D5B/state.json" >> "$D5B/observed" 2>/dev/null <<'PY' || true
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as f:
+    data = json.load(f)
+print(int(data.get("bytesRead", 0)), int(data.get("totalBytes", 0)),
+      int(data.get("progress", 0)))
+PY
+  fi
+  sleep 0.01
+done
+wait "$WORKER_PID"
+check "unknown Luie length preserves intermediate progress" 'python3 - "$D5B/observed" <<'"'"'PY'"'"'
+import sys
+samples=[tuple(map(int, x.split())) for x in open(sys.argv[1]) if x.strip()]
+pcts=[progress for _bytes_read, _total, progress in samples]
 raise SystemExit(0 if any(1 < pct < 99 for pct in pcts) else 1)
 PY'
 

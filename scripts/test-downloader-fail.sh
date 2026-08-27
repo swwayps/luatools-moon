@@ -76,9 +76,10 @@ check "T3 status extracted"       "[ \"\$(status_of '$S3')\" = extracted ]"
 check "T3 emits a slog line"      "printf '%s' \"\$OUT3\" | grep -q 'downloader\['"
 
 # ---------------------------------------------------------------------------
-# T4-T6: Ryuu protects fix downloads with a session cookie or X-Auth-Key. An unauthenticated
-# HTTP 401 must be reported as authorization (not as a corrupt archive), and a
-# caller-supplied curl header file must make the same exact worker path succeed.
+# T4-T6: a source may refuse a download with HTTP 401/403. That must be reported
+# as an authorization problem (not as a corrupt archive), and a caller-supplied
+# curl header file must still make the same exact worker path succeed — no
+# shipped source needs one today, but the contract stays wired.
 # ---------------------------------------------------------------------------
 if command -v python3 >/dev/null 2>&1; then
   AUTH_SRC="$TMP/auth-src"; mkdir -p "$AUTH_SRC"; printf 'authenticated' > "$AUTH_SRC/fix.txt"
@@ -136,7 +137,7 @@ PY
           "$TMP/t4dl.zip" "$TMP/t4x" "$S4" 2>&1)"
   check "T4 HTTP 401 status failed" "[ \"\$(status_of '$S4')\" = failed ]"
   check "T4 reports authorization, not corruption" \
-    "err_of '$S4' | grep -qiE 'auth|login|key' && ! err_of '$S4' | grep -qi 'corrupt'"
+    "err_of '$S4' | grep -qiE 'auth|login|sign' && ! err_of '$S4' | grep -qi 'corrupt'"
   check "T4 exposes authentication error code" \
     "[ \"\$(error_code_of '$S4')\" = authentication ]"
 
@@ -161,7 +162,7 @@ fi
 # any connection is attempted (rc=3, "URL using bad/illegal format"). Blaming the
 # network there sends the user chasing a connection problem that does not exist.
 S7="$TMP/t7state.json"
-OUT7="$(MAX_TIME=5 bash "$DL" "https://generator.ryuu.lol/fixes/Gang Beasts.zip" \
+OUT7="$(MAX_TIME=5 bash "$DL" "https://files.example.invalid/fixes/Gang Beasts.zip" \
         "$TMP/t7dl.zip" "$TMP/t7x" "$S7" 2>&1)"
 check "T7 status failed" "[ \"\$(status_of '$S7')\" = failed ]"
 check "T7 blames the address, not the connection" \

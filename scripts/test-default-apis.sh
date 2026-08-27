@@ -13,8 +13,8 @@ with open(sys.argv[1], encoding="utf-8") as source:
 
 expected = [
     ("hubcap", "Sadie (Hubcap)", "https://hubcapmanifest.com/api/v1/manifest/<appid>?api_key=<moapikey>"),
-    ("ryuu", "Ryuu", "http://167.235.229.108/<appid>"),
     ("luie", "Luie", None),
+    ("ryuu", "Ryuu", "http://167.235.229.108/<appid>"),
     ("sushi", "Sushi", "https://raw.githubusercontent.com/sushi-dev55-alt/sushitools-games-repo-alt/refs/heads/main/<appid>.zip"),
 ]
 actual = [(entry.get("builtin_id"), entry["name"], entry.get("url")) for entry in entries]

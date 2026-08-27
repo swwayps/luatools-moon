@@ -1,8 +1,11 @@
 #!/usr/bin/env luajit
 
+package.path = "plugin/backend/?.lua;" .. package.path
+
 local requested_url
 local head_count = 0
 local key = "smm_" .. string.rep("a", 96)
+local response = {status = 200, body = "{}"}
 
 package.loaded.utils = {
     getenv = function() return nil end,
@@ -13,7 +16,7 @@ package.loaded.fs = {
 package.loaded.http_client = {
     get = function(url)
         requested_url = url
-        return {status = 200, body = "{}"}
+        return response
     end,
     head = function()
         head_count = head_count + 1
@@ -96,6 +99,18 @@ check(locked_result.success == true and #locked_result.results == 1
     "Hubcap remains visible as locked when its key is blank")
 check(requested_url == nil,
     "blank Hubcap key never reaches the network")
+
+key = "configured"
+response = {status = 429, body = '{"detail":"Daily limit reached"}'}
+local throttled = downloads.check_apis_for_app(10).results[1]
+check(throttled.available == false and throttled.errorCode == "rate_limited",
+    "HTTP 429 is exposed as temporary throttling, not a daily limit")
+
+response = {status = 403, body = '{"detail":"Daily limit reached"}'}
+local daily = downloads.check_apis_for_app(10).results[1]
+check(daily.available == false and daily.errorCode == "daily_limit"
+        and daily.error:find("Sadie (Hubcap)", 1, true) ~= nil,
+    "explicit daily exhaustion reaches manual source selection with its source name")
 
 if failures > 0 then os.exit(1) end
 print("ALL HUBCAP SOURCE CHECKS PASSED")
