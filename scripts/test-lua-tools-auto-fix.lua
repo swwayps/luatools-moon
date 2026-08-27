@@ -241,5 +241,53 @@ check("J20 active file application cannot be skipped unsafely",
   unsafe_cancel.success == false and unsafe_cancel.errorCode == "already_applying"
     and cancel_db.jobs["990080"].phase == "applying")
 
+-- A failed job used to vanish from the compact UI, which left the launch guard
+-- holding a saved Play with nothing on screen but a 0% bar. A failure must stay
+-- visible, carry its reason, and always be skippable.
+local failed_db = { version = 1, jobs = {} }
+local failed_deps = {
+  load = function() return failed_db end,
+  save = function(value) failed_db = value; return true end,
+  now = function() return 400 end,
+}
+auto_fix.queue(990080, FIX_ID, failed_deps)
+failed_db.jobs["990080"].gameName = "Resident Evil Requiem"
+failed_db.jobs["990080"].phase = "failed"
+failed_db.jobs["990080"].errorCode = "unavailable"
+failed_db.jobs["990080"].error = "This recommendation is no longer available."
+local failed_tick = auto_fix.tick(401, {
+  auth_status = function() return { configured = true } end,
+  install_state = function() return { complete = true, gameName = "Resident Evil Requiem" } end,
+}, failed_deps)
+local failed_view = failed_tick.uiJobs and failed_tick.uiJobs["990080"]
+check("J21 a failed automatic fix stays visible instead of stalling at 0%",
+  type(failed_view) == "table" and failed_view.phase == "failed"
+    and failed_view.stage == "failed")
+check("J22 the visible failure reports its reason and can always be skipped",
+  type(failed_view) == "table" and failed_view.canSkip == true
+    and failed_view.error == "This recommendation is no longer available."
+    and failed_view.errorCode == "unavailable")
+check("J23 a failed job is still cancellable so a launch is never trapped",
+  auto_fix.cancel(990080, failed_deps).success == true
+    and failed_db.jobs["990080"] == nil)
+
+-- Reapplying is idempotent, so a queued fix for a build that already has one
+-- must overwrite it rather than refuse. Queue must accept the same appid again.
+local requeue_db = { version = 1, jobs = {} }
+local requeue_deps = {
+  load = function() return requeue_db end,
+  save = function(value) requeue_db = value; return true end,
+  now = function() return 500 end,
+}
+auto_fix.queue(990080, FIX_ID, requeue_deps)
+requeue_db.jobs["990080"].phase = "failed"
+requeue_db.jobs["990080"].retries = 3
+requeue_db.jobs["990080"].errorCode = "unavailable"
+check("J24 requeueing a fix clears the previous terminal failure",
+  auto_fix.queue(990080, FIX_ID, requeue_deps) == true
+    and requeue_db.jobs["990080"].phase == "waiting_install"
+    and requeue_db.jobs["990080"].retries == 0
+    and requeue_db.jobs["990080"].errorCode == nil)
+
 if failures > 0 then os.exit(1) end
 print("ALL LUA.TOOLS AUTO FIX CHECKS PASSED")

@@ -141,5 +141,36 @@ end
 check("R16 clearing an app removes its shared receipt",
   state.clear(250900, deps) == true and state.get_applied(250900, deps) == nil)
 
+-- Applying a fix is idempotent, so a newer build's fix must overwrite the
+-- receipt of an older one instead of being refused. Refusing would leave the
+-- game on a stale fix with no way to move forward from the UI.
+local overwrite_db = { version = 1, apps = {
+  ["3764200"] = { applied = {
+    fixId = "782261fd-5eb8-4f70-b0a8-1824b2f2aa47",
+    source = "lua_tools", title = "22277314", category = "voices38",
+    fixFilename = "3764200.zip", manifestFilename = "3764200.lua",
+    appliedAt = 1000,
+  } },
+} }
+local overwrite_deps = {
+  load = function() return overwrite_db end,
+  save = function(value) overwrite_db = value; return true end,
+  now = function() return 2000 end,
+}
+local NEW_FIX = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+local rebegun = state.begin(3764200, {
+  id = NEW_FIX, source = "lua_tools", title = "23634047", category = "voices38",
+  fixFilename = "3764200.zip", manifestFilename = "3764200.lua",
+}, "", overwrite_deps)
+check("R17 a new build's fix can start over an already applied receipt",
+  rebegun == true
+    and state.get_applied(3764200, overwrite_deps).fixId
+      == "782261fd-5eb8-4f70-b0a8-1824b2f2aa47")
+check("R18 completing the new fix overwrites the previous receipt",
+  state.complete(3764200, NEW_FIX, overwrite_deps) == true
+    and state.get_applied(3764200, overwrite_deps).fixId == NEW_FIX
+    and state.get_applied(3764200, overwrite_deps).title == "23634047"
+    and state.get_applied(3764200, overwrite_deps).appliedAt == 2000)
+
 if failures > 0 then os.exit(1) end
 print("ALL LUA.TOOLS FIX STATE CHECKS PASSED")

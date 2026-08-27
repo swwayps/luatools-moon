@@ -174,11 +174,16 @@ function auto_fix.cancel(appid, deps)
 end
 
 local function ui_job(appid, job, observed)
-  if type(job) ~= "table" or job.phase == "failed" then return nil end
+  if type(job) ~= "table" then return nil end
   local phase = tostring(job.phase or "waiting_install")
   local stage, progress = "preparing", 0
   if phase == "needs_login" then
     stage = "needs_login"
+  elseif phase == "failed" then
+    -- A failure stays on screen. Hiding it left the launch guard holding a saved
+    -- Play with nothing but a 0% bar, which reads as a freeze and offers no way
+    -- out; the reason plus a skip is always better than a silent stall.
+    stage = "failed"
   elseif phase == "applying" then
     local status = type(observed) == "table" and tostring(observed.status or "") or ""
     if status == "downloading" then
@@ -202,7 +207,10 @@ local function ui_job(appid, job, observed)
     phase = phase,
     stage = stage,
     progress = progress,
-    canSkip = phase == "waiting_install" or phase == "needs_login",
+    canSkip = phase == "waiting_install" or phase == "needs_login"
+      or phase == "failed",
+    error = type(job.error) == "string" and job.error or nil,
+    errorCode = type(job.errorCode) == "string" and job.errorCode or nil,
   }
 end
 
