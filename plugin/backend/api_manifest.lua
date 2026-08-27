@@ -274,13 +274,6 @@ function api_manifest.init_apis()
                     item.custom = true
                     item.remote = true
                     item.removed = nil
-                    -- "insecure" exempts a source from the TLS requirement. It is
-                    -- a property of OUR shipped catalogue, so it must never
-                    -- arrive from a remote manifest: that manifest lives in a
-                    -- third-party repository on a mutable branch, and honouring
-                    -- the marker there would let it hand itself a plaintext
-                    -- source whose payload becomes the game's Lua script.
-                    item.insecure = nil
                     table.insert(data.api_list, item)
                     existing_urls[item.url] = true
                     loaded = loaded + 1
@@ -358,9 +351,6 @@ function api_manifest.fetch_free_apis_now()
             item.custom = true
             item.remote = true
             item.removed = nil
-            -- See init_apis: the TLS exemption is never importable from a remote
-            -- manifest.
-            item.insecure = nil
             table.insert(retained, item)
             existing_urls[item.url] = true
             loaded = loaded + 1
@@ -383,58 +373,30 @@ function api_manifest.load_api_manifest()
     local apis = {}
     for _, api in ipairs(data.api_list) do
         if api.enabled ~= false and api.removed ~= true then
-            if api_manifest.source_transport_ok(api) then
-                table.insert(apis, api)
-            else
-                -- Not silently dropped: the entry stays in the catalogue (so the
-                -- user does not appear to have lost a source they added) and is
-                -- marked so the settings UI can say WHY it is not being used.
-                api.blocked = "insecure_transport"
-                logger.warn("LuaTools: source '" .. tostring(api.name)
-                    .. "' is not used because it does not use a secure "
-                    .. "connection: " .. tostring(api.url))
-            end
+            table.insert(apis, api)
         end
     end
     return apis
 end
 
--- source_transport_ok(api) -> boolean.
--- A source's payload becomes the game's Lua script and depot manifests, so over
--- plaintext http whoever is on the path decides that content, and every AppID
--- the user installs travels in the clear. https is therefore required.
---
--- One built-in has no TLS at all (it is reachable only by bare IP, which cannot
--- have a valid certificate). Rather than let plaintext pass unnoticed anywhere,
--- that entry declares `"insecure": true` in api.defaults.json: the exposure
--- becomes a visible property of the catalogue instead of an accident, and any
--- other plaintext source is refused. The marker only exempts http — never
--- file://, ftp:// or anything else.
-function api_manifest.source_transport_ok(api)
-    if type(api) ~= "table" then return false end
-    local url = tostring(api.url or "")
-    -- Managed providers (lua.tools) carry no URL of their own.
-    if url == "" then return true end
-    if guard.https_url(url) then return true end
-    return api.insecure == true
-        and guard.https_url(url, { allow_http = true }) ~= nil
-end
-
 -- validate_source_url(url) -> url, or nil + error message.
 -- A custom source is fetched by the download worker and its payload becomes the
--- game's Lua script and depot manifests. The endpoint used to accept any
--- non-empty string, which meant "file:///..." was a usable source and a plain
--- http mirror was accepted silently. A source must be https, must carry the
--- <appid> placeholder (otherwise it is not a per-app source at all), and must
+-- game's Lua script and depot manifests. The endpoint used to accept ANY
+-- non-empty string, so "file:///etc/passwd" was a usable "source" and a URL could
+-- carry userinfo or a CRLF. A source must therefore be an http(s) URL, must carry
+-- the <appid> placeholder (otherwise it is not a per-app source at all), and must
 -- not smuggle a different authority past the reader through userinfo.
+--
+-- http is allowed on purpose: whether a mirror serves TLS is the operator's
+-- deployment choice, and refusing it would break working sources.
 function api_manifest.validate_source_url(url)
     if type(url) ~= "string" or url == "" then
         return nil, "Invalid payload: name and url are required"
     end
-    local checked, reason = guard.https_url(url)
+    local checked, reason = guard.https_url(url, { allow_http = true })
     if not checked then
         return nil, "Source URL rejected (" .. tostring(reason)
-            .. "): it must be an https URL"
+            .. "): it must be an http or https URL"
     end
     if not checked:find("<appid>", 1, true) then
         return nil, "Source URL must contain the <appid> placeholder"

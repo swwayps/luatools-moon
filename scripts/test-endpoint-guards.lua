@@ -342,8 +342,11 @@ do
   end
   check("A1 an https source with the appid placeholder is accepted",
     add("https://mirror.example/<appid>.zip").success == true)
-  check("A2 a plaintext http source is refused",
-    add("http://167.235.229.108/<appid>").success == false)
+  -- Plaintext is accepted: whether a mirror serves TLS is its operator's choice,
+  -- and one shipped built-in is reachable only by bare IP, which cannot hold a
+  -- certificate. What A3-A6 refuse is a value that is not a download URL.
+  check("A2 a plaintext http source is accepted",
+    add("http://167.235.229.108/<appid>").success == true)
   check("A3 a file:// source is refused",
     add("file:///etc/passwd").success == false)
   check("A4 a source without the appid placeholder is refused",

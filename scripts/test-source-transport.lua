@@ -1,13 +1,15 @@
 #!/usr/bin/env luajit
 -- Transport rules for game-data and fix sources.
 --
--- A source's payload becomes the game's Lua script and depot manifests, and a
--- fix archive is unpacked over the game's own directory. Over plaintext http an
--- observer on the path chooses that content, and every AppID the user installs
--- is visible in the clear — which also defeats the project's own anonymity
--- requirement. So: https for everything that can be https, and a source that
--- genuinely has no TLS must say so in the catalogue rather than be accepted
--- silently.
+-- What a source may be is a validation question, not a TLS question: whether a
+-- given mirror serves TLS is its operator's deployment choice, and one shipped
+-- built-in is reachable only by bare IP (which cannot hold a certificate). So
+-- plaintext is accepted; what is refused is a "source" that is not a download at
+-- all — file:///etc/passwd was a usable value before — or one that hides its real
+-- authority behind userinfo, or that has no <appid> placeholder.
+--
+-- The online-fix mirror is a separate case: it does serve TLS (verified), and its
+-- archive is unpacked over the game's own directory, so it uses https.
 --
 -- Run from the repo root:  luajit scripts/test-source-transport.lua
 package.path = "plugin/backend/?.lua;" .. package.path
@@ -19,7 +21,7 @@ local function check(name, cond)
   else io.write("FAIL " .. name .. "\n"); failures = failures + 1 end
 end
 
--- ── the online-fix mirror serves https, so nothing should reach it over http ──
+-- ── the online-fix mirror serves https, so nothing reaches it over http ──────
 do
   package.loaded.http_client = { get = function() return nil end }
   package.loaded.plugin_logger = { log = function() end, warn = function() end }
@@ -39,28 +41,7 @@ do
     source:find('http://api.perondepot.xyz', 1, true) == nil)
 end
 
--- ── the catalogue must declare a plaintext source ────────────────────────────
-do
-  local f = assert(io.open("plugin/backend/api.defaults.json", "r"))
-  local raw = f:read("*a")
-  f:close()
-  -- Every built-in whose URL is http:// has to carry the "insecure" marker, and
-  -- every https one must not.
-  for entry in raw:gmatch("{[^{}]*}") do
-    local url = entry:match('"url"%s*:%s*"([^"]*)"')
-    if url and url ~= "" then
-      local id = entry:match('"builtin_id"%s*:%s*"([^"]*)"') or "?"
-      local marked = entry:match('"insecure"%s*:%s*true') ~= nil
-      if url:sub(1, 7) == "http://" then
-        check("T4 plaintext built-in '" .. id .. "' is marked insecure", marked)
-      else
-        check("T5 https built-in '" .. id .. "' is not marked insecure", not marked)
-      end
-    end
-  end
-end
-
--- ── api_manifest refuses an unmarked plaintext source ────────────────────────
+-- ── a source URL must be a download URL ─────────────────────────────────────
 do
   package.loaded.config = {
     API_DEFAULTS_FILE = "api.defaults.json", API_JSON_FILE = "api.json",
@@ -79,72 +60,53 @@ do
   }
   local api_manifest = dofile("plugin/backend/api_manifest.lua")
 
-  check("T6 an https source is usable",
-    api_manifest.source_transport_ok(
-      { url = "https://mirror.example/<appid>.zip" }) == true)
-  check("T7 an unmarked plaintext source is refused",
-    api_manifest.source_transport_ok(
-      { url = "http://mirror.example/<appid>.zip" }) == false)
-  check("T8 a plaintext source that declares itself is allowed through",
-    api_manifest.source_transport_ok(
-      { url = "http://mirror.example/<appid>.zip", insecure = true }) == true)
-  check("T9 the marker cannot smuggle a non-web scheme",
-    api_manifest.source_transport_ok(
-      { url = "file:///etc/passwd", insecure = true }) == false)
-  check("T10 a managed source with no URL is unaffected",
-    api_manifest.source_transport_ok({ managed = true }) == true)
+  check("T4 an https source is accepted",
+    api_manifest.validate_source_url("https://mirror.example/<appid>.zip") ~= nil)
+  -- Plaintext is a deployment choice, not a rejection reason.
+  check("T5 a plaintext source is accepted",
+    api_manifest.validate_source_url("http://167.235.229.108/<appid>") ~= nil)
+  check("T6 a file:// source is refused",
+    api_manifest.validate_source_url("file:///etc/passwd") == nil)
+  check("T7 an ftp:// source is refused",
+    api_manifest.validate_source_url("ftp://mirror.example/<appid>") == nil)
+  check("T8 a source without the appid placeholder is refused",
+    api_manifest.validate_source_url("https://mirror.example/all.zip") == nil)
+  check("T9 a CRLF-carrying source is refused",
+    api_manifest.validate_source_url("https://mirror.example/<appid>\r\nX: y") == nil)
+  check("T10 a userinfo-disguised source is refused",
+    api_manifest.validate_source_url("https://mirror.example@evil.example/<appid>") == nil)
+  check("T11 an empty source is refused",
+    api_manifest.validate_source_url("") == nil)
 
-  -- The marker is a property of the built-in catalogue, not something a caller
-  -- can set: add_custom_api must still refuse plaintext even with it present.
-  local catalog = { api_list = {} }
-  local deps = { catalog = function() return catalog end, save = function() return true end }
-  local added = api_manifest.add_custom_api(
-    { name = "X", url = "http://mirror.example/<appid>", insecure = true }, deps)
-  check("T11 a custom source cannot opt itself out of TLS", added.success == false)
+  -- No source is dropped from the list for its scheme.
+  check("T12 the source list applies no transport filter",
+    api_manifest.source_transport_ok == nil)
 end
 
-
--- ── a remote catalogue cannot grant itself the TLS exemption ─────────────────
--- The "insecure" marker exempts a source from the TLS requirement. It describes
--- OUR shipped catalogue. The remote manifest lives in a third-party repository on
--- a mutable branch, so an entry from there must never carry it: honouring it would
--- let that repository hand itself a plaintext source whose payload becomes the
--- game's Lua script and depot manifests.
+-- ── the download worker refuses a scheme that is not a download ─────────────
 do
-  local f = assert(io.open("plugin/backend/api_manifest.lua", "r"))
+  local f = assert(io.open("plugin/backend/scripts/smart_download.sh", "r"))
   local source = f:read("*a")
   f:close()
-  local _, stripped = source:gsub("item%.insecure = nil", "")
-  check("T16 every remote-manifest import strips the insecure marker",
-    stripped >= 2)
-  -- Both import loops build their entry with copy_table, so the strip has to sit
-  -- next to each of them rather than in one shared place.
-  local _, copies = source:gsub("copy_table%(api%)", "")
-  check("T17 the strip covers every copy_table import site", stripped >= copies)
-end
-
--- ── the plaintext discovery probe is explicit, not accidental ────────────────
-do
-  local f = assert(io.open("plugin/backend/lua_tools_manifest.lua", "r"))
-  local source = f:read("*a")
-  f:close()
-  check("T12 the plaintext discovery probe opts in explicitly",
-    source:find("allow_http = true", 1, true) ~= nil)
-  check("T12b and does not claim a transport behaviour it cannot rely on",
-    source:find("honoured by the Lumen HTTP", 1, true) ~= nil)
-  check("T13 the plaintext discovery probe is documented as such",
-    source:find("no TLS", 1, true) ~= nil)
+  check("T13 the worker pins the request protocol per candidate",
+    source:find("--proto \"${C_PROTO[i]}\"", 1, true) ~= nil)
+  check("T14 the worker pins the redirect protocol too",
+    source:find("--proto-redir", 1, true) ~= nil)
+  check("T15 an https candidate cannot be downgraded to http",
+    source:find('https://*) C_PROTO[n]="=https" ;;', 1, true) ~= nil)
+  check("T16 an unsupported scheme drops the candidate",
+    source:find("unsupported address type", 1, true) ~= nil)
 end
 
 -- ── the key-donation module is gone ─────────────────────────────────────────
 do
   local probe = io.open("plugin/backend/donate_keys.lua", "r")
   if probe then probe:close() end
-  check("T14 the plaintext key-donation module is removed", probe == nil)
+  check("T17 the plaintext key-donation module is removed", probe == nil)
   local f = assert(io.open("plugin/backend/settings/options.lua", "r"))
   local source = f:read("*a")
   f:close()
-  check("T15 no settings option advertises key donation",
+  check("T18 no settings option advertises key donation",
     source:lower():find("donatekeys", 1, true) == nil)
 end
 

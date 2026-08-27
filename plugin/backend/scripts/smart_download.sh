@@ -66,21 +66,17 @@ while IFS= read -r -d '' idx <&3; do
   IFS= read -r -d '' code <&3 || break
   IFS= read -r -d '' bearer <&3 || break
   [[ "$idx" =~ ^[0-9]+$ && "$code" =~ ^[0-9]+$ && -n "$url" ]] || continue
-  # Transport policy, decided per candidate from its own URL. curl was called
-  # with no --proto restriction, so a candidate could be file:// (reading a local
-  # file into the merge pipeline) and an https candidate could be redirected down
-  # to http. ALLOW_HTTP=1 is the backend's explicit statement that a plaintext
-  # source is expected in this run; without it a plaintext candidate is dropped
-  # rather than fetched.
+  # Transport policy, decided per candidate from its own URL. curl was called with
+  # no --proto restriction at all, so a candidate could be file:// — reading a
+  # local file into the merge pipeline rather than downloading anything — and an
+  # https candidate could be silently redirected down to http.
+  #
+  # Whether a mirror serves TLS is the operator's choice, so http is accepted; what
+  # is refused is a scheme that is not a download at all, and a downgrade of a
+  # candidate that started out on https.
   case "$url" in
     https://*) C_PROTO[n]="=https" ;;
-    http://*)
-      if [[ "${ALLOW_HTTP:-0}" == "1" ]]; then
-        C_PROTO[n]="=http,https"
-      else
-        slog "dropping candidate $name: source is not using a secure connection"
-        continue
-      fi ;;
+    http://*) C_PROTO[n]="=http,https" ;;
     *)
       slog "dropping candidate $name: unsupported address type"
       continue ;;

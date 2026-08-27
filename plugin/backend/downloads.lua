@@ -452,25 +452,8 @@ local function _shell_quote(value)
     return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
 end
 
--- _records_need_http(records) -> true when any candidate URL is plaintext.
--- The worker drops plaintext candidates unless ALLOW_HTTP=1 says one is
--- expected. Only sources the catalogue marks `insecure` survive
--- api_manifest.load_api_manifest(), so a plaintext URL reaching here is a
--- declared one; passing the flag keeps that source working without making
--- plaintext the silent default for everything.
-local function _records_need_http(records)
-    for _, record in ipairs(records or {}) do
-        -- Match the URL FIELD, not the record: a source merely NAMED "http://…"
-        -- would otherwise grant ALLOW_HTTP=1 for the whole run. Record layout is
-        -- index \0 name \0 url \0 code \0 bearer \0.
-        local _, _, url = tostring(record):match("^([^%z]*)%z([^%z]*)%z([^%z]*)%z")
-        if url and url:sub(1, 7) == "http://" then return true end
-    end
-    return false
-end
-
 local function _launch_smart_download(appid, candidates_file, coverage_file,
-        dest_root, state_file, stop_file, allow_http)
+        dest_root, state_file, stop_file)
     local sh_path = fs.join(paths.get_plugin_dir(), "backend", "scripts", "smart_download.sh")
     m_utils.exec("chmod +x -- " .. _shell_quote(sh_path))
     -- Capture the detached worker's stdout+stderr into ~/.lumen.log (was
@@ -478,8 +461,7 @@ local function _launch_smart_download(appid, candidates_file, coverage_file,
     -- frontend's only signal was a bare "failed" state, surfaced as the
     -- opaque "Unknown error"). The worker emits ISO-8601 UTC diagnostics.
     local cmd = string.format(
-        "nohup env ALLOW_HTTP=%s bash %s %s %s %s %s %s %s >> %s 2>&1 &",
-        allow_http and "1" or "0",
+        "nohup bash %s %s %s %s %s %s %s >> %s 2>&1 &",
         _shell_quote(sh_path), _shell_quote(appid), _shell_quote(state_file),
         _shell_quote(dest_root), _shell_quote(candidates_file), _shell_quote(coverage_file),
         _shell_quote(stop_file), _shell_quote(_lumen_log_path())
@@ -633,7 +615,7 @@ _start_smart_records = function(appid, records, current_api)
             bytesRead = 0, totalBytes = 0, progress = 0,
         })
         _launch_smart_download(appid, job.candidates, job.coverage,
-            job.root, job.state, job.stop, _records_need_http(records))
+            job.root, job.state, job.stop)
     end)
     if not ok then
         logger.warn("LuaTools: download launch failed appid=" .. tostring(appid)
@@ -773,7 +755,7 @@ function downloads.start_game_draft(appid)
             _atomic_write(job.state, '{"status":"collected","currentApi":"Cached sources"}\n')
         else
             _launch_smart_download(appid, job.candidates, job.coverage,
-                job.root, job.state, job.stop, _records_need_http(records))
+                job.root, job.state, job.stop)
         end
     end)
     if not ok then
