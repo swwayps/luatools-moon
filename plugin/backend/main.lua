@@ -1706,4 +1706,5 @@ return {
     on_unload          = on_unload,
     on_frontend_loaded = on_frontend_loaded,
     on_tick            = on_tick,
+    rpc_methods         = require("rpc_contract"),
 }

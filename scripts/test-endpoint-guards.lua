@@ -323,6 +323,13 @@ do
   check("E9 an empty URL is refused", (opened("")) == false)
   check("E10 a semicolon URL is refused",
     (opened("http://a.example/;id")) == false)
+  local query_ok, query_cmd = opened(
+    "https://lua.tools/login?provider=discord&flow=steam")
+  check("E11 a normal multi-parameter URL opens", query_ok == true)
+  check("E12 the query ampersand remains inside the quoted URL",
+    query_cmd and query_cmd:find(
+      guard.shell_quote("https://lua.tools/login?provider=discord&flow=steam"),
+      1, true) ~= nil)
 end
 
 -- ── add_custom_api ──────────────────────────────────────────────────────────

@@ -74,16 +74,19 @@ end
 -- targets are fixed product links, some of which still redirect from http).
 --
 -- The characters refused here are the ones that cannot legally appear unescaped
--- in a URL and that a shell would act on: quotes, backticks, `$`, `;`, `|`, `&`,
--- redirection and braces. Query strings and fragments are NOT refused — `?`, `#`,
--- `*`, `~`, `[` and `]` are ordinary URL characters, and rejecting them made a
--- perfectly good link like https://steamdb.info/app/440/?x=1 surface to the user
--- as "Invalid URL". Injection is prevented by single-quoting at the call site
--- (guard.shell_quote); this blocklist is the second layer, not the first.
-local SHELL_META = '[`$\\;|&<>()"\'{}]'
+-- in the links this endpoint opens and that a shell would act on: quotes,
+-- backticks, `$`, `;`, `|`, redirection and braces. `&` is deliberately allowed
+-- after the authority because it is the normal query-parameter separator; the
+-- whole URL is single-quoted at the call site, so the shell never interprets it.
+-- An ampersand inside the authority remains invalid and is rejected below.
+local SHELL_META = '[`$\\;|<>()"\'{}]'
 function guard.external_url(url)
   local checked, reason = guard.https_url(url, { allow_http = true })
   if not checked then return nil, reason end
+  local _, authority = split_url(checked)
+  if authority and authority:find("&", 1, true) then
+    return nil, "illegal host character"
+  end
   if checked:find(SHELL_META) then return nil, "shell metacharacter" end
   return checked
 end

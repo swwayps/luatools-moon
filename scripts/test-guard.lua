@@ -129,6 +129,8 @@ check("external https accepted",
 -- valid product link into "Invalid URL" for the user.
 check("a query string is accepted",
   guard.external_url("https://steamdb.info/app/440/?tab=depots") ~= nil)
+check("multiple query parameters are accepted",
+  guard.external_url("https://lua.tools/login?provider=discord&flow=steam") ~= nil)
 check("a fragment is accepted",
   guard.external_url("https://lua.tools/docs#install") ~= nil)
 check("a tilde is accepted", guard.external_url("https://a.example/~user") ~= nil)
