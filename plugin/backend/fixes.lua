@@ -151,6 +151,8 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
     local dest_root = utils.ensure_temp_download_dir()
     local dest_zip = fs.join(dest_root, "fix_" .. tostring(appid) .. ".zip")
     local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
+    local backup_root = paths.backend_path(
+        "data/fix_backups/" .. tostring(appid))
     -- No fix source needs a request credential: the official catalogue hands out
     -- pre-signed URLs (lua_tools_fixes.resolve_download) and the online-fix
     -- fallback is a public mirror. The downloader keeps its header-file argument
@@ -177,14 +179,31 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
         -- finished after 5 minutes on another). Here only a transfer that is
         -- effectively dead should abort, so the floor is 1 KB/s over 45s.
         local cmd = string.format(
-            "nohup env MAX_TIME=1800 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash %s %s %s %s %s '' %s >> \"${HOME:-/tmp}/.lumen.log\" 2>&1 &",
+            "nohup env MAX_TIME=1800 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash %s %s %s %s %s '' %s %s >> \"${HOME:-/tmp}/.lumen.log\" 2>&1 &",
             shell_quote(sh_path), shell_quote(download_url), shell_quote(dest_zip),
-            shell_quote(install_path), shell_quote(state_file), shell_quote(header_file)
+            shell_quote(install_path), shell_quote(state_file), shell_quote(header_file),
+            shell_quote(backup_root)
         )
         m_utils.exec(cmd)
     end
 
     return { success = true }
+end
+
+function fixes.restore_game_fix(appid, install_path, deps)
+    deps = deps or {}
+    local backup_root = deps.backup_root or paths.backend_path(
+        "data/fix_backups/" .. tostring(appid))
+    local exists = deps.exists or fs.exists
+    if not exists(backup_root) then return true end
+
+    local script = deps.restore_script or fs.join(
+        paths.get_plugin_dir(), "backend", "scripts", "restore_fix.sh")
+    local exec = deps.exec or m_utils.exec
+    local _, ok = exec("bash " .. shell_quote(script) .. " "
+        .. shell_quote(install_path) .. " " .. shell_quote(backup_root))
+    if not ok then return false, "Could not restore the original game files." end
+    return true
 end
 
 function fixes.get_apply_status(appid)

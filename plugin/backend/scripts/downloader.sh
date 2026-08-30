@@ -30,6 +30,7 @@ EXTRACT_DIR="$3"
 STATE_FILE="$4"
 USER_AGENT="${5:-discord(dot)gg/luatools}"
 HEADER_FILE="${6:-}"
+BACKUP_ROOT="${7:-}"
 
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 MAX_TIME="${MAX_TIME:-25}"
@@ -365,7 +366,17 @@ if [ -n "$EXTRACT_DIR" ]; then
   # the game. Existing files are backed up and restored if any copy fails;
   # archives that were already in the game directory are never scanned.
   if [ -n "$STAGE_DIR" ]; then
-    BACKUP_DIR="$(mktemp -d "${DEST_PATH}.backup.XXXXXX")" || {
+    if [ -n "$BACKUP_ROOT" ]; then
+      if [ -L "$BACKUP_ROOT" ] || ! mkdir -p "$BACKUP_ROOT"; then
+        write_failed "The rollback directory could not be prepared. Check its permissions." "backup_failed"
+        exit 1
+      fi
+      chmod 700 "$BACKUP_ROOT" 2>/dev/null || true
+      BACKUP_DIR="$(umask 077; mktemp -d "$BACKUP_ROOT/txn.$(date +%s%N).XXXXXX")"
+    else
+      BACKUP_DIR="$(mktemp -d "${DEST_PATH}.backup.XXXXXX")"
+    fi
+    [ -n "$BACKUP_DIR" ] && [ -d "$BACKUP_DIR" ] || {
       write_failed "A rollback directory could not be created. Check free space and permissions."
       exit 1
     }
@@ -376,6 +387,7 @@ if [ -n "$EXTRACT_DIR" ]; then
     while IFS= read -r -d '' source_dir; do
       rel="${source_dir#"$STAGE_DIR"/}"
       [ "$source_dir" = "$STAGE_DIR" ] && continue
+      case "$rel" in *$'\t'*|*$'\n'*|*$'\r'*) apply_failed=1; break ;; esac
       target_dir="$EXTRACT_DIR/$rel"
       if [ -L "$target_dir" ]; then apply_failed=1; break; fi
       if [ -e "$target_dir" ] && [ ! -d "$target_dir" ]; then apply_failed=1; break; fi
@@ -388,6 +400,7 @@ if [ -n "$EXTRACT_DIR" ]; then
     if [ "$apply_failed" -eq 0 ]; then
       while IFS= read -r -d '' source_file; do
         rel="${source_file#"$STAGE_DIR"/}"
+        case "$rel" in *$'\t'*|*$'\n'*|*$'\r'*) apply_failed=1; break ;; esac
         target_file="$EXTRACT_DIR/$rel"
         backup_file="$BACKUP_DIR/files/$rel"
         if [ -d "$target_file" ]; then apply_failed=1; break; fi
@@ -424,7 +437,9 @@ if [ -n "$EXTRACT_DIR" ]; then
       write_failed "The fix was extracted safely, but could not be applied. Existing game files were restored." "apply_failed"
       exit 1
     fi
-    rm -rf "$BACKUP_DIR"
+    if [ ! -s "$JOURNAL" ] || [ -z "$BACKUP_ROOT" ]; then
+      rm -rf "$BACKUP_DIR"
+    fi
   fi
 
   slog "extracted -> handing off to finalize"

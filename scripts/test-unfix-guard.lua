@@ -6,6 +6,8 @@ package.path = "plugin/backend/?.lua;" .. package.path
 
 local removals = {}
 local state_cleared = false
+local restore_calls = 0
+local restore_succeeds = true
 
 package.preload.json = function()
   return {
@@ -42,8 +44,16 @@ package.preload.steam_utils = function()
 end
 package.preload.lua_tools_fix_state = function()
   return {
-    get_applied = function() return nil end,
+    get_applied = function() return { manifestFilename = "238320.lua" } end,
     clear = function() state_cleared = true; return true end,
+  }
+end
+package.preload.fixes = function()
+  return {
+    restore_game_fix = function(appid, path)
+      restore_calls = restore_calls + 1
+      return restore_succeeds, restore_succeeds and nil or "restore failed"
+    end,
   }
 end
 package.preload.slsteam = function()
@@ -52,7 +62,7 @@ end
 
 for _, name in ipairs({
   "utils", "millennium", "http_client", "paths", "plugin_utils",
-  "locales.manager", "api_manifest", "downloads", "fixes",
+  "locales.manager", "api_manifest", "downloads",
   "lua_tools_auth", "lua_tools_fixes", "lua_tools_fix_index",
   "lua_tools_recommended_add", "lua_tools_auto_fix", "settings.manager",
   "auto_update", "launchopts", "fix_overlays", "launcherfix",
@@ -77,6 +87,7 @@ check("a caller path that differs from Steam metadata is refused",
   type(result) == "table" and result.success == false)
 check("a refused cleanup removes no files", #removals == 0)
 check("a refused cleanup preserves saved application state", state_cleared == false)
+check("a refused cleanup never starts a restore", restore_calls == 0)
 
 removals = {}
 state_cleared = false
@@ -86,11 +97,26 @@ result = UnFixGame({
 })
 check("the Steam-derived game path remains cleanable",
   type(result) == "table" and result.success == true)
+check("cleanup restores the journal for the Steam-derived game path",
+  restore_calls == 1)
 check("cleanup removes only the known files below the derived game path",
   #removals == 3
     and removals[1] == "/steam/steamapps/common/Outlast/unsteam.dll"
     and removals[2] == "/steam/steamapps/common/Outlast/unsteam.ini"
     and removals[3] == "/steam/steamapps/common/Outlast/winmm.dll")
+check("cleanup preserves the canonical app manifest",
+  not table.concat(removals, "\n"):find("/config/stplug%-in/238320%.lua"))
 check("successful cleanup clears its saved application state", state_cleared == true)
+
+removals = {}
+state_cleared = false
+restore_succeeds = false
+result = UnFixGame({
+  appid = 238320,
+  installPath = "/steam/steamapps/common/Outlast",
+})
+check("a failed restore fails Unfix", type(result) == "table" and result.success == false)
+check("a failed restore preserves saved application state", state_cleared == false)
+check("a failed restore performs no guessed legacy deletion", #removals == 0)
 
 if failures > 0 then os.exit(1) end

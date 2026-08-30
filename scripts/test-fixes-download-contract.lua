@@ -26,7 +26,10 @@ package.loaded.plugin_logger = { log = function() end, warn = function() end }
 package.loaded.plugin_utils = {
   ensure_temp_download_dir = function() return "/tmp/luatools" end,
 }
-package.loaded.paths = { get_plugin_dir = function() return "/plugin" end }
+package.loaded.paths = {
+  get_plugin_dir = function() return "/plugin" end,
+  backend_path = function(name) return "/plugin/backend/" .. name end,
+}
 package.loaded.json = { decode = function(raw)
   if raw and raw:find('"errorCode"%s*:%s*"authentication"') then
     return {status = "failed", error = "the source refused this", errorCode = "authentication"}
@@ -83,6 +86,8 @@ check("A3b fix downloads get a stall guard that tolerates a slow link",
     and worker:find("SPEED_TIME=45", 1, true) ~= nil)
 check("A3c fix downloads have a generous but finite overall limit",
   worker:find("MAX_TIME=1800", 1, true) ~= nil)
+check("A3d the worker receives a persistent per-app backup root",
+  worker:find("/plugin/backend/data/fix_backups/12100", 1, true) ~= nil)
 
 local before = #commands
 -- https, not http: the online-fix mirror serves TLS (verified), and a plaintext

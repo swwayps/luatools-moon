@@ -1368,24 +1368,20 @@ function UnFixGame(appid, installPath, fixDate)
     end
 
     local ok, res = pcall(function()
+        local restored, restore_error = fixes.restore_game_fix(appid, derived_path)
+        if not restored then
+            return { success = false, errorCode = "restore_failed",
+                error = restore_error or "Could not restore the original game files." }
+        end
         local ok_sls, sls = pcall(require, "slsteam")
         if ok_sls and sls and sls.unset_fake_appid then
             pcall(sls.unset_fake_appid, appid)
         end
-        local applied_receipt = lua_tools_fix_state.get_applied(appid)
-        if type(applied_receipt) == "table"
-            and tostring(applied_receipt.manifestFilename or "") ~= "" then
-            local steam_root = steam_utils.detect_steam_install_path()
-            if steam_root and steam_root ~= "" then
-                pcall(fs.remove, fs.join(steam_root, "config", "stplug-in",
-                    tostring(appid) .. ".lua"))
-            end
-        end
-        pcall(lua_tools_fix_state.clear, appid)
         -- Defensive: remove orphan Unsteam files from an older file-based apply.
         for _, name in ipairs({ "unsteam.dll", "unsteam.ini", "winmm.dll" }) do
             pcall(fs.remove, fs.join(derived_path, name))
         end
+        pcall(lua_tools_fix_state.clear, appid)
         -- slsteammoon: clear the WINEDLLOVERRIDES launch option a Crack/Online
         -- fix added AND any launcher redirect (FC25-style), restoring the
         -- original launch options (the leftover fix DLLs / launcher are inert
