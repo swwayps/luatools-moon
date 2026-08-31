@@ -160,6 +160,8 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
     local header_file = ""
 
     logger.log("LuaTools: Applying fix to " .. tostring(install_path))
+    pcall(fs.remove, state_file .. ".stop")
+    pcall(fs.remove, state_file .. ".pid")
     m_utils.write_file(state_file, '{"status": "downloading"}')
 
     local is_windows = m_utils.getenv("OS") == "Windows_NT"
@@ -179,7 +181,7 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
         -- finished after 5 minutes on another). Here only a transfer that is
         -- effectively dead should abort, so the floor is 1 KB/s over 45s.
         local cmd = string.format(
-            "nohup env MAX_TIME=1800 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash %s %s %s %s %s '' %s %s >> \"${HOME:-/tmp}/.lumen.log\" 2>&1 &",
+            "nohup setsid env MAX_TIME=1800 SPEED_LIMIT=1024 SPEED_TIME=45 EXTRACT_NESTED=1 bash %s %s %s %s %s '' %s %s >> \"${HOME:-/tmp}/.lumen.log\" 2>&1 &",
             shell_quote(sh_path), shell_quote(download_url), shell_quote(dest_zip),
             shell_quote(install_path), shell_quote(state_file), shell_quote(header_file),
             shell_quote(backup_root)
@@ -187,6 +189,41 @@ function fixes.apply_game_fix(appid, download_url, install_path, fix_type, game_
         m_utils.exec(cmd)
     end
 
+    return { success = true }
+end
+
+function fixes.cancel_game_fix(appid, install_path, transaction, deps)
+    deps = deps or {}
+    appid = tonumber(appid)
+    if not appid or appid <= 0 or appid ~= math.floor(appid) then
+        return { success = false, errorCode = "invalid_appid",
+            error = "Invalid Steam app ID." }
+    end
+    install_path = tostring(install_path or "")
+    if install_path == "" then
+        return { success = false, errorCode = "not_installed",
+            error = "Game is not installed." }
+    end
+    transaction = tostring(transaction or "")
+    if transaction ~= "" and not transaction:match("^txn%.[%w._-]+$") then
+        return { success = false, errorCode = "invalid_transaction",
+            error = "The rollback transaction is invalid." }
+    end
+
+    local dest_root = utils.ensure_temp_download_dir()
+    local state_file = fs.join(dest_root, "fix_" .. tostring(appid) .. "_state.json")
+    local backup_root = deps.backup_root or paths.backend_path(
+        "data/fix_backups/" .. tostring(appid))
+    local script = deps.cancel_script or fs.join(
+        paths.get_plugin_dir(), "backend", "scripts", "cancel_fix.sh")
+    local exec = deps.exec or m_utils.exec
+    local _, ok = exec("bash " .. shell_quote(script) .. " "
+        .. shell_quote(state_file) .. " " .. shell_quote(install_path) .. " "
+        .. shell_quote(backup_root) .. " " .. shell_quote(transaction))
+    if not ok then
+        return { success = false, errorCode = "rollback_failed",
+            error = "The automatic fix could not be rolled back cleanly." }
+    end
     return { success = true }
 end
 
@@ -225,8 +262,9 @@ function fixes.get_apply_status(appid)
                 pcall(fs.remove, state_file)
                 pcall(fs.remove, dest_zip)
                 pcall(fs.remove, header_file)
-            elseif data.status == "failed" then
+            elseif data.status == "failed" or data.status == "cancelled" then
                 pcall(fs.remove, state_file)
+                pcall(fs.remove, dest_zip)
                 pcall(fs.remove, header_file)
             end
             return { success = true, state = data }

@@ -31,6 +31,14 @@ STATE_FILE="$4"
 USER_AGENT="${5:-discord(dot)gg/luatools}"
 HEADER_FILE="${6:-}"
 BACKUP_ROOT="${7:-}"
+STOP_FILE="${STATE_FILE:+${STATE_FILE}.stop}"
+PID_FILE="${STATE_FILE:+${STATE_FILE}.pid}"
+CURL_PID=""
+STAGE_DIR=""
+BACKUP_DIR=""
+JOURNAL=""
+TRANSACTION=""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 CONNECT_TIMEOUT="${CONNECT_TIMEOUT:-8}"
 MAX_TIME="${MAX_TIME:-25}"
@@ -49,11 +57,18 @@ slog() { printf '%s INFO downloader[%s pid %s]: %s\n' \
   "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${LUMEN_TAG:-?}" "$$" "$*"; }
 
 write_state() {
-  # write_state <status> [bytesRead] [totalBytes]
+  # write_state <status> [bytesRead] [totalBytes] [transaction]
   [ -n "$STATE_FILE" ] || return 0
-  local status="$1" br="${2:-0}" tb="${3:-0}" tmp="${STATE_FILE}.tmp.$$"
-  printf '{"status": "%s", "bytesRead": %s, "totalBytes": %s}\n' \
-    "$status" "$br" "$tb" > "$tmp" && mv -f "$tmp" "$STATE_FILE"
+  local status="$1" br="${2:-0}" tb="${3:-0}" transaction="${4:-}"
+  local tmp="${STATE_FILE}.tmp.$$"
+  if [ -n "$transaction" ]; then
+    printf '{"status": "%s", "bytesRead": %s, "totalBytes": %s, "transaction": "%s"}\n' \
+      "$status" "$br" "$tb" "$(json_escape "$transaction")" > "$tmp"
+  else
+    printf '{"status": "%s", "bytesRead": %s, "totalBytes": %s}\n' \
+      "$status" "$br" "$tb" > "$tmp"
+  fi
+  mv -f "$tmp" "$STATE_FILE"
 }
 
 # json_escape <str> : escape backslash + double-quote so a reason with quotes
@@ -67,14 +82,73 @@ write_failed() {
   slog "FAILED: $reason"
   [ -n "$STATE_FILE" ] || return 0
   local tmp="${STATE_FILE}.tmp.$$"
-  if [ -n "$error_code" ]; then
+  if [ -n "$error_code" ] && [ -n "$TRANSACTION" ]; then
+    printf '{"status": "failed", "error": "%s", "errorCode": "%s", "transaction": "%s"}\n' \
+      "$(json_escape "$reason")" "$(json_escape "$error_code")" \
+      "$(json_escape "$TRANSACTION")" > "$tmp"
+  elif [ -n "$error_code" ]; then
     printf '{"status": "failed", "error": "%s", "errorCode": "%s"}\n' \
       "$(json_escape "$reason")" "$(json_escape "$error_code")" > "$tmp"
+  elif [ -n "$TRANSACTION" ]; then
+    printf '{"status": "failed", "error": "%s", "transaction": "%s"}\n' \
+      "$(json_escape "$reason")" "$(json_escape "$TRANSACTION")" > "$tmp"
   else
     printf '{"status": "failed", "error": "%s"}\n' "$(json_escape "$reason")" > "$tmp"
   fi
   mv -f "$tmp" "$STATE_FILE"
 }
+
+cancel_requested() { [ -n "$STOP_FILE" ] && [ -e "$STOP_FILE" ]; }
+
+rollback_current() {
+  [ -n "$JOURNAL" ] && [ -f "$JOURNAL" ] || return 0
+  if [ -n "$BACKUP_ROOT" ] && [ -n "$TRANSACTION" ]; then
+    if ! bash "$SCRIPT_DIR/restore_fix.sh" \
+        "$EXTRACT_DIR" "$BACKUP_ROOT" "$TRANSACTION"; then
+      return 1
+    fi
+    BACKUP_DIR=""
+    JOURNAL=""
+    TRANSACTION=""
+    return 0
+  fi
+  while IFS=$'\t' read -r action rel; do
+    target="$EXTRACT_DIR/$rel"
+    if [ "$action" = "E" ]; then
+      rm -rf "$target"
+      mkdir -p "$(dirname "$target")"
+      cp -a "$BACKUP_DIR/files/$rel" "$target" 2>/dev/null || true
+    elif [ "$action" = "N" ]; then
+      rm -rf "$target"
+    fi
+  done < "$JOURNAL"
+  tac "$JOURNAL" 2>/dev/null | while IFS=$'\t' read -r action rel; do
+    [ "$action" != "D" ] || rmdir "$EXTRACT_DIR/$rel" 2>/dev/null || true
+  done
+  rm -rf "$BACKUP_DIR"
+  [ -z "$BACKUP_ROOT" ] || rmdir "$BACKUP_ROOT" 2>/dev/null || true
+  BACKUP_DIR=""
+  JOURNAL=""
+  TRANSACTION=""
+}
+
+cleanup_worker() {
+  [ -z "$CURL_PID" ] || kill "$CURL_PID" 2>/dev/null || true
+  [ -z "$STAGE_DIR" ] || rm -rf "$STAGE_DIR"
+  [ -z "$PID_FILE" ] || rm -f "$PID_FILE"
+  [ -z "$STOP_FILE" ] || rm -f "$STOP_FILE"
+}
+
+cancel_now() {
+  trap - TERM INT HUP
+  rm -f "$DEST_PATH" "${PART_PATH:-}" "${HTTP_CODE_PATH:-}"
+  write_state "cancelled" 0 0 "$TRANSACTION"
+  slog "cancelled; rollback handed to watchdog"
+  exit 0
+}
+
+trap cancel_now TERM INT HUP
+trap cleanup_worker EXIT
 
 if command -v flock >/dev/null 2>&1 && [ -n "$STATE_FILE" ]; then
   exec 9>"${STATE_FILE}.lock"
@@ -84,8 +158,13 @@ if command -v flock >/dev/null 2>&1 && [ -n "$STATE_FILE" ]; then
   fi
 fi
 
+if [ -n "$PID_FILE" ]; then
+  printf '%s\n' "$$" > "${PID_FILE}.tmp.$$" && mv -f "${PID_FILE}.tmp.$$" "$PID_FILE"
+fi
+
 slog "worker start: dest=$DEST_PATH extract=$EXTRACT_DIR"
 write_state "downloading" 0 0
+cancel_requested && cancel_now
 
 # An authenticated source may pass a chmod-600 curl header file. Keep credentials
 # out of the process command line and never send them to a source that did not
@@ -135,6 +214,12 @@ curl --fail -L "${CURL_PROTO[@]}" -A "$USER_AGENT" \
 CURL_PID=$!
 
 while kill -0 "$CURL_PID" 2>/dev/null; do
+  if cancel_requested; then
+    kill "$CURL_PID" 2>/dev/null || true
+    wait "$CURL_PID" 2>/dev/null || true
+    CURL_PID=""
+    cancel_now
+  fi
   if [ -f "$PART_PATH" ]; then
     sz="$(stat -c %s "$PART_PATH" 2>/dev/null || echo 0)"
     write_state "downloading" "$sz" "$TOTAL"
@@ -143,6 +228,7 @@ while kill -0 "$CURL_PID" 2>/dev/null; do
 done
 wait "$CURL_PID"
 rc=$?
+CURL_PID=""
 HTTP_CODE="$(cat "$HTTP_CODE_PATH" 2>/dev/null || true)"
 rm -f "$HTTP_CODE_PATH"
 
@@ -170,6 +256,7 @@ if [ "$rc" -ne 0 ]; then
   fi
   exit 1
 fi
+cancel_requested && cancel_now
 mv -f "$PART_PATH" "$DEST_PATH" || {
   write_failed "The downloaded file could not be saved. Check the destination permissions and try again."
   exit 1
@@ -200,18 +287,15 @@ if [ -n "${EXPECTED_SHA256:-}" ]; then
 fi
 
 if [ -n "$EXTRACT_DIR" ]; then
+  cancel_requested && cancel_now
   write_state "extracting" "$TOTAL" "$TOTAL"
   # Prefer the bundled static 7zz: it extracts BOTH .zip and .rar (online
   # fixes ship as .rar, which unzip can't handle). Fall back to system unzip
   # only when 7zz is absent (zip-only).
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
   SEVENZ="$SCRIPT_DIR/../bin/7zz"
   MAX_ARCHIVE_ENTRIES="${MAX_ARCHIVE_ENTRIES:-20000}"
   MAX_EXPANDED_BYTES="${MAX_EXPANDED_BYTES:-4294967296}"
-  STAGE_DIR=""
   EXTRACT_WORK="$EXTRACT_DIR"
-  cleanup_stage() { [ -z "$STAGE_DIR" ] || rm -rf "$STAGE_DIR"; }
-  trap cleanup_stage EXIT
 
   archive_is_safe() {
     local archive="$1" paths count expanded listing
@@ -329,6 +413,7 @@ if [ -n "$EXTRACT_DIR" ]; then
 
     found_archive=0
     while IFS= read -r -d '' arc; do
+      cancel_requested && cancel_now
       found_archive=1
       if ! is_secondary "$arc"; then
         list_fix_dlls "$arc"   # capture nested-archive DLLs BEFORE deletion
@@ -366,6 +451,7 @@ if [ -n "$EXTRACT_DIR" ]; then
   # the game. Existing files are backed up and restored if any copy fails;
   # archives that were already in the game directory are never scanned.
   if [ -n "$STAGE_DIR" ]; then
+    cancel_requested && cancel_now
     if [ -n "$BACKUP_ROOT" ]; then
       if [ -L "$BACKUP_ROOT" ] || ! mkdir -p "$BACKUP_ROOT"; then
         write_failed "The rollback directory could not be prepared. Check its permissions." "backup_failed"
@@ -382,9 +468,12 @@ if [ -n "$EXTRACT_DIR" ]; then
     }
     JOURNAL="$BACKUP_DIR/journal"
     : > "$JOURNAL"
+    TRANSACTION="$(basename "$BACKUP_DIR")"
+    write_state "applying" "$TOTAL" "$TOTAL" "$TRANSACTION"
     apply_failed=0
 
     while IFS= read -r -d '' source_dir; do
+      cancel_requested && cancel_now
       rel="${source_dir#"$STAGE_DIR"/}"
       [ "$source_dir" = "$STAGE_DIR" ] && continue
       case "$rel" in *$'\t'*|*$'\n'*|*$'\r'*) apply_failed=1; break ;; esac
@@ -392,13 +481,19 @@ if [ -n "$EXTRACT_DIR" ]; then
       if [ -L "$target_dir" ]; then apply_failed=1; break; fi
       if [ -e "$target_dir" ] && [ ! -d "$target_dir" ]; then apply_failed=1; break; fi
       if [ ! -d "$target_dir" ]; then
+        printf 'D\t%s\n' "$rel" >> "$JOURNAL" \
+          || { apply_failed=1; break; }
         mkdir -p "$target_dir" || { apply_failed=1; break; }
-        printf 'D\t%s\n' "$rel" >> "$JOURNAL"
       fi
     done < <(find "$STAGE_DIR" -type d -print0)
 
     if [ "$apply_failed" -eq 0 ]; then
       while IFS= read -r -d '' source_file; do
+        cancel_requested && cancel_now
+        if [ -n "${LUATOOLS_APPLY_STEP_DELAY:-}" ]; then
+          sleep "$LUATOOLS_APPLY_STEP_DELAY"
+          cancel_requested && cancel_now
+        fi
         rel="${source_file#"$STAGE_DIR"/}"
         case "$rel" in *$'\t'*|*$'\n'*|*$'\r'*) apply_failed=1; break ;; esac
         target_file="$EXTRACT_DIR/$rel"
@@ -420,21 +515,11 @@ if [ -n "$EXTRACT_DIR" ]; then
     fi
 
     if [ "$apply_failed" -ne 0 ]; then
-      while IFS=$'\t' read -r action rel; do
-        target="$EXTRACT_DIR/$rel"
-        if [ "$action" = "E" ]; then
-          rm -rf "$target"
-          mkdir -p "$(dirname "$target")"
-          cp -a "$BACKUP_DIR/files/$rel" "$target" 2>/dev/null || true
-        elif [ "$action" = "N" ]; then
-          rm -rf "$target"
-        fi
-      done < "$JOURNAL"
-      tac "$JOURNAL" 2>/dev/null | while IFS=$'\t' read -r action rel; do
-        [ "$action" != "D" ] || rmdir "$EXTRACT_DIR/$rel" 2>/dev/null || true
-      done
-      rm -rf "$BACKUP_DIR"
-      write_failed "The fix was extracted safely, but could not be applied. Existing game files were restored." "apply_failed"
+      if rollback_current; then
+        write_failed "The fix was extracted safely, but could not be applied. Existing game files were restored." "apply_failed"
+      else
+        write_failed "The fix could not be applied or rolled back cleanly. Close the game and try Unfix before playing." "rollback_failed"
+      fi
       exit 1
     fi
     if [ ! -s "$JOURNAL" ] || [ -z "$BACKUP_ROOT" ]; then
@@ -442,8 +527,9 @@ if [ -n "$EXTRACT_DIR" ]; then
     fi
   fi
 
+  cancel_requested && cancel_now
   slog "extracted -> handing off to finalize"
-  write_state "extracted" "$TOTAL" "$TOTAL"
+  write_state "extracted" "$TOTAL" "$TOTAL" "$TRANSACTION"
 else
   slog "done (no extract requested)"
   write_state "done" "$TOTAL" "$TOTAL"

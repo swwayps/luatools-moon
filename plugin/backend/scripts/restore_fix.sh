@@ -6,6 +6,7 @@ unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT STEAM_RUNTIME_LIBRARY_PATH STEAM_ZENIT
 
 GAME_DIR="${1:-}"
 BACKUP_ROOT="${2:-}"
+TRANSACTION="${3:-}"
 [ -d "$GAME_DIR" ] || exit 1
 [ -d "$BACKUP_ROOT" ] || exit 0
 
@@ -68,6 +69,21 @@ restore_transaction() {
 
   rm -rf -- "$transaction"
 }
+
+if [ -n "$TRANSACTION" ]; then
+  case "$TRANSACTION" in
+    txn.*) ;;
+    *) exit 1 ;;
+  esac
+  case "$TRANSACTION" in *[/$'\t'$'\n'$'\r']*) exit 1 ;; esac
+  TARGET_TRANSACTION="$BACKUP_ROOT/$TRANSACTION"
+  [ ! -L "$TARGET_TRANSACTION" ] || exit 1
+  if [ -d "$TARGET_TRANSACTION" ]; then
+    restore_transaction "$TARGET_TRANSACTION" || exit 1
+  fi
+  rmdir "$BACKUP_ROOT" 2>/dev/null || true
+  exit 0
+fi
 
 while IFS= read -r transaction_name; do
   [ -n "$transaction_name" ] || continue

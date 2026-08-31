@@ -192,6 +192,21 @@ local function on_tick(now, controls)
                 or { success = false, state = { status = "failed",
                     errorCode = "status_failed" } }
         end,
+        cancel_fix = function(appid, job)
+            local install_path = type(job) == "table"
+                and tostring(job.installPath or "") or ""
+            if install_path == "" then
+                local install = steam_utils.get_game_install_path_response(appid)
+                if type(install) == "table" and install.success == true then
+                    install_path = tostring(install.installPath or "")
+                end
+            end
+            return fixes.cancel_game_fix(appid, install_path,
+                type(job) == "table" and job.transaction or nil)
+        end,
+        abort_fix = function(appid)
+            return lua_tools_fix_state.abort(appid) == true
+        end,
         launch_options = function(appid)
             local install = steam_utils.get_game_install_path_response(appid)
             if type(install) ~= "table" or install.success ~= true then
@@ -1501,7 +1516,8 @@ function GetFixLaunchOptions(appid, compatToolName, contentScriptQuery, currentL
             local cleaned = fix_overlays.remove_overrides
                 and fix_overlays.remove_overrides(current) or current
             if cleaned ~= current then
-                return { success = true, apply = true, launchOptions = cleaned }
+                return { success = true, apply = true,
+                    previousLaunchOptions = current, launchOptions = cleaned }
             end
             return { success = true, apply = false }
         end
@@ -1519,7 +1535,8 @@ function GetFixLaunchOptions(appid, compatToolName, contentScriptQuery, currentL
         else
             merged = fix_overlays.merge_launch_options(current, overrides)
         end
-        return { success = true, apply = true, launchOptions = merged,
+        return { success = true, apply = true,
+            previousLaunchOptions = current, launchOptions = merged,
             overrides = overrides, launcher = launcher,
             launcherRelative = launcher_rel }
     end)

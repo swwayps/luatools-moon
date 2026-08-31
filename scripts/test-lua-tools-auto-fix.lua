@@ -100,6 +100,7 @@ check("J4 queue persists one private job without auth material",
     and database.jobs["3321460"].url == nil)
 
 local starts, polls, relays, completions = 0, 0, 0, 0
+local completion_saw_previous = false
 local install = { complete = true, installPath = "/game", gameName = "Crimson Desert" }
 local poll_state = { success = true, state = { status = "downloading" } }
 local callbacks = {
@@ -112,6 +113,7 @@ local callbacks = {
   poll_fix = function() polls = polls + 1; return poll_state end,
   launch_options = function()
     return { success = true, apply = true,
+      previousLaunchOptions = "gamemoderun %command%",
       launchOptions = 'WINEDLLOVERRIDES="steam_api64=n,b" %command%' }
   end,
   set_launch_options = function(appid, options)
@@ -120,6 +122,8 @@ local callbacks = {
   end,
   complete_fix = function(appid, fix_id)
     completions = completions + 1
+    completion_saw_previous = database.jobs["3321460"]
+      and database.jobs["3321460"].previousLaunchOptions == "gamemoderun %command%"
     return { success = appid == 3321460 and fix_id == FIX_ID }
   end,
 }
@@ -144,7 +148,8 @@ check("J8 first settled observation only stabilizes the appmanifest",
   starts == 0 and database.jobs["3321460"].stablePolls == 1)
 auto_fix.tick(126, callbacks, deps)
 check("J9 second settled observation starts exactly one fix transaction",
-  starts == 1 and database.jobs["3321460"].phase == "applying")
+  starts == 1 and database.jobs["3321460"].phase == "applying"
+    and database.jobs["3321460"].fixStarted == true)
 poll_state = { success = true, state = {
   status = "downloading", bytesRead = 25, totalBytes = 100,
 } }
@@ -158,13 +163,110 @@ check("J10b active jobs expose a compact real-progress view without credentials"
     and active_tick.uiJobs["3321460"].progress == 21
     and active_tick.uiJobs["3321460"].url == nil)
 
-poll_state = { success = true, state = { status = "done" } }
+poll_state = { success = true, state = {
+  status = "done", transaction = "txn.136.auto",
+} }
 auto_fix.tick(136, callbacks, deps)
 check("J11 completed extraction advances to launch-option finalization",
-  database.jobs["3321460"].phase == "finalizing" and relays == 0)
+  database.jobs["3321460"].phase == "finalizing"
+    and database.jobs["3321460"].transaction == "txn.136.auto" and relays == 0)
 auto_fix.tick(141, callbacks, deps)
-check("J12 receipt completes only after the SharedJS launch-option relay",
-  relays == 1 and completions == 1 and database.jobs["3321460"] == nil)
+check("J12 launch options are journaled before relay and receipt completion",
+  relays == 1 and completions == 1 and completion_saw_previous == true
+    and database.jobs["3321460"] == nil)
+
+local complete_fail_db = { version = 1, jobs = {} }
+local complete_fail_deps = {
+  load = function() return complete_fail_db end,
+  save = function(value) complete_fail_db = value; return true end,
+  now = function() return 142 end,
+}
+auto_fix.queue(990080, FIX_ID, complete_fail_deps)
+complete_fail_db.jobs["990080"].phase = "finalizing"
+complete_fail_db.jobs["990080"].transaction = "txn.applied"
+auto_fix.tick(142, {
+  launch_options = function() return { success = true, apply = false } end,
+  complete_fix = function()
+    return { success = false, errorCode = "complete_failed", error = "receipt failed" }
+  end,
+}, complete_fail_deps)
+check("J12b a post-apply completion failure stays terminal and rollback-capable",
+  complete_fail_db.jobs["990080"].phase == "failed"
+    and complete_fail_db.jobs["990080"].transaction == "txn.applied")
+
+local relay_db = { version = 1, jobs = {} }
+local relay_deps = {
+  load = function() return relay_db end,
+  save = function(value) relay_db = value; return true end,
+  now = function() return 143 end,
+}
+auto_fix.queue(990080, FIX_ID, relay_deps)
+relay_db.jobs["990080"].phase = "finalizing"
+relay_db.jobs["990080"].transaction = "txn.relay"
+local reported_previous = "original %command%"
+local relay_callbacks = {
+  launch_options = function()
+    return { success = true, apply = true,
+      previousLaunchOptions = reported_previous,
+      launchOptions = "fixed %command%" }
+  end,
+  set_launch_options = function() return false end,
+  complete_fix = function() return { success = true } end,
+}
+auto_fix.tick(143, relay_callbacks, relay_deps)
+reported_previous = "possibly changed %command%"
+auto_fix.tick(148, relay_callbacks, relay_deps)
+check("J12c an ambiguous launch-option relay keeps the original undo value",
+  relay_db.jobs["990080"].launchOptionsApplied == true
+    and relay_db.jobs["990080"].previousLaunchOptions == "original %command%")
+
+local worker_fail_db = { version = 1, jobs = {
+  ["990080"] = {
+    fixId = FIX_ID, phase = "applying", fixStarted = true,
+    retries = 0, nextAttempt = 0,
+  },
+} }
+local worker_fail_deps = {
+  load = function() return worker_fail_db end,
+  save = function(value) worker_fail_db = value; return true end,
+  now = function() return 144 end,
+}
+local worker_abort_count = 0
+auto_fix.tick(144, {
+  poll_fix = function()
+    return { success = true, state = {
+      status = "failed", errorCode = "apply_failed", error = "apply failed",
+    } }
+  end,
+  abort_fix = function()
+    worker_abort_count = worker_abort_count + 1
+    return true
+  end,
+}, worker_fail_deps)
+check("J12d a clean worker failure clears pending fix state before retrying",
+  worker_abort_count == 1 and worker_fail_db.jobs["990080"].fixStarted == nil
+    and worker_fail_db.jobs["990080"].phase == "waiting_install")
+
+worker_fail_db.jobs["990080"] = {
+  fixId = FIX_ID, phase = "applying", fixStarted = true,
+  retries = 0, nextAttempt = 0,
+}
+auto_fix.tick(145, {
+  poll_fix = function()
+    return { success = true, state = {
+      status = "failed", errorCode = "rollback_failed",
+      error = "rollback failed", transaction = "txn.retry.rollback",
+    } }
+  end,
+  abort_fix = function()
+    worker_abort_count = worker_abort_count + 1
+    return true
+  end,
+}, worker_fail_deps)
+check("J12e a failed rollback retains its transaction and stays cancellable",
+  worker_fail_db.jobs["990080"].phase == "failed"
+    and worker_fail_db.jobs["990080"].transaction == "txn.retry.rollback"
+    and worker_fail_db.jobs["990080"].fixStarted == true)
 
 auto_fix.queue(3321460, FIX_ID, deps)
 callbacks.auth_status = function() return { configured = false } end
@@ -240,13 +342,65 @@ auto_fix.queue(990080, FIX_ID, cancel_deps)
 cancel_db.jobs["990080"].phase = "applying"
 local unsafe_cancel = type(auto_fix.cancel) == "function"
   and auto_fix.cancel(990080, cancel_deps) or { success = false }
-check("J20 active file application cannot be skipped unsafely",
-  unsafe_cancel.success == false and unsafe_cancel.errorCode == "already_applying"
-    and cancel_db.jobs["990080"].phase == "applying")
+check("J20 active file application enters an explicit cancelling phase",
+  unsafe_cancel.success == true and unsafe_cancel.pendingRollback == true
+    and cancel_db.jobs["990080"].phase == "cancelling")
 
--- A failed job used to vanish from the compact UI, which left the launch guard
--- holding a saved Play with nothing on screen but a 0% bar. A failure must stay
--- visible, carry its reason, and always be skippable.
+local cancelled_files, aborted_pending = 0, 0
+local cancel_tick = auto_fix.tick(301, {
+  cancel_fix = function(appid, job)
+    cancelled_files = cancelled_files + 1
+    return { success = appid == 990080 and type(job) == "table" }
+  end,
+  abort_fix = function(appid)
+    aborted_pending = aborted_pending + 1
+    return appid == 990080
+  end,
+}, cancel_deps)
+check("J20b a successful bounded rollback clears the job exactly once",
+  cancel_tick.success == true and cancelled_files == 1 and aborted_pending == 1
+    and cancel_db.jobs["990080"] == nil)
+
+auto_fix.queue(990080, FIX_ID, cancel_deps)
+cancel_db.jobs["990080"].phase = "finalizing"
+cancel_db.jobs["990080"].transaction = "txn.current"
+cancel_db.jobs["990080"].launchOptionsApplied = true
+cancel_db.jobs["990080"].previousLaunchOptions = "mangohud %command%"
+auto_fix.cancel(990080, cancel_deps)
+local restored_options
+auto_fix.tick(302, {
+  cancel_fix = function(_, job)
+    return { success = job.transaction == "txn.current" }
+  end,
+  set_launch_options = function(_, options)
+    restored_options = options
+    return true
+  end,
+  abort_fix = function() return true end,
+}, cancel_deps)
+check("J20c cancelling finalization restores the user's prior launch options",
+  restored_options == "mangohud %command%" and cancel_db.jobs["990080"] == nil)
+
+auto_fix.queue(990080, FIX_ID, cancel_deps)
+cancel_db.jobs["990080"].phase = "applying"
+auto_fix.cancel(990080, cancel_deps)
+local failed_cancel = auto_fix.tick(303, {
+  cancel_fix = function()
+    return { success = false, errorCode = "rollback_failed", error = "rollback failed" }
+  end,
+  abort_fix = function() return true end,
+}, cancel_deps)
+check("J20d a failed watchdog cleanup becomes terminal instead of stalling Play",
+  failed_cancel.success == true and cancel_db.jobs["990080"].phase == "failed"
+    and cancel_db.jobs["990080"].errorCode == "rollback_failed")
+cancel_db.jobs["990080"].transaction = "txn.retryable"
+local retry_cleanup = auto_fix.cancel(990080, cancel_deps)
+check("J20e a terminal job with live side effects remains rollback-capable",
+  retry_cleanup.success == true and retry_cleanup.pendingRollback == true
+    and cancel_db.jobs["990080"].phase == "cancelling")
+
+-- Keep the terminal reason available to status consumers. The Play guard ignores
+-- failures with no live side effects, so they can never trap a launch.
 local failed_db = { version = 1, jobs = {} }
 local failed_deps = {
   load = function() return failed_db end,
@@ -263,11 +417,11 @@ local failed_tick = auto_fix.tick(401, {
   install_state = function() return { complete = true, gameName = "Resident Evil Requiem" } end,
 }, failed_deps)
 local failed_view = failed_tick.uiJobs and failed_tick.uiJobs["990080"]
-check("J21 a failed automatic fix stays visible instead of stalling at 0%",
+check("J21 a failed automatic fix remains terminal instead of stalling at 0%",
   type(failed_view) == "table" and failed_view.phase == "failed"
     and failed_view.stage == "failed")
-check("J22 the visible failure reports its reason and can always be skipped",
-  type(failed_view) == "table" and failed_view.canSkip == true
+check("J22 the terminal status retains its diagnostic reason",
+  type(failed_view) == "table"
     and failed_view.error == "This recommendation is no longer available."
     and failed_view.errorCode == "unavailable")
 check("J23 a failed job is still cancellable so a launch is never trapped",

@@ -107,6 +107,15 @@ local function set_failure(job, result, now)
   job.nextAttempt = now + math.min(60, 5 * (2 ^ (job.retries - 1)))
 end
 
+local function set_terminal_failure(job, result)
+  job.phase = "failed"
+  job.nextAttempt = 0
+  job.errorCode = tostring(type(result) == "table" and result.errorCode
+    or "auto_fix_failed")
+  job.error = tostring(type(result) == "table" and result.error
+    or "Automatic fix failed.")
+end
+
 function auto_fix.queue(appid, fix_id, deps)
   appid = domain.positive_appid(appid)
   fix_id = domain.fix_id(fix_id)
@@ -140,12 +149,21 @@ function auto_fix.cancel(appid, deps)
   local key = tostring(appid)
   local job = database.jobs[key]
   if type(job) ~= "table" then return { success = true, cancelled = false } end
-  if job.phase == "applying" or job.phase == "finalizing" then
-    return {
-      success = false,
-      errorCode = "already_applying",
-      error = "The fix is already writing game files and cannot be skipped safely.",
-    }
+  if job.phase == "applying" or job.phase == "finalizing"
+      or job.phase == "cancelling"
+      or (job.phase == "failed"
+        and (job.fixStarted == true or job.transaction ~= nil
+          or job.launchOptionsApplied == true)) then
+    if job.phase ~= "cancelling" then
+      job.cancelledFrom = job.phase
+      job.phase = "cancelling"
+      job.nextAttempt = 0
+      if not save(database, deps) then
+        return { success = false, errorCode = "state_write_failed",
+          error = "Could not request automatic-fix rollback." }
+      end
+    end
+    return { success = true, cancelled = false, pendingRollback = true }
   end
   database.jobs[key] = nil
   if not save(database, deps) then
@@ -162,9 +180,6 @@ local function ui_job(appid, job, observed)
   if phase == "needs_login" then
     stage = "needs_login"
   elseif phase == "failed" then
-    -- A failure stays on screen. Hiding it left the launch guard holding a saved
-    -- Play with nothing but a 0% bar, which reads as a freeze and offers no way
-    -- out; the reason plus a skip is always better than a silent stall.
     stage = "failed"
   elseif phase == "applying" then
     local status = type(observed) == "table" and tostring(observed.status or "") or ""
@@ -182,6 +197,8 @@ local function ui_job(appid, job, observed)
     end
   elseif phase == "finalizing" then
     stage, progress = "finalizing", 99
+  elseif phase == "cancelling" then
+    stage, progress = "cancelling", 99
   end
   return {
     appid = appid,
@@ -189,8 +206,6 @@ local function ui_job(appid, job, observed)
     phase = phase,
     stage = stage,
     progress = progress,
-    canSkip = phase == "waiting_install" or phase == "needs_login"
-      or phase == "failed",
     error = type(job.error) == "string" and job.error or nil,
     errorCode = type(job.errorCode) == "string" and job.errorCode or nil,
   }
@@ -211,7 +226,35 @@ function auto_fix.tick(now, callbacks, deps)
     local job = database.jobs[key]
     if appid and type(job) == "table" and job.phase ~= "failed"
         and now >= (tonumber(job.nextAttempt) or 0) then
-      if job.phase == "needs_login" then
+      if job.phase == "cancelling" then
+        local ok_cancel, cancelled = pcall(callbacks.cancel_fix, appid, job)
+        if not ok_cancel or type(cancelled) ~= "table"
+            or cancelled.success ~= true then
+          set_terminal_failure(job, ok_cancel and cancelled or {
+            errorCode = "rollback_failed", error = tostring(cancelled),
+          })
+        else
+          local restored_options = true
+          if job.launchOptionsApplied == true then
+            local ok_options, result = pcall(callbacks.set_launch_options,
+              appid, tostring(job.previousLaunchOptions or ""))
+            restored_options = ok_options and result == true
+          end
+          local ok_abort, aborted = pcall(callbacks.abort_fix, appid)
+          if restored_options and ok_abort and aborted == true then
+            database.jobs[key] = nil
+          else
+            set_terminal_failure(job, {
+              errorCode = restored_options and "rollback_state_failed"
+                or "launch_options_restore_failed",
+              error = restored_options
+                and "The cancelled fix state could not be cleared."
+                or "The previous launch options could not be restored.",
+            })
+          end
+        end
+        changed = true
+      elseif job.phase == "needs_login" then
         if configured(callbacks) then
           job.phase = "waiting_install"
           job.stablePolls = 0
@@ -225,6 +268,12 @@ function auto_fix.tick(now, callbacks, deps)
             and type(install.gameName) == "string" and install.gameName ~= ""
             and job.gameName ~= install.gameName then
           job.gameName = install.gameName
+          changed = true
+        end
+        if ok_install and type(install) == "table"
+            and type(install.installPath) == "string" and install.installPath ~= ""
+            and job.installPath ~= install.installPath then
+          job.installPath = install.installPath
           changed = true
         end
         if ok_install and type(install) == "table" and install.complete == true
@@ -256,6 +305,7 @@ function auto_fix.tick(now, callbacks, deps)
                 local ok_start, result = pcall(callbacks.start_fix, appid, job.fixId)
                 if ok_start and type(result) == "table" and result.success == true then
                   job.phase = "applying"
+                  job.fixStarted = true
                   job.retries = 0
                   job.nextAttempt = 0
                   job.error = nil
@@ -279,26 +329,70 @@ function auto_fix.tick(now, callbacks, deps)
         local ok_poll, payload = pcall(callbacks.poll_fix, appid)
         local state = ok_poll and type(payload) == "table" and payload.state or nil
         observed[key] = state
+        if type(state) == "table" and type(state.transaction) == "string"
+            and state.transaction:match("^txn%.[%w._-]+$")
+            and job.transaction ~= state.transaction then
+          job.transaction = state.transaction
+          changed = true
+        end
         if type(state) == "table" and state.status == "done" then
           job.phase = "finalizing"
           job.nextAttempt = 0
           changed = true
         elseif type(state) == "table"
             and (state.status == "failed" or state.status == "cancelled") then
-          set_failure(job, state, now)
+          if job.transaction ~= nil or state.errorCode == "rollback_failed" then
+            set_terminal_failure(job, state)
+          else
+            local ok_abort, aborted = pcall(callbacks.abort_fix, appid)
+            if ok_abort and aborted == true then
+              job.fixStarted = nil
+              set_failure(job, state, now)
+            else
+              set_terminal_failure(job, {
+                errorCode = "rollback_state_failed",
+                error = "The failed fix state could not be cleared.",
+              })
+            end
+          end
           changed = true
         end
       elseif job.phase == "finalizing" then
         local ok_options, options = pcall(callbacks.launch_options, appid)
         if not ok_options or type(options) ~= "table" or options.success ~= true then
-          set_failure(job, ok_options and options or {
+          local failure = ok_options and options or {
             errorCode = "launch_options_failed", error = tostring(options),
-          }, now)
+          }
+          if job.transaction ~= nil or job.launchOptionsApplied == true then
+            set_terminal_failure(job, failure)
+          else
+            local ok_abort, aborted = pcall(callbacks.abort_fix, appid)
+            if ok_abort and aborted == true then
+              job.fixStarted = nil
+              set_failure(job, failure, now)
+            else
+              set_terminal_failure(job, {
+                errorCode = "rollback_state_failed",
+                error = "The unfinished fix state could not be cleared.",
+              })
+            end
+          end
           changed = true
         else
           local relayed = true
           if options.apply == true and type(options.launchOptions) == "string"
               and options.launchOptions ~= "" then
+            if job.previousLaunchOptions == nil then
+              job.previousLaunchOptions = tostring(options.previousLaunchOptions or "")
+            end
+            -- Persist the undo value before asking SharedJS to change Steam.
+            -- Restoring the same old value is harmless if the relay fails before
+            -- applying, while losing it after applying is not recoverable.
+            job.launchOptionsApplied = true
+            changed = true
+            if not save(database, deps) then
+              return { success = false, errorCode = "state_write_failed" }
+            end
             local ok_relay, result = pcall(callbacks.set_launch_options,
               appid, options.launchOptions)
             relayed = ok_relay and result == true
@@ -315,9 +409,9 @@ function auto_fix.tick(now, callbacks, deps)
               database.jobs[key] = nil
               changed = true
             else
-              set_failure(job, ok_complete and completed or {
+              set_terminal_failure(job, ok_complete and completed or {
                 errorCode = "complete_failed", error = tostring(completed),
-              }, now)
+              })
               changed = true
             end
           end
