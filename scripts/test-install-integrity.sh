@@ -163,8 +163,14 @@ check "D1 download_and_verify returns a distinct code for an integrity failure" 
 	'grep -q "return 2" "$INSTALL_SH"'
 check "D2 the CloudRedirect .so goes through download_and_verify" \
 	'grep -q "download_and_verify \"\$CR_SO_URL\"" "$INSTALL_SH"'
-check "D3 no asset download bypasses the verified path" \
-	'! grep -qE "curl -fL \"\\\$(CR_SO_URL|url)\" -o" "$INSTALL_SH"'
+check "D3 the CloudRedirect CLI goes through download_and_verify" \
+	'grep -q "download_and_verify \"\$CR_CLI_URL\"" "$INSTALL_SH"'
+check "D4 the CloudRedirect CLI is deployed beside the hook" \
+	'grep -q "CR_CLI_PATH=.*cloud_redirect_cli" "$INSTALL_SH"'
+check "D5 the CloudRedirect CLI has its own update identity" \
+	'grep -q "CR_CLI_STAMP" "$INSTALL_SH" && grep -q "cr_published_stamp \"\$CR_CLI_URL\"" "$INSTALL_SH"'
+check "D6 no asset download bypasses the verified path" \
+	'! grep -qE "curl -fL \"\\\$(CR_SO_URL|CR_CLI_URL|url)\" -o" "$INSTALL_SH"'
 
 echo
 echo "$checks check(s), $fails failure(s)"

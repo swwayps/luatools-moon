@@ -57,27 +57,24 @@ LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
 CR_MOON_REPO="swwayps/cloudredirect-moon"
 
 # CloudRedirect (optional) — redirects Steam Cloud for added games to the
-# user's own Google Drive / OneDrive / local folder. We deploy a PATCHED 32-bit
-# hook (cloud_redirect.so) from the cloudredirect-moon repo and load it via the
+# user's own Google Drive / OneDrive / R2 / S3 / local folder. We deploy a
+# patched 32-bit hook plus its CLI from cloudredirect-moon and load the hook via
 # Steam wrapper's LD_PRELOAD. Provider sign-in lives in Lumen Settings → Cloud
 # Saves (the Lumen backend runs the OAuth flow and writes the hook's config
 # directly), so the main line needs no flatpak login app. The flatpak helpers
 # below are retained for the millennium fallback branch only.
 #
-# Why a patched build instead of an upstream release asset: no upstream release
-# ships both fixes we need. 2.0.4 (the `linux` LD_AUDIT tag) attaches reliably
-# but restores saves to a broken "<file>/<sha>" directory layout (games see no
-# save). 2.1.5 (`latest`) restores saves correctly but its LD_PRELOAD init
-# polls steamclient.so for only 10s and then gives up, so on slower-bootstrap
-# distros (Arch/CachyOS) it never attaches. Our branch keeps the 120s wait, the
-# CAS-path healing, and worker-thread crash containment on top of upstream.
-# Built for an old-enough glibc to load in the Steam runtime.
+# The branch follows upstream v2.6.x while retaining the Linux attachment and
+# runtime-safety fixes still needed by this stack. Both artifacts are built for
+# an old-enough glibc to load in the Steam runtime.
 CR_MOON_RAW_BASE="https://raw.githubusercontent.com/${CR_MOON_REPO}/master"
 CR_SO_URL="${CR_MOON_RAW_BASE}/cloud_redirect.so"
+CR_CLI_URL="${CR_MOON_RAW_BASE}/cloud_redirect_cli"
 CR_REPO="Selectively11/CloudRedirect"
 CR_FLATPAK_APP_ID="org.cloudredirect.CloudRedirect"
 CR_DIR="$HOME/.local/share/CloudRedirect"
 CR_SO_PATH="$CR_DIR/cloud_redirect.so"
+CR_CLI_PATH="$CR_DIR/cloud_redirect_cli"
 CR_KDE_RUNTIME="org.kde.Platform//6.10"
 
 # ============================================================================
@@ -191,8 +188,8 @@ prompt_yes_no() {
 # prompting after Steam is gone. Desktop (mutable) installs are unaffected and
 # keep prompting inline. The question strings live here so the pre-ask and the
 # inline sites can't drift apart.
-Q_CLOUD_EN="Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs your saves to your own cloud (Google Drive / OneDrive). Say no if you don't need cloud saves."
-Q_CLOUD_PT="Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, que sincroniza seus saves na sua própria nuvem (Google Drive / OneDrive). Responda não se você não precisa de cloud saves."
+Q_CLOUD_EN="Do you want Steam Cloud saves to work for your games? This installs CloudRedirect, which syncs to Google Drive, OneDrive, R2, S3 or a custom folder. Say no if you don't need cloud saves."
+Q_CLOUD_PT="Você quer que os saves da Steam Cloud funcionem nos seus jogos? Isso instala o CloudRedirect, com Google Drive, OneDrive, R2, S3 ou uma pasta personalizada. Responda não se você não precisa de cloud saves."
 Q_GAMEMODE_EN="Enable the plugin in Game Mode too? This changes how Steam is launched in Gaming Mode (reversible by the uninstaller)."
 Q_GAMEMODE_PT="Ativar o plugin também no Game Mode? Isso altera como a Steam é iniciada no modo Gaming (reversível pelo desinstalador)."
 
@@ -2358,6 +2355,7 @@ CR_FLATPAK_INSTALLED=0
 # re-downloading 2 MB. Holds the ETag raw.githubusercontent.com serves for
 # cloud_redirect.so (content-derived, so it changes exactly when the hook does).
 CR_SO_STAMP="$CR_DIR/.cloud_redirect.etag"
+CR_CLI_STAMP="$CR_DIR/.cloud_redirect_cli.etag"
 
 # True when the CloudRedirect hook is already deployed on this machine.
 cloudredirect_installed() {
@@ -2367,7 +2365,8 @@ cloudredirect_installed() {
 # ETag of the published hook, or empty when it can't be determined (offline,
 # proxy that strips the header, ...). HEAD only — no payload is transferred.
 cr_published_stamp() {
-	curl -fsSLI "$CR_SO_URL" 2>/dev/null |
+	local url="$1"
+	curl -fsSLI "$url" 2>/dev/null |
 		tr -d '\r' |
 		awk 'tolower($1) == "etag:" { sub(/^[^:]*:[[:space:]]*/, ""); stamp = $0 } END { print stamp }'
 }
@@ -2375,23 +2374,28 @@ cr_published_stamp() {
 # 0 when the deployed hook is known to match the published one. Unknown stays
 # "not current" so the update path runs and settles it by content comparison.
 cr_hook_is_current() {
-	local published stored
+	local published_so stored_so published_cli stored_cli
 	cloudredirect_installed || return 1
+	[ -x "$CR_CLI_PATH" ] || return 1
 	[ -s "$CR_SO_STAMP" ] || return 1
-	published="$(cr_published_stamp)"
-	[ -n "$published" ] || return 1
-	stored="$(cat "$CR_SO_STAMP" 2>/dev/null)"
-	[ "$published" = "$stored" ]
+	[ -s "$CR_CLI_STAMP" ] || return 1
+	published_so="$(cr_published_stamp "$CR_SO_URL")"
+	published_cli="$(cr_published_stamp "$CR_CLI_URL")"
+	[ -n "$published_so" ] && [ -n "$published_cli" ] || return 1
+	stored_so="$(cat "$CR_SO_STAMP" 2>/dev/null)"
+	stored_cli="$(cat "$CR_CLI_STAMP" 2>/dev/null)"
+	[ "$published_so" = "$stored_so" ] && [ "$published_cli" = "$stored_cli" ]
 }
 
 # Deploy the patched 32-bit cloud_redirect.so from the cloudredirect-moon repo
 # into ~/.local/share/CloudRedirect. No-op (beyond the download) when the
 # published hook is byte-identical to the deployed one.
 install_cloudredirect_so() {
-	local tmp so
+	local tmp so cli staged_so staged_cli same_so same_cli
 
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	so="$tmp/cloud_redirect.so"
+	cli="$tmp/cloud_redirect_cli"
 
 	log_info "$(L "Downloading cloud_redirect.so" "Baixando cloud_redirect.so")"
 	# The .so is LD_PRELOAD'ed into the Steam process, so it is the highest-value
@@ -2400,6 +2404,12 @@ install_cloudredirect_so() {
 	if ! download_and_verify "$CR_SO_URL" "$so" "CloudRedirect"; then
 		log_warn "$(L "Download of cloud_redirect.so failed; skipping cloud saves." \
 		             "Falha ao baixar cloud_redirect.so; pulando cloud saves.")"
+		return 1
+	fi
+	log_info "$(L "Downloading cloud_redirect_cli" "Baixando cloud_redirect_cli")"
+	if ! download_and_verify "$CR_CLI_URL" "$cli" "CloudRedirect CLI"; then
+		log_warn "$(L "Download of cloud_redirect_cli failed; skipping cloud saves." \
+		             "Falha ao baixar cloud_redirect_cli; pulando cloud saves.")"
 		return 1
 	fi
 
@@ -2413,12 +2423,20 @@ install_cloudredirect_so() {
 		             "cloud_redirect.so baixado não é 32-bit; pulando cloud saves.")"
 		return 1
 	fi
+	if [ "$(od -An -tx1 -N5 "$cli" 2>/dev/null | tr -d ' \n')" != "7f454c4601" ]; then
+		log_warn "$(L "Downloaded cloud_redirect_cli is not 32-bit; skipping cloud saves." \
+		             "cloud_redirect_cli baixado não é 32-bit; pulando cloud saves.")"
+		return 1
+	fi
 
 	mkdir -p "$CR_DIR"
 
 	# Nothing changed: leave the deployed file alone and just record the stamp,
 	# so the next run can skip the download entirely.
-	if cmp -s "$so" "$CR_SO_PATH"; then
+	same_so=0; same_cli=0
+	cmp -s "$so" "$CR_SO_PATH" && same_so=1
+	cmp -s "$cli" "$CR_CLI_PATH" && same_cli=1
+	if [ "$same_so" -eq 1 ] && [ "$same_cli" -eq 1 ]; then
 		cr_write_so_stamp
 		log_info "$(L "cloud_redirect.so is already up to date" \
 		             "cloud_redirect.so já está atualizado")"
@@ -2428,35 +2446,44 @@ install_cloudredirect_so() {
 	# Replace by rename so the new hook lands on a fresh inode. Writing over the
 	# existing file in place would corrupt it for any Steam process that still
 	# has it mapped.
-	local staged="$CR_DIR/.cloud_redirect.so.new"
-	if ! cp -f "$so" "$staged" 2>/dev/null; then
+	staged_so="$CR_DIR/.cloud_redirect.so.new"
+	staged_cli="$CR_DIR/.cloud_redirect_cli.new"
+	if ! cp -f "$so" "$staged_so" 2>/dev/null \
+	   || ! cp -f "$cli" "$staged_cli" 2>/dev/null; then
 		log_warn "$(L "Could not stage cloud_redirect.so; skipping cloud saves." \
 		             "Não foi possível preparar o cloud_redirect.so; pulando cloud saves.")"
 		return 1
 	fi
-	chmod 755 "$staged" 2>/dev/null
-	if ! mv -f "$staged" "$CR_SO_PATH" 2>/dev/null; then
-		rm -f "$staged" 2>/dev/null
+	chmod 755 "$staged_so" "$staged_cli" 2>/dev/null
+	if ! mv -f "$staged_so" "$CR_SO_PATH" 2>/dev/null \
+	   || ! mv -f "$staged_cli" "$CR_CLI_PATH" 2>/dev/null; then
+		rm -f "$staged_so" "$staged_cli" 2>/dev/null
 		log_warn "$(L "Could not install cloud_redirect.so; skipping cloud saves." \
 		             "Não foi possível instalar o cloud_redirect.so; pulando cloud saves.")"
 		return 1
 	fi
 
 	cr_write_so_stamp
-	log_success "$(L "cloud_redirect.so installed to $CR_SO_PATH" \
-	             "cloud_redirect.so instalado em $CR_SO_PATH")"
+	log_success "$(L "CloudRedirect hook and CLI installed to $CR_DIR" \
+	             "Hook e CLI do CloudRedirect instalados em $CR_DIR")"
 	return 0
 }
 
 # Persist the published hook's identity next to the deployed .so. Best-effort:
 # a missing stamp only costs a re-download on the next run.
 cr_write_so_stamp() {
-	local published
-	published="$(cr_published_stamp)"
-	if [ -n "$published" ]; then
-		printf '%s\n' "$published" > "$CR_SO_STAMP" 2>/dev/null || true
+	local published_so published_cli
+	published_so="$(cr_published_stamp "$CR_SO_URL")"
+	published_cli="$(cr_published_stamp "$CR_CLI_URL")"
+	if [ -n "$published_so" ]; then
+		printf '%s\n' "$published_so" > "$CR_SO_STAMP" 2>/dev/null || true
 	else
 		rm -f "$CR_SO_STAMP" 2>/dev/null || true
+	fi
+	if [ -n "$published_cli" ]; then
+		printf '%s\n' "$published_cli" > "$CR_CLI_STAMP" 2>/dev/null || true
+	else
+		rm -f "$CR_CLI_STAMP" 2>/dev/null || true
 	fi
 }
 
