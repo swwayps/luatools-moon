@@ -63,6 +63,86 @@ MOCK_FAIL=0; MOCK_JSON="$ANY_JSON_NOMATCH"
 url="$(any_release_asset_url repo '^slsteam-moon-linux-.*-lumen\.zip$')"; rc=$?
 { [ "$rc" -eq 0 ] && [ -z "$url" ]; }; check "any: ok + no match -> rc 0, empty url" $?
 
+# --- stable GitHub -> jsDelivr mirror resolution ---------------------------
+
+GH_LUMEN_MATCH='{"tag_name":"v2.9","assets":[{"id":29,"name":"lumen-linux.zip","created_at":"2026-09-02T00:00:00Z","updated_at":"2026-09-02T00:00:00Z","size":290,"browser_download_url":"https://github.example/lumen-linux.zip"}]}'
+GH_LUMEN_TEMP='{"tag_name":"v2.9","assets":[{"id":29,"name":"lumen-linux-uploading.zip.tmp","created_at":"2026-09-02T00:00:00Z","updated_at":"2026-09-02T00:00:00Z","size":290,"browser_download_url":"https://github.example/temp.zip"}]}'
+MIRROR_JSON='{"schema":1,"components":{"lumen":{"tag":"v2.8","id":28,"asset_at":"2026-08-01T00:00:00Z","updated_at":"2026-08-01T00:00:00Z","size":280,"name":"lumen-linux.zip","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/lumen/v2.8/hash/lumen-linux.zip"}}}'
+
+MOCK_GITHUB_FAIL=0
+MOCK_GITHUB_JSON="$GH_LUMEN_MATCH"
+MOCK_MIRROR_FAIL=0
+api_get() {
+	case "$1" in
+		*cdn.jsdelivr.net*)
+			[ "$MOCK_MIRROR_FAIL" = 1 ] && return 1
+			printf '%s' "$MIRROR_JSON"
+			;;
+		*)
+			[ "$MOCK_GITHUB_FAIL" = 1 ] && return 1
+			printf '%s' "$MOCK_GITHUB_JSON"
+			;;
+	esac
+}
+
+MOCK_GITHUB_FAIL=1
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] &&
+  [ "$RESOLVED_ASSET_URL" = "$(printf '%s' "$MIRROR_JSON" | jq -r '.components.lumen.url')" ] &&
+  [ "$(printf '%s' "$RESOLVED_ASSET_INFO" | jq -r '.tag')" = v2.8 ]; }
+check "stable: GitHub API failure -> mirror becomes primary" $?
+
+MOCK_GITHUB_FAIL=0
+MOCK_GITHUB_JSON="$GH_LUMEN_TEMP"
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] &&
+  [ "$RESOLVED_ASSET_URL" = "$(printf '%s' "$MIRROR_JSON" | jq -r '.components.lumen.url')" ]; }
+check "stable: temporary release name is ignored -> last good mirror" $?
+
+MOCK_GITHUB_JSON="$GH_LUMEN_MATCH"
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] &&
+  [ "$RESOLVED_ASSET_URL" = "https://github.example/lumen-linux.zip" ] &&
+  [ "${RESOLVED_FALLBACK_URL:-}" = "$(printf '%s' "$MIRROR_JSON" | jq -r '.components.lumen.url')" ]; }
+check "stable: GitHub primary keeps jsDelivr as download fallback" $?
+
+# --- transfer failover -----------------------------------------------------
+
+RESOLVED_ASSET_URL="https://github.example/lumen-linux.zip"
+RESOLVED_ASSET_INFO='{"tag":"v2.9","id":29,"source":"github"}'
+RESOLVED_FALLBACK_URL="https://cdn.jsdelivr.net/fallback/lumen-linux.zip"
+RESOLVED_FALLBACK_INFO='{"tag":"v2.8","id":28,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","source":"jsdelivr"}'
+DOWNLOAD_ATTEMPTS=""
+FALLBACK_EXPECTED=""
+PRIMARY_RESULT=1
+download_and_verify() {
+	DOWNLOAD_ATTEMPTS="${DOWNLOAD_ATTEMPTS:+$DOWNLOAD_ATTEMPTS }$1"
+	if [ "$1" = "$RESOLVED_ASSET_URL" ]; then return "$PRIMARY_RESULT"; fi
+	FALLBACK_EXPECTED="${4:-}"
+	return 0
+}
+
+rc=0
+download_resolved_asset /tmp/unused.zip Lumen || rc=$?
+{ [ "$rc" -eq 0 ] &&
+  [ "$DOWNLOAD_ATTEMPTS" = "$RESOLVED_ASSET_URL $RESOLVED_FALLBACK_URL" ] &&
+  [ "$FALLBACK_EXPECTED" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ] &&
+  [ "$(printf '%s' "$DOWNLOADED_ASSET_INFO" | jq -r '.source')" = jsdelivr ]; }
+check "download: transport failure retries the resolved jsDelivr asset" $?
+
+DOWNLOAD_ATTEMPTS=""
+PRIMARY_RESULT=2
+rc=0
+download_resolved_asset /tmp/unused.zip Lumen || rc=$?
+{ [ "$rc" -eq 2 ] && [ "$DOWNLOAD_ATTEMPTS" = "$RESOLVED_ASSET_URL" ]; }
+check "download: integrity failure never falls through to another source" $?
+
 echo ""
 if [ "$failures" -eq 0 ]; then echo "ALL PASS"; exit 0; fi
 echo "$failures CHECK(S) FAILED"; exit 1
