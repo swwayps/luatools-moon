@@ -51,6 +51,7 @@ LUMEN_REPO="swwayps/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_BETA_PATH="dist/lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
+RELEASE_MIRROR_MANIFEST="https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@main/manifest.json"
 
 # CloudRedirect hook (the patched 32-bit cloud_redirect.so) lives in its own
 # repo now; we fetch the prebuilt hook straight from its raw branch.
@@ -563,7 +564,8 @@ check_internet() {
 		             "O curl ainda não está instalado, então a verificação de conectividade foi pulada; ele é instalado na etapa de Dependências.")"
 		return 0
 	fi
-	if ! curl -fsS --head "https://github.com" >/dev/null 2>&1; then
+	if ! curl -fsS --head "https://github.com" >/dev/null 2>&1 \
+		&& ! curl -fsS --head "$RELEASE_MIRROR_MANIFEST" >/dev/null 2>&1; then
 		fail "$(L "No internet connection." "Sem conexão com a internet.")"
 	fi
 	log_success "$(L "Internet reachable" "Internet acessível")"
@@ -1636,6 +1638,36 @@ release_asset_info() {
 	fi
 }
 
+github_release_asset_info() {
+	local repo="$1" glob="$2" mode="${3:-latest}" api meta
+	if [ "$mode" = any ]; then
+		api="https://api.github.com/repos/${repo}/releases?per_page=50"
+		meta="$(api_get "$api")" || return 2
+		printf '%s' "$meta" | jq -c --arg glob "$glob" '
+			[.[] | select(.draft != true and .prerelease != true) as $r
+			 | $r.assets[]? | select(.name | test($glob))
+			 | {tag:$r.tag_name, asset_at:.created_at, size:.size, id:.id,
+			    name:.name, url:.browser_download_url}][0] // {}'
+	else
+		api="https://api.github.com/repos/${repo}/releases/latest"
+		meta="$(api_get "$api")" || return 2
+		printf '%s' "$meta" | jq -c --arg glob "$glob" '
+			.tag_name as $tag | [.assets[]? | select(.name | test($glob))
+			 | {tag:$tag, asset_at:.created_at, size:.size, id:.id,
+			    name:.name, url:.browser_download_url}][0] // {}'
+	fi
+}
+
+mirror_release_asset_info() {
+	local key="$1" meta
+	meta="$(api_get "$RELEASE_MIRROR_MANIFEST")" || return 2
+	printf '%s' "$meta" | jq -c --arg key "$key" '
+		if .schema == 1 then (.components[$key] // {}) else {} end
+		| if ((.url // "") | test("^https://cdn[.]jsdelivr[.]net/gh/swwayps/jsdelivr@[0-9a-f]{40}/releases/" + $key + "/"))
+		     and ((.sha256 // "") | test("^[0-9a-f]{64}$"))
+		  then . else {} end'
+}
+
 # Read a component's Beta package metadata directly from its beta branch. Beta
 # builds deliberately live in dist/ rather than GitHub Releases, so a branch
 # can be published or withdrawn independently of Stable. A missing branch or
@@ -1661,9 +1693,13 @@ beta_asset_info() {
 # Stable forge was unreachable; return 3 means no Stable asset exists.
 resolve_component_asset() {
 	local channel="$1" repo="$2" beta_path="$3" stable_glob="$4"
-	local stable_mode="${5:-latest}" beta_info="" stable_info="" url=""
+	local stable_mode="${5:-latest}" mirror_key="${6:-}"
+	local beta_info="" github_info="{}" mirror_info="{}" url=""
+	local github_rc=0 mirror_rc=0
 	RESOLVED_ASSET_URL=""
 	RESOLVED_ASSET_INFO="{}"
+	RESOLVED_FALLBACK_URL=""
+	RESOLVED_FALLBACK_INFO="{}"
 
 	if [ "$channel" = "beta" ]; then
 		beta_info="$(beta_asset_info "$repo" "$beta_path")" || beta_info=""
@@ -1679,17 +1715,35 @@ resolve_component_asset() {
 		                 "O Beta não está disponível para ${repo}; usando Stable.")"
 	fi
 
-	if [ "$stable_mode" = "any" ]; then
-		url="$(any_release_asset_url "$repo" "$stable_glob")" || return 2
-	else
-		url="$(latest_release_asset_url "$repo" "$stable_glob")" || return 2
+	github_info="$(github_release_asset_info "$repo" "$stable_glob" "$stable_mode")" \
+		|| github_rc=$?
+	if [ -n "$mirror_key" ]; then
+		mirror_info="$(mirror_release_asset_info "$mirror_key")" || mirror_rc=$?
 	fi
-	[ -n "$url" ] || return 3
-	stable_info="$(release_asset_info "$repo" "$stable_glob" "$stable_mode")"
-	RESOLVED_ASSET_URL="$url"
-	RESOLVED_ASSET_INFO="$(printf '%s' "$stable_info" | jq -c '. + {channel:"stable"}' 2>/dev/null)"
-	[ -n "$RESOLVED_ASSET_INFO" ] || RESOLVED_ASSET_INFO='{"channel":"stable"}'
-	return 0
+
+	url="$(printf '%s' "$github_info" | jq -r '.url // empty')"
+	if [ -n "$url" ]; then
+		RESOLVED_ASSET_URL="$url"
+		RESOLVED_ASSET_INFO="$(printf '%s' "$github_info" |
+			jq -c 'del(.url) + {channel:"stable", source:"github"}')"
+		RESOLVED_FALLBACK_URL="$(printf '%s' "$mirror_info" | jq -r '.url // empty')"
+		if [ -n "$RESOLVED_FALLBACK_URL" ]; then
+			RESOLVED_FALLBACK_INFO="$(printf '%s' "$mirror_info" |
+				jq -c 'del(.url, .sha256_url) + {channel:"stable", source:"jsdelivr"}')"
+		fi
+		return 0
+	fi
+
+	url="$(printf '%s' "$mirror_info" | jq -r '.url // empty')"
+	if [ -n "$url" ]; then
+		RESOLVED_ASSET_URL="$url"
+		RESOLVED_ASSET_INFO="$(printf '%s' "$mirror_info" |
+			jq -c 'del(.url, .sha256_url) + {channel:"stable", source:"jsdelivr"}')"
+		return 0
+	fi
+
+	[ "$github_rc" -eq 2 ] && [ "$mirror_rc" -eq 2 ] && return 2
+	return 3
 }
 
 # Record the installed release fingerprints so the Lumen About tab can show
@@ -1719,8 +1773,8 @@ write_versions_stamp() {
 # flaky, or temporarily down. Distinct from "asset not found" so the user knows
 # it's a connectivity issue to retry, not a broken install.
 forge_unreachable_msg() {
-	L "Couldn't reach GitHub to fetch the download. It may be slow or temporarily down — check your connection and try again in a few minutes." \
-	  "Não foi possível acessar o GitHub para baixar. Ele pode estar lento ou fora do ar no momento — verifique sua conexão e tente de novo em alguns minutos."
+	L "Couldn't reach GitHub or its jsDelivr mirror. Check your connection and try again in a few minutes." \
+	  "Não foi possível baixar pelo GitHub nem pela mirror do jsDelivr. Verifique sua conexão e tente novamente."
 }
 
 # Extract a zip into a destination dir, preferring unzip, falling back to python.
@@ -1742,31 +1796,60 @@ PY
 	return 1
 }
 
+verify_sha256() {
+	local file="$1" expected="$2" actual
+	[[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+	actual="$(sha256sum "$file" | cut -d' ' -f1)" || return 1
+	[ "$actual" = "$expected" ]
+}
+
+download_url() {
+	local url="$1" out="$2"
+	curl --proto '=https' --proto-redir '=https' -fL \
+		--connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$out"
+}
+
+download_resolved_asset() {
+	local out="$1" label="${2:-download}" expected rc=0
+	DOWNLOADED_ASSET_INFO="$RESOLVED_ASSET_INFO"
+	expected="$(printf '%s' "$RESOLVED_ASSET_INFO" | jq -r '.sha256 // empty')"
+	if download_url "$RESOLVED_ASSET_URL" "$out"; then
+		[ -z "$expected" ] || verify_sha256 "$out" "$expected" || return 2
+		return 0
+	fi
+	[ -n "$RESOLVED_FALLBACK_URL" ] || return 1
+	log_warn "$(L "GitHub download failed; trying the jsDelivr mirror." \
+	               "O download pelo GitHub falhou; tentando a mirror do jsDelivr.")"
+	expected="$(printf '%s' "$RESOLVED_FALLBACK_INFO" | jq -r '.sha256 // empty')"
+	[ -n "$expected" ] || return 1
+	download_url "$RESOLVED_FALLBACK_URL" "$out" || rc=$?
+	[ "$rc" -eq 0 ] || return "$rc"
+	verify_sha256 "$out" "$expected" || return 2
+	DOWNLOADED_ASSET_INFO="$RESOLVED_FALLBACK_INFO"
+}
+
 # ============================================================================
 # Step: slsteam-moon (the release already bundles setup.sh + bin/ + tools/).
 # We just download, extract, and run setup.sh install — which also kills Steam.
 # ============================================================================
 install_slsteam_moon() {
-	local url tmp zip extract_root setup setup_path rc
+	local tmp zip extract_root setup setup_path rc
 
 	log_info "$(L "Resolving the latest slsteam-moon (Lumen) release" \
 	             "Buscando a última release do slsteam-moon (Lumen)")"
 	resolve_component_asset "$OPT_SLS_CHANNEL" "$SLS_REPO" "$SLS_BETA_PATH" \
-		"$SLS_ASSET_GLOB" any || rc=$?
+		"$SLS_ASSET_GLOB" any slsteam-moon || rc=$?
 	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
 	if [ "${rc:-0}" -ne 0 ]; then
 		fail "$(L "Could not find a slsteam-moon (Lumen) release asset." \
 		          "Não foi possível encontrar o asset da release do slsteam-moon (Lumen).")"
 	fi
-	url="$RESOLVED_ASSET_URL"
-	SLS_INFO="$RESOLVED_ASSET_INFO"
-
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/slsteam-moon.zip"
 
 	log_info "$(L "Downloading slsteam-moon" "Baixando slsteam-moon")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
-		|| fail "$(forge_unreachable_msg)"
+	download_resolved_asset "$zip" slsteam-moon || fail "$(forge_unreachable_msg)"
+	SLS_INFO="$DOWNLOADED_ASSET_INFO"
 
 	log_info "$(L "Extracting" "Extraindo")"
 	extract_zip "$zip" "$tmp/extracted" || fail "$(L "Extraction failed" "Falha na extração")"
@@ -1803,23 +1886,21 @@ install_slsteam_moon() {
 # ~/.local/share/Lumen. The Steam wrapper (slsteam-moon setup.sh) launches it
 # as a sidecar; it injects the LuaTools frontend via CDP and hosts the backend.
 install_lumen() {
-	local url tmp zip dest rc
+	local tmp zip dest rc
 	dest="$LUMEN_DIR"
 	log_info "$(L "Resolving latest Lumen release" "Buscando a última release do Lumen")"
 	resolve_component_asset "$OPT_LUMEN_CHANNEL" "$LUMEN_REPO" "$LUMEN_BETA_PATH" \
-		"^${LUMEN_ASSET}$" latest || rc=$?
+		'^lumen-linux\.zip$' latest lumen || rc=$?
 	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
 	if [ "${rc:-0}" -ne 0 ]; then
 		fail "$(L "Could not find the Lumen release asset." \
 		          "Não foi possível encontrar o asset da release do Lumen.")"
 	fi
-	url="$RESOLVED_ASSET_URL"
-	LUMEN_INFO="$RESOLVED_ASSET_INFO"
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$LUMEN_ASSET"
 	log_info "$(L "Downloading Lumen" "Baixando o Lumen")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
-		|| fail "$(forge_unreachable_msg)"
+	download_resolved_asset "$zip" Lumen || fail "$(forge_unreachable_msg)"
+	LUMEN_INFO="$DOWNLOADED_ASSET_INFO"
 	mkdir -p "$dest"
 	extract_zip "$zip" "$dest" || fail "$(L "Extraction failed" "Falha na extração")"
 	chmod +x "$dest/lumen" 2>/dev/null || true
@@ -1927,26 +2008,23 @@ activate_plugin_tree() {
 }
 
 install_plugin() {
-	local url tmp zip dest rc stage previous
+	local tmp zip dest rc stage previous
 
 	log_info "$(L "Resolving latest LuaTools plugin release" \
 	             "Buscando a última release do plugin LuaTools")"
 	resolve_component_asset "$OPT_PLUGIN_CHANNEL" "$PLUGIN_REPO" "$PLUGIN_BETA_PATH" \
-		"^${PLUGIN_ASSET}$" latest || rc=$?
+		'^luatools-linux\.zip$' latest plugin || rc=$?
 	if [ "${rc:-0}" -eq 2 ]; then fail "$(forge_unreachable_msg)"; fi
 	if [ "${rc:-0}" -ne 0 ]; then
 		fail "$(L "Could not find the plugin release asset." \
 		          "Não foi possível encontrar o asset da release do plugin.")"
 	fi
-	url="$RESOLVED_ASSET_URL"
-	PLUGIN_INFO="$RESOLVED_ASSET_INFO"
-
 	tmp="$(mktemp -d)"; trap 'rm -rf "${tmp:-}"' RETURN
 	zip="$tmp/$PLUGIN_ASSET"
 
 	log_info "$(L "Downloading plugin" "Baixando o plugin")"
-	curl -fL --connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$zip" \
-		|| fail "$(forge_unreachable_msg)"
+	download_resolved_asset "$zip" plugin || fail "$(forge_unreachable_msg)"
+	PLUGIN_INFO="$DOWNLOADED_ASSET_INFO"
 
 	# Lumen hosts the plugin under ~/.local/share/Lumen/luatools (the wrapper
 	# points LUMEN_BACKEND_DIR at .../luatools/backend, and the injector reads

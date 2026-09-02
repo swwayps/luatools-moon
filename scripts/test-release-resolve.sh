@@ -63,6 +63,50 @@ MOCK_FAIL=0; MOCK_JSON="$ANY_JSON_NOMATCH"
 url="$(any_release_asset_url repo '^slsteam-moon-linux-.*-lumen\.zip$')"; rc=$?
 { [ "$rc" -eq 0 ] && [ -z "$url" ]; }; check "any: ok + no match -> rc 0, empty url" $?
 
+# --- Stable GitHub -> jsDelivr mirror --------------------------------------
+
+GH_MATCH='{"tag_name":"v2.9","assets":[{"id":29,"name":"lumen-linux.zip","created_at":"2026-09-02T00:00:00Z","updated_at":"2026-09-02T00:00:00Z","size":290,"browser_download_url":"https://github.example/lumen-linux.zip"}]}'
+GH_TEMP='{"tag_name":"v2.9","assets":[{"id":29,"name":"lumen-linux.zip.uploading","browser_download_url":"https://github.example/temp"}]}'
+MIRROR_JSON='{"schema":1,"components":{"lumen":{"tag":"v2.8","id":28,"size":280,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@0123456789012345678901234567890123456789/releases/lumen/v2.8/hash/lumen-linux.zip"}}}'
+MOCK_GITHUB_FAIL=0
+MOCK_GITHUB_JSON="$GH_MATCH"
+api_get() {
+	case "$1" in
+		*cdn.jsdelivr.net*) printf '%s' "$MIRROR_JSON" ;;
+		*) [ "$MOCK_GITHUB_FAIL" = 1 ] && return 1; printf '%s' "$MOCK_GITHUB_JSON" ;;
+	esac
+}
+
+MOCK_GITHUB_FAIL=1
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$RESOLVED_ASSET_URL" = "$(printf '%s' "$MIRROR_JSON" | jq -r '.components.lumen.url')" ]; }
+check "GitHub failure uses the mirror" $?
+
+MOCK_GITHUB_FAIL=0
+MOCK_GITHUB_JSON="$GH_TEMP"
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$RESOLVED_ASSET_URL" = "$(printf '%s' "$MIRROR_JSON" | jq -r '.components.lumen.url')" ]; }
+check "temporary asset name is ignored" $?
+
+MOCK_GITHUB_JSON="$GH_MATCH"
+rc=0
+resolve_component_asset stable swwayps/lumen dist/lumen-linux.zip \
+	'^lumen-linux\.zip$' latest lumen || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$RESOLVED_ASSET_URL" = "https://github.example/lumen-linux.zip" ] && [ -n "$RESOLVED_FALLBACK_URL" ]; }
+check "GitHub primary keeps a mirror transfer fallback" $?
+
+attempts=""
+download_url() { attempts="${attempts:+$attempts }$1"; [ "$1" != "$RESOLVED_ASSET_URL" ]; }
+verify_sha256() { [ "$2" = aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ]; }
+rc=0
+download_resolved_asset /tmp/unused.zip Lumen || rc=$?
+{ [ "$rc" -eq 0 ] && [ "$attempts" = "$RESOLVED_ASSET_URL $RESOLVED_FALLBACK_URL" ] && [ "$(printf '%s' "$DOWNLOADED_ASSET_INFO" | jq -r '.source')" = jsdelivr ]; }
+check "download failure retries and stamps the mirror" $?
+
 echo ""
 if [ "$failures" -eq 0 ]; then echo "ALL PASS"; exit 0; fi
 echo "$failures CHECK(S) FAILED"; exit 1

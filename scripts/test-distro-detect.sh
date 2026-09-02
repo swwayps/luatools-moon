@@ -235,6 +235,19 @@ esac
 check "missing curl: does not claim the connection is down" "$r"
 rm -rf "$EMPTYBIN"
 
+# A GitHub outage is not "no internet" while the release mirror is reachable.
+PROBEBIN="$TESTDIR/probebin"; mkdir -p "$PROBEBIN"
+printf '%s\n' \
+	'#!/bin/sh' \
+	'case "$*" in' \
+	'  *github.com*) exit 1 ;;' \
+	'  *cdn.jsdelivr.net*) exit 0 ;;' \
+	'esac' \
+	'exit 1' >"$PROBEBIN/curl"
+chmod +x "$PROBEBIN/curl"
+internet_out="$(PATH="$PROBEBIN:$PATH" check_internet 2>&1)"; internet_rc=$?
+[ "$internet_rc" -eq 0 ]; check "GitHub outage: reachable jsDelivr passes connectivity preflight" $?
+
 # nixos_pkg_for: nixpkgs attribute names (only "tar" differs -> gnutar).
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?
 [ "$(nixos_pkg_for notify-send)" = "libnotify" ]; check "nixos_pkg_for: notify-send -> libnotify" $?
