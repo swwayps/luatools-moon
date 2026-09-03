@@ -2614,9 +2614,8 @@ $(L "Options" "Opções"):
                   "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
   --nolaunch   $(L "Do not auto-start Steam at the end of install." \
                   "Não inicia a Steam automaticamente ao final da instalação.")
-# TODO: BR translation 
   --keep-millennium $(L "Do not remove millennium's config/data (Old luatools plugin is still removed)." \
-                  "Do not remove millennium's config/data (Old luatools plugin is still removed).")
+                  "Não remover os dados/configurações do Millennium (o plugin luatools antigo ainda será removido).")
   --slsteam-channel stable|beta
                $(L "Select the slsteam-moon update channel (default: stable)." \
                   "Seleciona o canal de atualização do slsteam-moon (padrão: stable).")

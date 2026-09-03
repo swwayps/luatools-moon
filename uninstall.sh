@@ -1696,10 +1696,12 @@ main() {
 	uninstall_luatools_plugin
 
 	print_section "$(L "Removing Lumen" "Removendo Lumen")"
-	uninstall_lumen
-
+	uninstall_lumen    
+	
+	if [ -z "${OPT_KEEP_MILLENNIUM:-}" ]; then
 	print_section "$(L "Removing Millennium" "Removendo Millennium")"
 	uninstall_millennium
+    fi	
 
 	print_section "$(L "Removing slsteam-moon" "Removendo slsteam-moon")"
 	uninstall_slsteam_moon
