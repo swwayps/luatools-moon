@@ -1698,7 +1698,7 @@ main() {
 	print_section "$(L "Removing Lumen" "Removendo Lumen")"
 	uninstall_lumen    
 	
-	if [ -z "${OPT_KEEP_MILLENNIUM:-}" ]; then
+	if [ -z "${LUATOOLS_MOON_KEEP_MILLENNIUM:-}" ]; then
 	print_section "$(L "Removing Millennium" "Removendo Millennium")"
 	uninstall_millennium
     fi	
