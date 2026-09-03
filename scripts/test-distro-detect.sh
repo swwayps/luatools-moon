@@ -75,6 +75,10 @@ fixture 'ID=arch'
 if is_immutable_distro; then r=1; else r=0; fi
 check "immutable: arch -> no" "$r"
 
+fixture 'ID=gentoo'
+if is_immutable_distro; then r=1; else r=0; fi
+check "immutable: gentoo -> no (mutable, Portage-driven)" "$r"
+
 # --- get_distro_family (unchanged behaviour across the refactor) ------------
 
 fixture 'ID=bazzite
@@ -88,6 +92,13 @@ ID_LIKE="arch"'
 fixture 'ID=linuxmint
 ID_LIKE="ubuntu debian"'
 [ "$(get_distro_family)" = "debian" ]; check "family: mint -> debian" $?
+
+fixture 'ID=gentoo'
+[ "$(get_distro_family)" = "gentoo" ]; check "family: gentoo -> gentoo" $?
+
+fixture 'ID=funtoo
+ID_LIKE="gentoo"'
+[ "$(get_distro_family)" = "gentoo" ]; check "family: funtoo (ID_LIKE=gentoo) -> gentoo" $?
 
 # --- NixOS ------------------------------------------------------------------
 # NixOS has no /usr/bin, no system package manager the installer can drive,
@@ -252,6 +263,18 @@ internet_out="$(PATH="$PROBEBIN:$PATH" check_internet 2>&1)"; internet_rc=$?
 [ "$(nixos_pkg_for tar)" = "gnutar" ]; check "nixos_pkg_for: tar -> gnutar" $?
 [ "$(nixos_pkg_for notify-send)" = "libnotify" ]; check "nixos_pkg_for: notify-send -> libnotify" $?
 [ "$(nixos_pkg_for jq)" = "jq" ]; check "nixos_pkg_for: jq -> jq (unchanged)" $?
+
+# pkg_for on Gentoo resolves full Portage atoms (category required by emerge
+# when scripted); every other family keeps the plain upstream names.
+[ "$(pkg_for jq gentoo)" = "app-misc/jq" ]; check "pkg_for: jq @ gentoo -> app-misc/jq" $?
+[ "$(pkg_for curl gentoo)" = "net-misc/curl" ]; check "pkg_for: curl @ gentoo -> net-misc/curl" $?
+[ "$(pkg_for tar gentoo)" = "app-arch/tar" ]; check "pkg_for: tar @ gentoo -> app-arch/tar" $?
+[ "$(pkg_for unzip gentoo)" = "app-arch/unzip" ]; check "pkg_for: unzip @ gentoo -> app-arch/unzip" $?
+[ "$(pkg_for notify-send gentoo)" = "x11-libs/libnotify" ]; check "pkg_for: notify-send @ gentoo -> x11-libs/libnotify" $?
+[ "$(pkg_for jq debian)" = "jq" ]; check "pkg_for: jq @ debian -> jq (unchanged)" $?
+[ "$(pkg_for unzip fedora)" = "unzip" ]; check "pkg_for: unzip @ fedora -> unzip (unchanged)" $?
+[ "$(pkg_for notify-send opensuse)" = "libnotify-tools" ]; check "pkg_for: notify-send @ opensuse unchanged" $?
+[ "$(pkg_for notify-send debian)" = "libnotify-bin" ]; check "pkg_for: notify-send @ debian unchanged" $?
 
 rm -rf "$TESTDIR"
 echo ""
