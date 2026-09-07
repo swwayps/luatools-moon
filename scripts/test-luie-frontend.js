@@ -26,5 +26,9 @@ check("L7 manual Luie downloads stay behind the managed-source RPC",
     && source.includes("source.managed === true"));
 check("L8 connected Luie has no lua.tools badge",
   !source.includes("<span>lua.tools</span>"));
+// The login gate belongs to the source picker (L1), not the settings list: the
+// Download Sources row already carries the name, toggle and reorder handle.
+check("L9 the Download Sources row carries no login badge",
+  !source.includes("isManaged && api.needsLogin && api.locked"));
 
 process.exitCode = failures ? 1 : 0;

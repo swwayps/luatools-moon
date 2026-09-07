@@ -6634,13 +6634,6 @@
             };
 
             nameWrap.appendChild(nameDisplay);
-            if (isManaged && api.needsLogin && api.locked) {
-              const managedState = document.createElement("span");
-              managedState.style.cssText = `display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2px 7px;border-radius:9px;background:rgba(26,159,255,.12);color:#1a9fff;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:.35px;vertical-align:1px;`;
-              managedState.innerHTML = '<i class="fa-solid fa-lock"></i><span>'
-                + lt("Needs login") + '</span>';
-              nameWrap.appendChild(managedState);
-            }
             row.appendChild(nameWrap);
 
             // ── Toggle pill ────────────────────────────────────────────
