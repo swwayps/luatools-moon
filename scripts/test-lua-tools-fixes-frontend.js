@@ -35,5 +35,22 @@ check("VF8 fallback apply participates in the durable receipt flow",
     && source.includes("data.fallbackOnlineApplied"));
 check("VF9 Spacewar renders its persisted FakeAppIds state",
   source.includes("data.spacewarApplied"));
+// Lumen ships its settings menu to the DESKTOP shell only, so in Game Mode the
+// bridge is present in this web view but the window it opens is a mouse-and-
+// menubar overlay drawn over the 10-foot UI. Both sign-in paths have to ask the
+// mode, not just whether the function exists.
+check("VF10 the Lumen sign-in bridge is only used outside Big Picture",
+  source.includes("function canOpenLumenAccount()")
+    && source.includes("!window.__LUATOOLS_IS_BIG_PICTURE__")
+    // one definition plus both sign-in paths, and the raw `typeof` guard survives
+    // ONLY inside the helper, so no call site can bypass the mode check
+    && (source.match(/canOpenLumenAccount\(\)/g) || []).length === 3
+    && (source.match(/typeof window\.__lumenOpenLuaToolsAccount === "function"/g) || []).length === 1
+    && (source.match(/luaToolsSignInHint\(\)/g) || []).length === 3
+    && source.includes("Sign in to lua.tools from Desktop Mode first."));
+// Game Mode has no file manager to open into, so the button is a dead end there.
+check("VF11 Game folder is a desktop-only action",
+  source.includes("if (!window.__LUATOOLS_IS_BIG_PICTURE__) rightButtons.appendChild(gameFolderBtn);")
+    && (source.match(/rightButtons\.appendChild\(gameFolderBtn\)/g) || []).length === 1);
 
 process.exitCode = failures ? 1 : 0;

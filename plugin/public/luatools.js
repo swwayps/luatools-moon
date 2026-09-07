@@ -191,15 +191,40 @@
     ".focusable:not([disabled])",
   ].join(", ");
 
+  // Steam's focus controller is not always on THIS window. Gamepad UI opens the
+  // store web view from the shell, so the controller may only be reachable through
+  // the parent or the opener. Probing `window` alone made every native
+  // registration fail in Game Mode and silently fall back to the raw Gamepad API
+  // loop — which Steam consumes itself, so the D-pad never reached the overlay.
+  // Same probe order Lumen uses (lumen/lua/menu/04-overlay-helpers.js).
   function getNativeFocusController() {
-    const controller = window.FocusNavController;
-    if (
-      !controller ||
-      typeof controller.NewGamepadNavigationTree !== "function"
-    ) {
-      return null;
+    const candidates = [];
+    try {
+      candidates.push(window.FocusNavController);
+    } catch (_) {}
+    try {
+      candidates.push(
+        window.GamepadNavTree &&
+          window.GamepadNavTree.m_context &&
+          window.GamepadNavTree.m_context.m_controller,
+      );
+    } catch (_) {}
+    try {
+      candidates.push(window.parent && window.parent.FocusNavController);
+    } catch (_) {}
+    try {
+      candidates.push(window.opener && window.opener.FocusNavController);
+    } catch (_) {}
+    for (let index = 0; index < candidates.length; index++) {
+      const candidate = candidates[index];
+      if (
+        candidate &&
+        typeof candidate.NewGamepadNavigationTree === "function"
+      ) {
+        return candidate;
+      }
     }
-    return controller;
+    return null;
   }
 
   function getNativeFocusContext(controller) {
@@ -3129,6 +3154,24 @@
     return t(text, text);
   }
 
+  // Lumen ships its settings menu to the DESKTOP shell only, so in Game Mode the
+  // bridge still exists in this web view while the window it opens is a
+  // mouse-and-menubar overlay drawn over the 10-foot UI. `typeof === "function"`
+  // cannot tell "the bridge is here" from "the bridge belongs here", so ask the
+  // mode too — and then say where signing in actually happens.
+  function canOpenLumenAccount() {
+    return (
+      !window.__LUATOOLS_IS_BIG_PICTURE__ &&
+      typeof window.__lumenOpenLuaToolsAccount === "function"
+    );
+  }
+
+  function luaToolsSignInHint() {
+    return window.__LUATOOLS_IS_BIG_PICTURE__
+      ? lt("Sign in to lua.tools from Desktop Mode first.")
+      : lt("Sign in to lua.tools from Lumen Settings first.");
+  }
+
   function sourceLimitMessage(code, sourceName) {
     const source = String(sourceName || lt("this source"));
     switch (code) {
@@ -3810,10 +3853,10 @@
           e.preventDefault();
           if (blocked || !fix) return;
           if (official.authConfigured !== true) {
-            if (typeof window.__lumenOpenLuaToolsAccount === "function") {
+            if (canOpenLumenAccount()) {
               overlay.remove(); window.__lumenOpenLuaToolsAccount();
             } else {
-              ShowLuaToolsAlert("LuaTools", lt("Sign in to lua.tools from Lumen Settings first."));
+              ShowLuaToolsAlert("LuaTools", luaToolsSignInHint());
             }
             return;
           }
@@ -4077,6 +4120,8 @@
 
     const rightButtons = document.createElement("div");
     rightButtons.style.cssText = "display:flex;gap:8px;";
+    // Desktop only: Game Mode has no file manager to open into, so the button is
+    // a dead end there (it is still built so the handler stays one definition).
     const gameFolderBtn = document.createElement("a");
     gameFolderBtn.className = "luatools-btn";
     gameFolderBtn.innerHTML = `<span><i class="fa-solid fa-folder" style="margin-right: 8px;"></i>${lt("Game folder")}</span>`;
@@ -4094,7 +4139,7 @@
         }
       }
     };
-    rightButtons.appendChild(gameFolderBtn);
+    if (!window.__LUATOOLS_IS_BIG_PICTURE__) rightButtons.appendChild(gameFolderBtn);
 
     const backBtn = document.createElement("a");
     backBtn.className = "luatools-btn";
@@ -4311,10 +4356,10 @@
       }
       if (payload && (payload.errorCode === "not_signed_in"
           || payload.errorCode === "session_expired")) {
-        if (typeof window.__lumenOpenLuaToolsAccount === "function") {
+        if (canOpenLumenAccount()) {
           window.__lumenOpenLuaToolsAccount();
         } else {
-          ShowLuaToolsAlert("LuaTools", lt("Sign in to lua.tools from Lumen Settings first."));
+          ShowLuaToolsAlert("LuaTools", luaToolsSignInHint());
         }
         return;
       }

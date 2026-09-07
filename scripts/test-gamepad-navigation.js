@@ -348,7 +348,7 @@ const factory = new Function(
   "window",
   "document",
   "MutationObserver",
-  `${block}\nreturn { registerNativeHeaderNavigation, cleanupNativeHeaderNavigation, registerNativeStoreNavigation, cleanupNativeStoreNavigation, registerNativeOverlayNavigation, cleanupNativeOverlayNavigation, hasNativeOverlayNavigation, normalizeBigPictureStoreRows, reconcileBigPictureStoreRows, getMutationProcessingDelay, getMutationProcessingDeadline, hasPendingStoreRegistration: hasPendingNativeStoreRegistration, captureStoreFocus: captureNativeStoreFocus };`,
+  `${block}\nreturn { registerNativeHeaderNavigation, cleanupNativeHeaderNavigation, registerNativeStoreNavigation, cleanupNativeStoreNavigation, registerNativeOverlayNavigation, cleanupNativeOverlayNavigation, hasNativeOverlayNavigation, normalizeBigPictureStoreRows, reconcileBigPictureStoreRows, getMutationProcessingDelay, getMutationProcessingDeadline, hasPendingStoreRegistration: hasPendingNativeStoreRegistration, captureStoreFocus: captureNativeStoreFocus, getNativeFocusController };`,
 );
 const scheduledRetries = [];
 const canceledTimers = new Set();
@@ -866,6 +866,50 @@ for (const element of [
 }
 if (restartAction.classList.contains("active-focus")) {
   throw new Error("cleaned game store action kept its visible focus indicator");
+}
+
+// Gamepad UI opens the store web view FROM the shell, so Steam's focus controller
+// is not always on this window — it may only be reachable through the parent or
+// the opener. Probing `window` alone made every native registration fail there and
+// fall back to the raw Gamepad API, which Steam consumes itself, so the D-pad
+// never reached the fix cards.
+{
+  const reachable = { NewGamepadNavigationTree: () => {} };
+  const scopes = {
+    window: { FocusNavController: reachable },
+    "GamepadNavTree context": {
+      GamepadNavTree: { m_context: { m_controller: reachable } },
+    },
+    parent: { parent: { FocusNavController: reachable } },
+    opener: { opener: { FocusNavController: reachable } },
+  };
+  const scoped = (extra) =>
+    factory(
+      Object.assign(
+        {
+          getComputedStyle: (element) => element.style,
+          setTimeout: () => 1,
+          clearTimeout: () => {},
+        },
+        extra,
+      ),
+      { documentElement: new FakeElement("document") },
+      FakeMutationObserver,
+    );
+
+  for (const [where, extra] of Object.entries(scopes)) {
+    if (scoped(extra).getNativeFocusController() !== reachable) {
+      throw new Error("focus controller was not found on " + where);
+    }
+  }
+  // A stand-in without the tree factory is not a controller, so it must not be
+  // mistaken for one just because the property exists.
+  if (scoped({ parent: { FocusNavController: {} } }).getNativeFocusController() !== null) {
+    throw new Error("an object without NewGamepadNavigationTree was accepted");
+  }
+  if (scoped({}).getNativeFocusController() !== null) {
+    throw new Error("a window with no controller anywhere must report none");
+  }
 }
 
 console.log("gamepad navigation tests passed");
