@@ -51,7 +51,6 @@ LUMEN_REPO="swwayps/lumen"
 LUMEN_ASSET="lumen-linux.zip"
 LUMEN_BETA_PATH="dist/lumen-linux.zip"
 LUMEN_DIR="$HOME/.local/share/Lumen"            # binary + lua/ + luatools/
-RELEASE_MIRROR_MANIFEST="https://cdn.jsdelivr.net/gh/swwayps/jsdelivr@main/manifest.json"
 
 # Stable release fallback. The manifest is small and mutable; every archive URL
 # inside it is pinned to the mirror commit that introduced those exact bytes.
