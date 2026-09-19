@@ -167,12 +167,19 @@ local function on_tick(now, controls)
         end,
         recommended_build_ready = function(appid)
             local ok_module, manifestpins = pcall(require, "manifestpins")
-            if not ok_module or type(manifestpins) ~= "table"
-                or type(manifestpins.app_at_pinned_gids) ~= "function" then
+            if not ok_module or type(manifestpins) ~= "table" then
                 return false
             end
-            return manifestpins.app_at_pinned_gids(
-                manifestpins.default_ctx(), appid) == true
+            local ctx = manifestpins.default_ctx()
+            -- A build-agnostic fix (keys-only .lua, no pin) is ready on any
+            -- installed build; only a build-specific pin must match on disk.
+            if type(manifestpins.recommended_build_ready) == "function" then
+                return manifestpins.recommended_build_ready(ctx, appid) == true
+            end
+            if type(manifestpins.app_at_pinned_gids) == "function" then
+                return manifestpins.app_at_pinned_gids(ctx, appid) == true
+            end
+            return false
         end,
         is_busy = function(appid)
             return lua_tools_fix_state.get_pending(appid) ~= nil
