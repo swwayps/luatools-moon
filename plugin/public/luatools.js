@@ -9930,17 +9930,13 @@
                 if (button && button.parentElement) {
                   button.parentElement.removeChild(button);
                 }
-                showLuaToolsConfirm(
+                // Hot reload: the recommended build is picked up live, so no
+                // Steam restart is needed — just acknowledge success.
+                ShowLuaToolsAlert(
                   "LuaTools",
                   choice.autoApply === true
-                    ? lt("Recommended version added. The fix will be applied automatically after installation. Restart Steam now?")
-                    : lt("Recommended version added. Restart Steam now?"),
-                  function () {
-                    Millennium.callServerMethod("luatools", "RestartSteam", {
-                      contentScriptQuery: "",
-                    });
-                  },
-                  function () {},
+                    ? lt("Recommended version added. The fix will be applied automatically after installation.")
+                    : lt("Recommended version added."),
                 );
               }).catch(function (error) {
                 if (progressOverlay) progressOverlay.remove();
@@ -10709,40 +10705,16 @@
                 // game only appears after a Steam restart on Linux).
                 const hideBtn = overlay.querySelector(".luatools-hide-btn");
                 if (hideBtn) {
-                  hideBtn.className = "luatools-btn luatools-hide-btn";
+                  // Hot reload: a freshly added game now appears without a Steam
+                  // restart, so the success modal only needs a Close button
+                  // (promoted to the filled primary since it's the sole action).
+                  hideBtn.className = "luatools-btn primary luatools-hide-btn";
                   hideBtn.style.cssText =
                     "min-width:140px;display:flex;align-items:center;justify-content:center;text-align:center;";
                   hideBtn.innerHTML =
                     '<i class="fa-solid fa-xmark" style="margin-right:6px;"></i><span>' +
                     lt("Close") +
                     "</span>";
-                  if (
-                    hideBtn.parentElement &&
-                    !overlay.querySelector(".luatools-restart-added-btn")
-                  ) {
-                    const restartBtn = document.createElement("a");
-                    restartBtn.href = "#";
-                    restartBtn.className =
-                      "luatools-btn primary luatools-restart-added-btn";
-                    restartBtn.style.cssText =
-                      "min-width:140px;display:flex;align-items:center;justify-content:center;text-align:center;";
-                    restartBtn.innerHTML =
-                      '<i class="fa-solid fa-rotate-right" style="margin-right:6px;"></i><span>' +
-                      lt("Restart Steam") +
-                      "</span>";
-                    restartBtn.addEventListener("click", function (e) {
-                      e.preventDefault();
-                      try {
-                        restartBtn.style.pointerEvents = "none";
-                        restartBtn.style.opacity = "0.6";
-                        Millennium.callServerMethod("luatools", "RestartSteam", {
-                          contentScriptQuery: "",
-                        });
-                      } catch (_) {}
-                    });
-                    // Order: Restart Steam (filled) -> Close (unfilled).
-                    hideBtn.parentElement.insertBefore(restartBtn, hideBtn);
-                  }
                 }
               }
               done = true;
