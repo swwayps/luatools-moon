@@ -1088,7 +1088,22 @@ function StartLuaToolsRecommendedAdd(appid, auto_apply, content_script_query, fi
                 return lua_tools_auto_fix.queue(queued_appid, fix_id)
             end,
         })
-    if not ok then return json_err(result) end
+    if not ok then
+        logger.warn(string.format(
+            "StartLuaToolsRecommendedAdd crashed appid=%s fixId=%s: %s",
+            tostring(normalized_appid), tostring(payload.fixId or ""),
+            tostring(result)))
+        return json_err(result)
+    end
+    -- The UI only shows result.error (a generic sentence); the precise reason
+    -- lives in result.errorCode. Log both so a failed recommended-add is
+    -- diagnosable from ~/.lumen.log instead of being lost after the click.
+    if type(result) == "table" and result.success == false then
+        logger.warn(string.format(
+            "RecommendedAdd failed appid=%s fixId=%s errorCode=%s error=%s",
+            tostring(normalized_appid), tostring(payload.fixId or ""),
+            tostring(result.errorCode), tostring(result.error)))
+    end
     return json_ok(result)
 end
 
