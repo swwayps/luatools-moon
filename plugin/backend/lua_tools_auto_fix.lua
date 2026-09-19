@@ -8,6 +8,11 @@ local auto_fix = {}
 local STATE_FILE = paths.backend_path("data/lua_tools_auto_fix.json")
 local write_sequence = 0
 local MAX_RETRIES = 3
+-- Consecutive waiting_install polls with the appmanifest gone (after it was once
+-- observed present) before a job is treated as cancelled/uninstalled and
+-- dropped. The short grace rides out a transient appmanifest read (library ops,
+-- brief rewrites) without cancelling a live install.
+local AUTO_FIX_GONE_POLLS = 3
 
 local function shell_quote(value)
   return "'" .. tostring(value or ""):gsub("'", "'\\''") .. "'"
@@ -319,11 +324,37 @@ function auto_fix.tick(now, callbacks, deps)
             end
           end
         else
-          if job.stablePolls ~= 0 or job.seenInstallActivity ~= true then
+          -- Not ready to apply: still installing (found), the appmanifest is
+          -- gone (download cancelled / game uninstalled), or a transient read.
+          local install_found = ok_install and type(install) == "table"
+            and install.found == true
+          local install_gone = ok_install and type(install) == "table"
+            and install.found == false
+          if install_gone and job.observedManifest == true then
+            -- The appmanifest was seen and has now vanished: the download was
+            -- cancelled or the game uninstalled. Wait out a few polls (guarding a
+            -- transient read), then drop the job so it cannot fire on a future
+            -- reinstall.
+            job.goneStreak = (tonumber(job.goneStreak) or 0) + 1
+            job.stablePolls = 0
             changed = true
+            if job.goneStreak >= AUTO_FIX_GONE_POLLS then
+              database.jobs[key] = nil
+            end
+          else
+            -- Once the appmanifest is actually observed, remember it so a later
+            -- disappearance is told apart from "queued but never installed".
+            if install_found and job.observedManifest ~= true then
+              job.observedManifest = true
+              changed = true
+            end
+            if job.goneStreak ~= nil then job.goneStreak = nil; changed = true end
+            if job.stablePolls ~= 0 or job.seenInstallActivity ~= true then
+              changed = true
+            end
+            job.stablePolls = 0
+            job.seenInstallActivity = true
           end
-          job.stablePolls = 0
-          job.seenInstallActivity = true
         end
       elseif job.phase == "applying" then
         local ok_poll, payload = pcall(callbacks.poll_fix, appid)

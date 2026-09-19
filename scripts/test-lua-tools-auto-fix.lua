@@ -446,5 +446,58 @@ check("J24 requeueing a fix clears the previous terminal failure",
     and requeue_db.jobs["990080"].retries == 0
     and requeue_db.jobs["990080"].errorCode == nil)
 
+-- J25-J28: a cancelled/uninstalled download must drop the pending auto-fix job
+-- (so it can't silently fire on a future reinstall), but ONLY after the game's
+-- appmanifest was actually observed, and only after a short grace to ride out a
+-- transient read. A job whose game was never installed keeps waiting.
+local gone_db = { version = 1, jobs = {} }
+local gone_deps = {
+  load = function() return gone_db end,
+  save = function(value) gone_db = value; return true end,
+  now = function() return 500 end,
+}
+local gone_install = { found = true, complete = false }
+local gone_callbacks = {
+  auth_status = function() return { configured = true } end,
+  install_state = function() return gone_install end,
+  start_fix = function() return { success = true } end,
+}
+auto_fix.queue(3321460, FIX_ID, gone_deps)
+auto_fix.tick(500, gone_callbacks, gone_deps)
+check("J25 an in-progress download is observed before it can be treated as gone",
+  gone_db.jobs["3321460"] ~= nil
+    and gone_db.jobs["3321460"].observedManifest == true
+    and gone_db.jobs["3321460"].phase == "waiting_install")
+
+gone_install = { found = false }
+auto_fix.tick(505, gone_callbacks, gone_deps)
+auto_fix.tick(510, gone_callbacks, gone_deps)
+check("J26 a briefly-gone manifest is not dropped within the grace window",
+  gone_db.jobs["3321460"] ~= nil
+    and gone_db.jobs["3321460"].phase == "waiting_install")
+auto_fix.tick(515, gone_callbacks, gone_deps)
+check("J27 a cancelled/uninstalled download drops the pending job",
+  gone_db.jobs["3321460"] == nil)
+
+local never_db = { version = 1, jobs = {} }
+local never_deps = {
+  load = function() return never_db end,
+  save = function(value) never_db = value; return true end,
+  now = function() return 600 end,
+}
+local never_callbacks = {
+  auth_status = function() return { configured = true } end,
+  install_state = function() return { found = false } end,
+  start_fix = function() return { success = true } end,
+}
+auto_fix.queue(3321460, FIX_ID, never_deps)
+auto_fix.tick(600, never_callbacks, never_deps)
+auto_fix.tick(605, never_callbacks, never_deps)
+auto_fix.tick(610, never_callbacks, never_deps)
+auto_fix.tick(615, never_callbacks, never_deps)
+check("J28 a queued job whose game was never installed keeps waiting",
+  never_db.jobs["3321460"] ~= nil
+    and never_db.jobs["3321460"].phase == "waiting_install")
+
 if failures > 0 then os.exit(1) end
 print("ALL LUA.TOOLS AUTO FIX CHECKS PASSED")
