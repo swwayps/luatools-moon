@@ -1897,7 +1897,7 @@ PY
 # partial mirror/CDN compromise. Detached signatures with a public key embedded
 # here are the actual fix and need a project signing key.
 download_and_verify() {
-	local url="$1" out="$2" label="${3:-download}" expected="${4:-}"
+	local url="$1" out="$2" label="${3:-download}" expected="${4:-}" quiet_unsigned="${5:-}"
 	curl --proto '=https' --proto-redir '=https' -fL \
 		--connect-timeout 15 --retry 3 --retry-delay 2 "$url" -o "$out" || return 1
 	if [ -n "$expected" ]; then
@@ -1927,7 +1927,10 @@ download_and_verify() {
 		return 2
 	fi
 	rm -f "$sidecar"
-	log_warn "$(L "No published signature for $label; continuing unverified." \
+	# Some artefacts are served as raw repo files that never publish a sidecar
+	# (e.g. CloudRedirect's hook). Callers pass a non-empty 5th argument to keep
+	# that expected, permanent case quiet instead of warning on every run.
+	[ -n "$quiet_unsigned" ] || log_warn "$(L "No published signature for $label; continuing unverified." \
 	             "Sem assinatura publicada para $label; continuando sem verificação.")"
 	return 0
 }
@@ -2501,13 +2504,13 @@ install_cloudredirect_so() {
 	# The .so is LD_PRELOAD'ed into the Steam process, so it is the highest-value
 	# artefact in the pipeline; it must not be the one download that skips the
 	# protocol pinning and the sidecar check.
-	if ! download_and_verify "$CR_SO_URL" "$so" "CloudRedirect"; then
+	if ! download_and_verify "$CR_SO_URL" "$so" "CloudRedirect" "" quiet; then
 		log_warn "$(L "Download of cloud_redirect.so failed; skipping cloud saves." \
 		             "Falha ao baixar cloud_redirect.so; pulando cloud saves.")"
 		return 1
 	fi
 	log_info "$(L "Downloading cloud_redirect_cli" "Baixando cloud_redirect_cli")"
-	if ! download_and_verify "$CR_CLI_URL" "$cli" "CloudRedirect CLI"; then
+	if ! download_and_verify "$CR_CLI_URL" "$cli" "CloudRedirect CLI" "" quiet; then
 		log_warn "$(L "Download of cloud_redirect_cli failed; skipping cloud saves." \
 		             "Falha ao baixar cloud_redirect_cli; pulando cloud saves.")"
 		return 1
