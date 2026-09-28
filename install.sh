@@ -547,8 +547,8 @@ check_not_root() {
 
 check_arch() {
 	if [ "$(uname -m)" != "x86_64" ]; then
-		fail "$(L "Unsupported architecture: $(uname -m). Only x86_64 is supported." \
-		          "Arquitetura não suportada: $(uname -m). Apenas x86_64 é suportado.")"
+		log_warn "$(L "Unsupported architecture: $(uname -m). Only x86_64 is officially supported. Continuing anyway, but please do not ask for support for this architecture." \
+		          "Arquitetura não suportada: $(uname -m). Apenas x86_64 é oficialmente suportado. Continuando mesmo assim, mas por favor não solicite suporte para esta arquitetura.")"
 	fi
 	log_success "$(L "Architecture x86_64 OK" "Arquitetura x86_64 OK")"
 }
