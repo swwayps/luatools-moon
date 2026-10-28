@@ -8971,7 +8971,7 @@
     }
 
     // Store Header Button Logic (always visible)
-    const headerContainer = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
+    const headerContainer = document.querySelector('div[role="navigation"][aria-label]');
     if (
       headerContainer &&
       !document.querySelector(".luatools-header-button")
