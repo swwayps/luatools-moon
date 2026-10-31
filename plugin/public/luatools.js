@@ -8961,6 +8961,7 @@
       window.__LuaToolsRestartInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
+      window.__LuaToolsHeaderRetries = 0;
       window.__LuaToolsManageInserted = false;
       window.__LuaToolsPresenceCheckInFlight = false;
       window.__LuaToolsPresenceCheckAppId = undefined;
@@ -8970,8 +8971,29 @@
       });
     }
 
+    // The SPA header renders after this one-shot pass, and checkUrlChange
+    // only re-fires on URL changes — retry until the container shows up.
+    if (
+      !window.__LuaToolsHeaderInserted &&
+      (window.__LuaToolsHeaderRetries || 0) < 15
+    ) {
+      window.__LuaToolsHeaderRetries =
+        (window.__LuaToolsHeaderRetries || 0) + 1;
+      setTimeout(addLuaToolsButton, 1000);
+    }
+
     // Store Header Button Logic (always visible)
-    const headerContainer = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
+    // Steam regenerates obfuscated header classes on client updates; resolve
+    // the container from stable anchors instead. The wishlist link's parent
+    // is the header icon group (the icon's original spot); the semantic nav
+    // panel is a wider fallback. Legacy class kept first for older clients.
+    const headerContainer =
+      document.querySelector("._1wn1lBlAzl3HMRqS1llwie") ||
+      (function () {
+        var wish = document.querySelector('a[href*="/wishlist"]');
+        return wish && wish.parentElement ? wish.parentElement : null;
+      })() ||
+      document.querySelector('div[role="navigation"][aria-label]');
     if (
       headerContainer &&
       !document.querySelector(".luatools-header-button")
@@ -10838,6 +10860,7 @@
       window.__LuaToolsRestartInserted = false;
       window.__LuaToolsIconInserted = false;
       window.__LuaToolsHeaderInserted = false;
+      window.__LuaToolsHeaderRetries = 0;
       window.__LuaToolsManageInserted = false;
 
       window.__LuaToolsPresenceCheckInFlight = false;
