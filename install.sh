@@ -1491,12 +1491,9 @@ cleanup_previous_install() {
 	# Lumen replaces Millennium. Crucially, Millennium forces the Steam
 	# webhelper onto --remote-debugging-pipe, which keeps the CEF port 8080
 	# CLOSED — and Lumen attaches via that port. So a pre-existing Millennium
-	# install would BLOCK Lumen. Remove the whole framework here (not just the
-	# old plugin dir handled above) so 8080 is free for Lumen.
-	# Keep it as user's request if arguement --keep-millennium is passed. 
-	if [ "${OPT_KEEP_MILLENNIUM:-0}" != 1 ]; then
-		remove_millennium_framework
-	fi
+	# install would BLOCK Lumen. Always remove the framework; --keep-millennium
+	# only preserves the user's settings folder.
+	remove_millennium_framework "${OPT_KEEP_MILLENNIUM:-0}"
 	
 
 	log_success "$(L "Previous installation cleaned up" "Instalação anterior limpa")"
@@ -1504,20 +1501,29 @@ cleanup_previous_install() {
 
 # Remove an officially-installed Millennium framework (steambrew.app). Mirrors
 # uninstall.sh::uninstall_millennium. Millennium and Lumen are mutually
-# exclusive over Steam's single CEF DevTools endpoint, so Lumen requires
-# Millennium to be gone.
+# exclusive over Steam's single CEF DevTools endpoint, so the loader always has
+# to go. $1 = 1 keeps the user's settings/data folders only (the same thing
+# --keep-millennium promises).
 remove_millennium_framework() {
+	local keep_config="${1:-0}"
 	local sudo_cmd; sudo_cmd="$(sudo_prefix)"
 	local xdg_config="${XDG_CONFIG_HOME:-$HOME/.config}/millennium"
 	local xdg_data="${XDG_DATA_HOME:-$HOME/.local/share}/millennium"
+	local legacy="$HOME/.millennium"
 	local steam_root="$HOME/.steam/steam"
 
-	# Anything to do? (user dirs or system dirs present, or injected symlinks)
-	if [ ! -d "$xdg_config" ] && [ ! -d "$xdg_data" ] \
-	   && [ ! -d /usr/lib/millennium ] && [ ! -d /usr/share/millennium ] \
-	   && [ ! -L "$steam_root/ubuntu12_64/libmillennium_hhx64.so" ]; then
-		return 0
+	local present=0
+	if [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ] \
+	   || [ -L "$steam_root/ubuntu12_64/libmillennium_hhx64.so" ] \
+	   || [ -L "$steam_root/ubuntu12_32/libmillennium_hhx32.so" ] \
+	   || [ -d "$steam_root/millennium" ]; then
+		present=1
 	fi
+	if [ "$keep_config" != 1 ] \
+	   && { [ -d "$xdg_config" ] || [ -d "$xdg_data" ] || [ -d "$legacy" ]; }; then
+		present=1
+	fi
+	[ "$present" = 1 ] || return 0
 
 	log_step "$(L "Removing existing Millennium (replaced by Lumen)" \
 	             "Removendo Millennium existente (substituído pelo Lumen)")"
@@ -1527,7 +1533,8 @@ remove_millennium_framework() {
 	for link in \
 		"$steam_root/ubuntu12_32/libXtst.so.6" \
 		"$steam_root/ubuntu12_64/libXtst.so.6" \
-		"$steam_root/ubuntu12_64/libmillennium_hhx64.so"; do
+		"$steam_root/ubuntu12_64/libmillennium_hhx64.so" \
+		"$steam_root/ubuntu12_32/libmillennium_hhx32.so"; do
 		if [ -L "$link" ]; then
 			target="$(readlink "$link" 2>/dev/null || true)"
 			case "$target" in
@@ -1537,8 +1544,13 @@ remove_millennium_framework() {
 		fi
 	done
 
-	# User-side dirs (themes, plugins, config.json).
-	rm -rf "$xdg_config" "$xdg_data" 2>/dev/null || true
+	# User-side dirs (themes, plugins, config.json). Settings can be kept.
+	if [ "$keep_config" = 1 ]; then
+		log_info "$(L "Keeping Millennium settings in $xdg_config and $xdg_data" \
+		             "Mantendo as configurações do Millennium em $xdg_config e $xdg_data")"
+	else
+		rm -rf "$xdg_config" "$xdg_data" "$legacy" 2>/dev/null || true
+	fi
 
 	# Millennium also drops a dir inside Steam's own install (themes, etc.).
 	rm -rf "$steam_root/millennium" 2>/dev/null || true
@@ -1552,6 +1564,17 @@ remove_millennium_framework() {
 			log_warn "$(L "sudo unavailable; remove /usr/lib/millennium manually so Lumen can attach" \
 			             "sudo indisponível; remova /usr/lib/millennium manualmente para o Lumen funcionar")"
 		fi
+	fi
+
+	# Be loud if anything survived: the install can finish, but without Lumen
+	# attaching there is no LuaTools UI at all - the exact "it installed but I
+	# don't see it" case.
+	if [ -L "$steam_root/ubuntu12_64/libmillennium_hhx64.so" ] \
+	   || [ -L "$steam_root/ubuntu12_32/libmillennium_hhx32.so" ] \
+	   || [ -d /usr/lib/millennium ] || [ -d /usr/share/millennium ]; then
+		log_warn "$(L "Millennium is still installed. Lumen cannot attach to Steam while it is there, so the LuaTools menu will not appear. Close Steam, remove the leftovers above, then run this installer again." \
+		             "O Millennium ainda está instalado. O Lumen não consegue se conectar ao Steam enquanto ele existir, então o menu do LuaTools não aparece. Feche o Steam, remova o que sobrou acima e rode o instalador de novo.")"
+		return 0
 	fi
 
 	log_success "$(L "Millennium removed (Steam re-extracts libXtst.so.6 on next launch)" \
@@ -2970,8 +2993,8 @@ $(L "Options" "Opções"):
                   "Instala apenas o slsteam-moon + Lumen (pula o plugin LuaTools).")
   --nolaunch   $(L "Do not auto-start Steam at the end of install." \
                   "Não inicia a Steam automaticamente ao final da instalação.")
-  --keep-millennium $(L "Do not remove millennium's config/data (Old luatools plugin is still removed)." \
-                  "Não remover os dados/configurações do Millennium (o plugin luatools antigo ainda será removido).")
+  --keep-millennium $(L "Only skip deleting Millennium's settings/data folders. The Millennium loader is still removed, because Lumen needs Steam's debug port that Millennium holds." \
+                  "Apenas não apaga as pastas de configurações/dados do Millennium. O loader do Millennium continua sendo removido, porque o Lumen precisa da porta de debug do Steam que o Millennium ocupa.")
   --slsteam-channel stable|beta
                $(L "Select the slsteam-moon update channel (default: stable)." \
                   "Seleciona o canal de atualização do slsteam-moon (padrão: stable).")
