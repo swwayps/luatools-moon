@@ -336,4 +336,44 @@ if (
   throw new Error("custom controls did not receive unique stable focus keys");
 }
 
+// The store header class is a build-specific hash. Keep finding the bar through
+// the search form and wishlist link when Steam renames it.
+const headerStart = source.indexOf("function findStoreHeader");
+const headerEnd = source.indexOf("function addLuaToolsButton", headerStart);
+if (headerStart < 0 || headerEnd < 0) {
+  throw new Error("store header lookup is missing");
+}
+if (!/const headerContainer = findStoreHeader\(\)/.test(source)) {
+  throw new Error("settings gear still uses the stale header selector");
+}
+const header = new FakeElement("div");
+const right = new FakeElement("div");
+const search = new FakeElement("form");
+search.setAttribute("role", "search");
+const wishlist = new FakeElement("a");
+wishlist.setAttribute("href", "https://store.steampowered.com/wishlist/");
+header.appendChild(right);
+right.appendChild(search);
+right.appendChild(wishlist);
+let knownHeader = null;
+const headerDocument = {
+  querySelector(selector) {
+    if (selector === "._1wn1lBlAzl3HMRqS1llwie") return knownHeader;
+    if (selector === 'form[role="search"]') return search;
+    if (selector === 'a[href*="/wishlist"]') return wishlist;
+    return null;
+  },
+};
+const findStoreHeader = new Function(
+  "document",
+  `${source.slice(headerStart, headerEnd)}\nreturn findStoreHeader;`,
+)(headerDocument);
+if (findStoreHeader() !== right) {
+  throw new Error("store header was not resolved from the search form");
+}
+knownHeader = new FakeElement("div");
+if (findStoreHeader() !== knownHeader) {
+  throw new Error("known store header selector was ignored");
+}
+
 console.log("ok - Gamescope store controls follow the new native interest layout");

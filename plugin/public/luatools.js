@@ -8944,6 +8944,24 @@
     backendLog("Inserted Remove via LuaTools + Fixes Menu header buttons");
   }
 
+  // Steam's store header class names are hashed and change between client
+  // builds, so the old single selector quietly stopped finding the bar after an
+  // update and the settings gear vanished. The search form and wishlist link are
+  // semantic, so their common ancestor is the header we want.
+  function findStoreHeader() {
+    const known = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
+    if (known) return known;
+    const search = document.querySelector('form[role="search"]');
+    const wishlist = document.querySelector('a[href*="/wishlist"]');
+    if (!search || !wishlist) return null;
+    const chain = new Set();
+    for (let el = search; el; el = el.parentElement) chain.add(el);
+    for (let el = wishlist; el; el = el.parentElement) {
+      if (chain.has(el)) return el;
+    }
+    return null;
+  }
+
   function addLuaToolsButton() {
     // Throttle to prevent blocking gamepad input
     const now = Date.now();
@@ -8971,7 +8989,7 @@
     }
 
     // Store Header Button Logic (always visible)
-    const headerContainer = document.querySelector("._1wn1lBlAzl3HMRqS1llwie");
+    const headerContainer = findStoreHeader();
     if (
       headerContainer &&
       !document.querySelector(".luatools-header-button")
